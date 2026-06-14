@@ -1,6 +1,6 @@
 # Project Context
 
-**Product:** Auspex (codename: FIP — Financial Insight Platform). MVP SaaS personal financial assistant: ingests market/regulatory/macro data daily, ranks equities by growth potential, tracks a user portfolio, and suggests buy/sell/hold actions. Advisory only — never executes trades or moves money.
+**Product:** Auspex — MVP SaaS personal financial assistant: ingests market/regulatory/macro data daily, ranks equities by growth potential, tracks a user portfolio, and suggests buy/sell/hold actions. Advisory only — never executes trades or moves money.
 
 ### Hard constraints
 - **Azure first-party services only** — no Databricks, Snowflake, Confluent.
@@ -58,13 +58,13 @@ Every connector extends `BaseConnector` (Python ABC): `fetch(since)` for source-
 Every per-user row carries `owner_user_sk`. The web API resolves the Entra principal and filters **every** query and mutation by it. No un-scoped data-access method exists — cross-user access is structurally impossible. Shared signal data (prices, filings, RAGS features) is not per-user.
 
 ### Naming conventions
-- Azure resources: `fip-{env}-{component}` (e.g., `fip-prod-func`)
+- Azure resources: `auspex-{env}-{component}` (e.g., `auspex-prod-func`)
 - Cosmos containers: `lower_snake`
 - Warehouse: `dim_*`, `fact_*`, `v_*` (views), `metric_weights` (config table)
 
 ### Repository layout
 ```
-fip/
+auspex/
   infra/        # Bicep: main.bicep + modules/ + params/{dev,prod}.json
   connectors/   # shared/base_connector.py + one folder per source
   fabric/       # notebooks/  pipelines/  warehouse/

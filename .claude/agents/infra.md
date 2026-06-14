@@ -15,19 +15,19 @@ You are a senior cloud infrastructure engineer implementing the Auspex platform 
 
 ## Resource naming
 
-Pattern: `fip-{env}-{component}` where `env` is `dev` or `prod`.
+Pattern: `auspex-{env}-{component}` where `env` is `dev` or `prod`.
 
-Examples: `fip-prod-func` (Function App), `fip-prod-kv` (Key Vault), `fip-prod-cosmos` (Cosmos DB), `fip-prod-search` (AI Search), `fip-prod-openai` (Azure OpenAI), `fip-prod-swa` (Static Web App), `fip-prod-wapi` (web API Function App).
+Examples: `auspex-prod-func` (Function App), `auspex-prod-kv` (Key Vault), `auspex-prod-cosmos` (Cosmos DB), `auspex-prod-search` (AI Search), `auspex-prod-openai` (Azure OpenAI), `auspex-prod-swa` (Static Web App), `auspex-prod-wapi` (web API Function App).
 
 ## Resource groups
 
 | RG | Contains |
 |----|----------|
-| `fip-{env}-shared` | Key Vault, Log Analytics workspace, Application Insights, Cosmos DB |
-| `fip-{env}-ingest` | Ingestion Function App (Flex Consumption), Storage Account (Functions host) |
-| `fip-{env}-data` | Fabric Capacity (F2, pausable), Fabric Workspace reference |
-| `fip-{env}-ai` | Azure AI Search, Azure OpenAI |
-| `fip-{env}-web` | Static Web App, Web API Function App |
+| `auspex-{env}-shared` | Key Vault, Log Analytics workspace, Application Insights, Cosmos DB |
+| `auspex-{env}-ingest` | Ingestion Function App (Flex Consumption), Storage Account (Functions host) |
+| `auspex-{env}-data` | Fabric Capacity (F2, pausable), Fabric Workspace reference |
+| `auspex-{env}-ai` | Azure AI Search, Azure OpenAI |
+| `auspex-{env}-web` | Static Web App, Web API Function App |
 
 ## Bicep structure
 
@@ -61,12 +61,12 @@ Each module is self-contained and idempotent. `main.bicep` wires outputs (e.g., 
 
 Function Apps read these via Key Vault references in app settings:
 ```
-@Microsoft.KeyVault(VaultName=fip-prod-kv;SecretName=FRED-API-KEY)
+@Microsoft.KeyVault(VaultName=auspex-prod-kv;SecretName=FRED-API-KEY)
 ```
 
 ## Cosmos DB (control plane)
 
-Serverless tier. Three containers, all in `fip-{env}-cosmos`:
+Serverless tier. Three containers, all in `auspex-{env}-cosmos`:
 - `sources` — partition key: `/source_id`
 - `watermarks` — partition key: `/source_id`
 - `runs` — partition key: `/source_id`
@@ -76,9 +76,9 @@ Managed identity of the ingestion Function App gets `Cosmos DB Built-in Data Con
 
 ## Function Apps
 
-**Ingestion** (`fip-{env}-func`): Flex Consumption plan. One Function App for all source connectors + the capacity scheduler. HTTP trigger per connector (invoked by Fabric pipeline); Timer trigger for the capacity scheduler.
+**Ingestion** (`auspex-{env}-func`): Flex Consumption plan. One Function App for all source connectors + the capacity scheduler. HTTP trigger per connector (invoked by Fabric pipeline); Timer trigger for the capacity scheduler.
 
-**Web API** (`fip-{env}-wapi`): separate Function App, Flex Consumption. Triggered by HTTPS only. Entra External ID auth configured at the Function App level.
+**Web API** (`auspex-{env}-wapi`): separate Function App, Flex Consumption. Triggered by HTTPS only. Entra External ID auth configured at the Function App level.
 
 Both Function Apps:
 - System-assigned managed identity
@@ -100,7 +100,7 @@ Timer: `0 55 3 * * *` (UTC, = 04:55 CET / 03:55 CEST — runs before the 05:00 C
 
 ## Observability
 
-Log Analytics workspace + Application Insights in `fip-{env}-shared`. All Function Apps, Fabric pipelines, and the web API stream to the same App Insights instance.
+Log Analytics workspace + Application Insights in `auspex-{env}-shared`. All Function Apps, Fabric pipelines, and the web API stream to the same App Insights instance.
 
 Key custom metrics to emit:
 - Per-source: `records_in`, `latency_ms`, `error_rate`, `quarantine_rate`, `freshness_lag_minutes`
