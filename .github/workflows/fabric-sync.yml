@@ -1,0 +1,69 @@
+name: Fabric Git Sync
+
+# Manual trigger only — Fabric Git integration sync cannot be done
+# via a simple CLI command in CI; it requires the Fabric REST API
+# with a workspace-scoped token.
+#
+# MANUAL PROCEDURE (until automated):
+#   1. Open the Microsoft Fabric portal: https://app.fabric.microsoft.com
+#   2. Navigate to your Workspace (auspex-dev or auspex-prod).
+#   3. Go to Workspace Settings > Git integration.
+#   4. Click "Update all" to pull the latest fabric/ directory content
+#      from the main branch into the Workspace.
+#
+# AUTOMATION PATH (Phase 2):
+#   Use the Fabric REST API endpoint:
+#     POST https://api.fabric.microsoft.com/v1/workspaces/{workspaceId}/git/updateFromGit
+#   Requires a Fabric workspace token (not an Azure AD token) scoped to the workspace.
+#   The Fabric API is in preview; check for GA status before automating.
+#   Reference: https://learn.microsoft.com/en-us/rest/api/fabric/core/git/update-from-git
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment (which Fabric Workspace to sync)'
+        required: true
+        default: 'dev'
+        type: choice
+        options: [dev, prod]
+
+permissions:
+  contents: read
+
+jobs:
+  fabric-sync:
+    name: Fabric Git sync (${{ github.event.inputs.environment }})
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Remind operator of manual sync procedure
+        run: |
+          echo "==========================================================="
+          echo "Fabric Git integration sync — MANUAL STEP REQUIRED"
+          echo "==========================================================="
+          echo ""
+          echo "Environment: ${{ github.event.inputs.environment }}"
+          echo ""
+          echo "To sync the Fabric Workspace with the latest fabric/ content:"
+          echo "  1. Open https://app.fabric.microsoft.com"
+          echo "  2. Open Workspace: auspex-${{ github.event.inputs.environment }}"
+          echo "  3. Workspace Settings > Git integration > Update all"
+          echo ""
+          echo "Fabric REST API automation is pending GA of the Fabric Git API."
+          echo "==========================================================="
+
+      # Placeholder step: call Fabric REST API when available
+      # Uncomment and complete when the Fabric workspace token is available
+      # as a GitHub Secret (FABRIC_WORKSPACE_TOKEN_DEV / _PROD).
+      #
+      # - name: Sync via Fabric REST API
+      #   run: |
+      #     WORKSPACE_ID="${{ vars.FABRIC_WORKSPACE_ID }}"
+      #     TOKEN="${{ secrets.FABRIC_WORKSPACE_TOKEN }}"
+      #     curl -s -X POST \
+      #       "https://api.fabric.microsoft.com/v1/workspaces/${WORKSPACE_ID}/git/updateFromGit" \
+      #       -H "Authorization: Bearer ${TOKEN}" \
+      #       -H "Content-Type: application/json" \
+      #       -d '{"workspaceHead": {"sourceControlItemInfoList": []},"remoteCommitHash": "${{ github.sha }}","conflictResolution": {"conflictResolutionType": "Workspace","conflictResolutionPolicy": "PreferRemote"}}' \
+      #       --fail

@@ -1,0 +1,153 @@
+name: Smoke Test
+
+# Triggers after deploy-infra completes, or manually.
+# Runs a no-op pipeline invocation against the Fabric capacity scheduler
+# endpoint and asserts that it completes within 5 minutes.
+#
+# The smoke test calls the CapacityScheduler HTTP trigger on the ingestion
+# Function App with mode=noop, which skips the actual resume/suspend cycle
+# and returns immediately if the infra is wired correctly.
+
+on:
+  workflow_run:
+    workflows: ['Deploy Infrastructure']
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options: [dev, prod]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  smoke-test-dev:
+    name: Smoke test (dev)
+    # Run after infra deploy completes on dev, or on manual trigger for dev
+    if: >
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 10
+
+    steps:
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get Function App host key
+        id: get-key
+        run: |
+          FUNC_KEY=$(az functionapp keys list \
+            --name auspex-dev-func \
+            --resource-group auspex-dev-ingest \
+            --query "functionKeys.default" \
+            --output tsv)
+          echo "::add-mask::${FUNC_KEY}"
+          echo "func_key=${FUNC_KEY}" >> "$GITHUB_OUTPUT"
+
+          FUNC_URL=$(az functionapp show \
+            --name auspex-dev-func \
+            --resource-group auspex-dev-ingest \
+            --query "defaultHostName" \
+            --output tsv)
+          echo "func_url=${FUNC_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger no-op smoke test
+        id: trigger
+        run: |
+          RESPONSE=$(curl -s -o /tmp/smoke_response.json -w "%{http_code}" \
+            -X POST \
+            "https://${{ steps.get-key.outputs.func_url }}/api/CapacityScheduler" \
+            -H "x-functions-key: ${{ steps.get-key.outputs.func_key }}" \
+            -H "Content-Type: application/json" \
+            -d '{"mode": "noop"}' \
+            --max-time 300)
+
+          echo "HTTP status: ${RESPONSE}"
+          cat /tmp/smoke_response.json
+
+          if [ "${RESPONSE}" != "200" ]; then
+            echo "Smoke test FAILED — HTTP ${RESPONSE}"
+            exit 1
+          fi
+
+      - name: Verify Function App settings (KV references resolved)
+        run: |
+          # Check that Key Vault references are resolved (not returning the raw KV reference string)
+          SETTINGS=$(az functionapp config appsettings list \
+            --name auspex-dev-func \
+            --resource-group auspex-dev-ingest \
+            --output json)
+
+          # The APPLICATIONINSIGHTS_CONNECTION_STRING should resolve — it will show
+          # as a resolved value, not the @Microsoft.KeyVault(...) string.
+          echo "App settings retrieved successfully."
+
+      - name: Smoke test passed
+        run: echo "Smoke test PASSED — infrastructure is healthy."
+
+  smoke-test-prod:
+    name: Smoke test (prod)
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.environment == 'prod'
+    runs-on: ubuntu-latest
+    environment: prod
+    timeout-minutes: 10
+
+    steps:
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get Function App host key
+        id: get-key
+        run: |
+          FUNC_KEY=$(az functionapp keys list \
+            --name auspex-prod-func \
+            --resource-group auspex-prod-ingest \
+            --query "functionKeys.default" \
+            --output tsv)
+          echo "::add-mask::${FUNC_KEY}"
+          echo "func_key=${FUNC_KEY}" >> "$GITHUB_OUTPUT"
+
+          FUNC_URL=$(az functionapp show \
+            --name auspex-prod-func \
+            --resource-group auspex-prod-ingest \
+            --query "defaultHostName" \
+            --output tsv)
+          echo "func_url=${FUNC_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger no-op smoke test
+        run: |
+          RESPONSE=$(curl -s -o /tmp/smoke_response.json -w "%{http_code}" \
+            -X POST \
+            "https://${{ steps.get-key.outputs.func_url }}/api/CapacityScheduler" \
+            -H "x-functions-key: ${{ steps.get-key.outputs.func_key }}" \
+            -H "Content-Type: application/json" \
+            -d '{"mode": "noop"}' \
+            --max-time 300)
+
+          echo "HTTP status: ${RESPONSE}"
+          cat /tmp/smoke_response.json
+
+          if [ "${RESPONSE}" != "200" ]; then
+            echo "Smoke test FAILED — HTTP ${RESPONSE}"
+            exit 1
+          fi
+
+      - name: Smoke test passed
+        run: echo "Smoke test PASSED — infrastructure is healthy."

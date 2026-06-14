@@ -1,0 +1,97 @@
+name: Deploy Function Apps
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'connectors/**'
+      - 'api/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options: [dev, prod]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-dev:
+    name: Deploy Functions to dev
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Azure Functions Core Tools
+        run: |
+          npm install -g azure-functions-core-tools@4 --unsafe-perm true
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Publish ingestion Function App (dev)
+        working-directory: connectors
+        run: |
+          func azure functionapp publish auspex-dev-func --python
+
+      - name: Publish web API Function App (dev)
+        working-directory: api
+        run: |
+          func azure functionapp publish auspex-dev-wapi --python
+
+  deploy-prod:
+    name: Deploy Functions to prod
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.environment == 'prod'
+    runs-on: ubuntu-latest
+    environment: prod
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Azure Functions Core Tools
+        run: |
+          npm install -g azure-functions-core-tools@4 --unsafe-perm true
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Publish ingestion Function App (prod)
+        working-directory: connectors
+        run: |
+          func azure functionapp publish auspex-prod-func --python
+
+      - name: Publish web API Function App (prod)
+        working-directory: api
+        run: |
+          func azure functionapp publish auspex-prod-wapi --python
