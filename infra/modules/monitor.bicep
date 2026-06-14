@@ -83,7 +83,7 @@ resource capacityCostGuardAlert 'Microsoft.Insights/scheduledQueryRules@2023-03-
   location: location
   properties: {
     displayName: 'Fabric capacity running > 4 hours'
-    description: 'Fires if the capacity scheduler has not emitted a suspend event within 4 hours of a resume event.'
+    description: 'Fires if CapacityResumed was seen in the last 5h but CapacitySuspended was not.'
     severity: 2
     enabled: true
     scopes: [appInsights.id]
@@ -94,15 +94,10 @@ resource capacityCostGuardAlert 'Microsoft.Insights/scheduledQueryRules@2023-03-
         {
           query: '''
 customEvents
-| where name == "CapacityResumed"
-| where timestamp > ago(5h)
-| join kind=leftanti (
-    customEvents
-    | where name == "CapacitySuspended"
-    | where timestamp > ago(5h)
-) on $left.timestamp < $right.timestamp
-| summarize count()
-| where count_ > 0
+| where name in ("CapacityResumed", "CapacitySuspended")
+| summarize resumed = countif(name == "CapacityResumed"), suspended = countif(name == "CapacitySuspended")
+| where resumed > 0 and suspended == 0
+| project count_ = 1
 '''
           timeAggregation: 'Count'
           operator: 'GreaterThanOrEqual'
