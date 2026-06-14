@@ -2,10 +2,8 @@
 // Used for both the ingestion Function App (auspex-{env}-func) and
 // the web API Function App (auspex-{env}-wapi).
 //
-// Region: Switzerland North — Flex Consumption is supported.
-//
-// Storage Account for the Functions host is created in the same resource group.
-// All secrets are wired as Key Vault references — no plaintext values in app settings.
+// Flex Consumption requires functionAppConfig on site creation (ARM API requirement).
+// Storage uses system-assigned managed identity (no shared keys).
 
 @description('Function App resource name (e.g. auspex-prod-func)')
 param appName string
@@ -28,9 +26,46 @@ param cosmosEndpoint string
 @description('Fabric capacity name (used in the scheduler; ingestion only)')
 param fabricCapacityName string = ''
 
-var storageAccountName = replace('${appName}st', '-', '')
+var storageAccountName = take(replace('${appName}st', '-', ''), 24)
+var deploymentContainerName = 'deploymentpackage'
 
-// Flex Consumption plan
+// ---------------------------------------------------------------------------
+// Storage account for the Functions host
+// ---------------------------------------------------------------------------
+
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
+  name: storageAccountName
+  location: location
+  sku: {
+    name: 'Standard_LRS'
+  }
+  kind: 'StorageV2'
+  properties: {
+    minimumTlsVersion: 'TLS1_2'
+    allowBlobPublicAccess: false
+    supportsHttpsTrafficOnly: true
+    allowSharedKeyAccess: false  // keyless — MI only
+  }
+}
+
+// Blob container for Flex Consumption deployment packages
+resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
+  parent: storageAccount
+  name: 'default'
+}
+
+resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobService
+  name: deploymentContainerName
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Flex Consumption hosting plan
+// ---------------------------------------------------------------------------
+
 resource hostingPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   name: '${appName}-plan'
   location: location
@@ -44,31 +79,11 @@ resource hostingPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   }
 }
 
-// Storage account for the Functions host (blobs, queues, tables)
-resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
-  name: storageAccountName
-  location: location
-  sku: {
-    name: 'Standard_LRS'
-  }
-  kind: 'StorageV2'
-  properties: {
-    minimumTlsVersion: 'TLS1_2'
-    allowBlobPublicAccess: false
-    supportsHttpsTrafficOnly: true
-  }
-}
+// ---------------------------------------------------------------------------
+// App settings
+// ---------------------------------------------------------------------------
 
-// Base app settings — common to both ingestion and web API
 var baseAppSettings = [
-  {
-    name: 'FUNCTIONS_WORKER_RUNTIME'
-    value: 'python'
-  }
-  {
-    name: 'PYTHON_VERSION'
-    value: '3.11'
-  }
   {
     name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
     value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=${appInsightsKvSecretName})'
@@ -81,9 +96,20 @@ var baseAppSettings = [
     name: 'AzureWebJobsStorage__accountName'
     value: storageAccountName
   }
+  {
+    name: 'AzureWebJobsStorage__blobServiceUri'
+    value: storageAccount.properties.primaryEndpoints.blob
+  }
+  {
+    name: 'AzureWebJobsStorage__queueServiceUri'
+    value: storageAccount.properties.primaryEndpoints.queue
+  }
+  {
+    name: 'AzureWebJobsStorage__tableServiceUri'
+    value: storageAccount.properties.primaryEndpoints.table
+  }
 ]
 
-// Additional settings for the ingestion Function App only
 var ingestionExtraSettings = isIngestion ? [
   {
     name: 'EDGAR_USER_AGENT'
@@ -109,6 +135,11 @@ var ingestionExtraSettings = isIngestion ? [
 
 var appSettings = concat(baseAppSettings, ingestionExtraSettings)
 
+// ---------------------------------------------------------------------------
+// Function App (Flex Consumption)
+// functionAppConfig is mandatory for Flex Consumption site creation.
+// ---------------------------------------------------------------------------
+
 resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   name: appName
   location: location
@@ -118,9 +149,27 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   }
   properties: {
     serverFarmId: hostingPlan.id
+    functionAppConfig: {
+      deployment: {
+        storage: {
+          type: 'blobContainer'
+          value: '${storageAccount.properties.primaryEndpoints.blob}${deploymentContainerName}'
+          authentication: {
+            type: 'SystemAssignedIdentity'
+          }
+        }
+      }
+      scaleAndConcurrency: {
+        maximumInstanceCount: 100
+        instanceMemoryMB: 2048
+      }
+      runtime: {
+        name: 'python'
+        version: '3.11'
+      }
+    }
     siteConfig: {
       appSettings: appSettings
-      linuxFxVersion: 'Python|3.11'
       http20Enabled: true
       minTlsVersion: '1.2'
       ftpsState: 'Disabled'
@@ -128,11 +177,16 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
     httpsOnly: true
     publicNetworkAccess: 'Enabled'
   }
+  dependsOn: [deploymentContainer]
 }
 
-// Grant the Function App's managed identity Storage Blob Data Owner on its own
-// storage account so Flex Consumption can manage its host storage without shared keys.
+// ---------------------------------------------------------------------------
+// RBAC — Function App MI needs access to its own storage (keyless)
+// ---------------------------------------------------------------------------
+
 var storageBlobDataOwnerRoleId = 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b'
+var storageQueueContributorRoleId = '974c5e8b-45b9-4653-ba55-5f855dd0fb88'
+var storageTableContributorRoleId = '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
 
 resource storageRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(storageAccount.id, functionApp.id, storageBlobDataOwnerRoleId)
@@ -143,11 +197,6 @@ resource storageRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-
     principalType: 'ServicePrincipal'
   }
 }
-
-// Also grant Storage Queue Data Contributor and Table Data Contributor
-// for Functions runtime internal queues and tables.
-var storageQueueContributorRoleId = '974c5e8b-45b9-4653-ba55-5f855dd0fb88'
-var storageTableContributorRoleId = '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
 
 resource queueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(storageAccount.id, functionApp.id, storageQueueContributorRoleId)
@@ -168,6 +217,10 @@ resource tableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01
     principalType: 'ServicePrincipal'
   }
 }
+
+// ---------------------------------------------------------------------------
+// Outputs
+// ---------------------------------------------------------------------------
 
 @description('Function App resource name')
 output functionAppName string = functionApp.name
