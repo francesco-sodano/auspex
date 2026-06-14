@@ -8,10 +8,7 @@
     "location": {
       "value": "switzerlandnorth"
     },
-    "fabricAdminUpn": {
-      "value": "frsodano_microsoft.com#EXT#@MngEnvMCAP325634.onmicrosoft.com"
-    },
-    "logRetentionDays": {
+"logRetentionDays": {
       "value": 90
     }
   }

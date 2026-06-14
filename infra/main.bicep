@@ -35,8 +35,10 @@ param env string
 @description('Primary region for all resources that support Switzerland North')
 param location string = 'switzerlandnorth'
 
-@description('UPN of the Fabric capacity administrator')
-param fabricAdminUpn string
+// fabricAdminUpn removed — Fabric capacity must be provisioned manually once
+// Microsoft Fabric is enabled for the tenant (admin.microsoft.com → Settings →
+// Org settings → Microsoft Fabric). See infra/modules/fabric.bicep for the
+// Bicep definition to use when ready.
 
 @description('Log Analytics retention in days (30 for dev, 90 for prod)')
 param logRetentionDays int = 30
@@ -169,20 +171,12 @@ module cosmos 'modules/cosmos.bicep' = {
 }
 
 // ---------------------------------------------------------------------------
-// Step 5: Fabric Capacity (data RG)
-// Needs ingest func principal ID for Contributor RBAC (resume/suspend).
+// Step 5: Fabric Capacity (data RG) — MANUAL STEP
+// Fabric capacity must be provisioned manually via the Azure portal once
+// Microsoft Fabric is enabled for the tenant. The Bicep module is in
+// infra/modules/fabric.bicep and can be re-added to this file when ready.
+// The auspex-{env}-data resource group is created above and will hold it.
 // ---------------------------------------------------------------------------
-
-module fabric 'modules/fabric.bicep' = {
-  name: 'fabric'
-  scope: rgData
-  params: {
-    env: env
-    location: location
-    fabricAdminUpn: fabricAdminUpn
-    ingestFuncPrincipalId: ingestFunc.outputs.principalId
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Step 6: AI Search (ai RG)
@@ -241,6 +235,5 @@ output webApiFuncName string = webApiFunc.outputs.functionAppName
 output searchEndpoint string = aiSearch.outputs.searchEndpoint
 output openAiEndpoint string = openAi.outputs.openAiEndpoint
 output swaHostname string = staticWebApp.outputs.defaultHostname
-output fabricCapacityResourceName string = fabric.outputs.capacityName
 
  
