@@ -242,3 +242,4 @@ output searchEndpoint string = aiSearch.outputs.searchEndpoint
 output openAiEndpoint string = openAi.outputs.openAiEndpoint
 output swaHostname string = staticWebApp.outputs.defaultHostname
 output fabricCapacityResourceName string = fabric.outputs.capacityName
+
