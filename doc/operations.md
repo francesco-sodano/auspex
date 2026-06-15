@@ -328,47 +328,29 @@ The `.py` files use `# COMMAND ----------` as a cell separator. Each block of co
 
 Each notebook reads optional pipeline parameters via `dbutils.widgets.get()` with a fallback default. You can set them directly in the notebook for a manual run, or leave the defaults.
 
-**For `nb_00_entity_resolution`** — one parameter:
+The notebooks read parameters via `dbutils.widgets.get()` with hardcoded fallback defaults, so **no configuration is required for a manual run** — just run them as-is.
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `edgar_user_agent` | `Auspex/1.0 auspex-bot@example.com` | SEC-required User-Agent header. Replace with your actual contact email. |
+If you want to change the date window or user-agent for a manual run, edit the values directly in the first cell of the notebook (the `_widget(...)` fallback values):
 
-To override for a manual run, add this as the **very first cell** (before all other cells) and mark it as a parameter cell:
-
+**`nb_00_entity_resolution`** — edit the fallback in the first cell:
 ```python
-edgar_user_agent = "Auspex/1.0 fsodano79@gmail.com"
+EDGAR_USER_AGENT = _widget("edgar_user_agent", "Auspex/1.0 fsodano79@gmail.com")
 ```
 
-Then right-click the cell → **Toggle parameter cell** (Fabric adds a `# Parameters` marker). When run from a pipeline, the pipeline overrides this value; when run manually, this value is used.
-
-**For `nb_01_form4_to_silver`** — three parameters:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `from_date` | 7 days ago | Start of the bronze window to process (`YYYY-MM-DD`) |
-| `to_date` | today | End of the window |
-| `edgar_user_agent` | `Auspex/1.0 auspex-bot@example.com` | As above |
-
-First cell (mark as parameter cell):
+**`nb_01_form4_to_silver`** — edit the fallbacks in the first cell:
 ```python
-from_date        = "2026-06-08"   # adjust as needed
-to_date          = "2026-06-15"
-edgar_user_agent = "Auspex/1.0 fsodano79@gmail.com"
+from_date        = _widget("from_date", "2026-06-08")   # change as needed
+to_date          = _widget("to_date",   "2026-06-15")
+EDGAR_USER_AGENT = _widget("edgar_user_agent", "Auspex/1.0 fsodano79@gmail.com")
 ```
 
-**For `nb_02_prices_to_silver`** — two parameters:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `from_date` | 7 days ago | Start of the bronze window |
-| `to_date` | today | End of the window |
-
-First cell (mark as parameter cell):
+**`nb_02_prices_to_silver`** — edit the fallbacks in the first cell:
 ```python
-from_date = "2026-06-08"
-to_date   = "2026-06-15"
+from_date = _widget("from_date", "2026-06-08")
+to_date   = _widget("to_date",   "2026-06-15")
 ```
+
+> **Pipeline integration (later):** when the Fabric Data Factory pipeline calls these notebooks, it passes values via **Base parameters** in the Notebook activity. To allow the pipeline to override a variable, mark the first cell as a parameter cell: hover over it → click **`···`** (More commands) → **Toggle parameter cell**. A grey **Parameters** badge appears on the cell. The pipeline then injects its values at runtime, overriding the fallback defaults.
 
 ---
 
