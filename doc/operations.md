@@ -279,34 +279,174 @@ Check the Fabric portal → `auspex_bronze` lakehouse → Files → `bronze/sec_
 
 ## E4 — Silver Transforms + Entity Resolution
 
-### 15. Import notebooks into Fabric
+Three PySpark notebooks transform raw bronze NDJSON into cleaned, deduplicated silver Delta tables.  
+They all use the `auspex_bronze` lakehouse as their default (reads `Files/bronze/…`, writes Delta tables to `Tables/`).
 
-The three E4 notebooks live in `fabric/notebooks/`. Import them into the `auspex-dev` workspace:
+---
 
-- Fabric portal → `auspex-dev` workspace → **+ New item** → **Notebook** → **Import**
-- Import `nb_00_entity_resolution.py`, `nb_01_form4_to_silver.py`, `nb_02_prices_to_silver.py`
-- For each notebook: **Add lakehouse** → select `auspex_bronze` → set as **Default**
+### 15. Create each notebook in Fabric
 
-### 16. Run notebooks in order
+Fabric notebooks are created in the portal and code is pasted cell by cell. The source files are in `fabric/notebooks/`. Repeat the following for each of the three notebooks.
+
+**Open the source file** in VS Code or any editor:
+```
+fabric/notebooks/nb_00_entity_resolution.py
+fabric/notebooks/nb_01_form4_to_silver.py
+fabric/notebooks/nb_02_prices_to_silver.py
+```
+
+**Create the notebook in Fabric:**
+
+1. Go to `https://app.fabric.microsoft.com` → `auspex-dev` workspace.
+2. Click **+ New item** → select **Notebook**.
+3. In the notebook header, click the default name (`Notebook 1`) and rename it to match the file name (e.g., `nb_00_entity_resolution`).
+
+**Add the lakehouse:**
+
+4. In the left-hand **Explorer** panel, click **Add lakehouse**.
+5. Select **Existing lakehouse** → choose `auspex_bronze` → click **Add**.
+6. Confirm `auspex_bronze` appears under **Lakehouses** with a house icon. It is now the default — `Files/` and `Tables/` relative paths in code resolve to it.
+
+**Paste the code (one cell per section):**
+
+The `.py` files use `# COMMAND ----------` as a cell separator. Each block of code between two separators becomes one notebook cell.
+
+7. In the notebook, click on the first empty code cell.
+8. Open the source `.py` file and copy everything from the top up to (but not including) the first `# COMMAND ----------` line. Paste it into the first cell.
+9. Click **+ Code** below the cell to add a new cell. Copy the next block (between the first and second `# COMMAND ----------` lines) and paste it.
+10. Repeat for every block. The number of cells equals the number of `# COMMAND ----------` separators plus one.
+
+> **Tip:** the `# COMMAND ----------` lines themselves are not pasted — they are the separator, not code.
+
+**Save:**
+
+11. Press **Ctrl+S** or click the save icon. The notebook is saved to the workspace.
+
+---
+
+### 16. Add notebook parameters
+
+Each notebook reads optional pipeline parameters via `dbutils.widgets.get()` with a fallback default. You can set them directly in the notebook for a manual run, or leave the defaults.
+
+**For `nb_00_entity_resolution`** — one parameter:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `edgar_user_agent` | `Auspex/1.0 auspex-bot@example.com` | SEC-required User-Agent header. Replace with your actual contact email. |
+
+To override for a manual run, add this as the **very first cell** (before all other cells) and mark it as a parameter cell:
+
+```python
+edgar_user_agent = "Auspex/1.0 fsodano79@gmail.com"
+```
+
+Then right-click the cell → **Toggle parameter cell** (Fabric adds a `# Parameters` marker). When run from a pipeline, the pipeline overrides this value; when run manually, this value is used.
+
+**For `nb_01_form4_to_silver`** — three parameters:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `from_date` | 7 days ago | Start of the bronze window to process (`YYYY-MM-DD`) |
+| `to_date` | today | End of the window |
+| `edgar_user_agent` | `Auspex/1.0 auspex-bot@example.com` | As above |
+
+First cell (mark as parameter cell):
+```python
+from_date        = "2026-06-08"   # adjust as needed
+to_date          = "2026-06-15"
+edgar_user_agent = "Auspex/1.0 fsodano79@gmail.com"
+```
+
+**For `nb_02_prices_to_silver`** — two parameters:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `from_date` | 7 days ago | Start of the bronze window |
+| `to_date` | today | End of the window |
+
+First cell (mark as parameter cell):
+```python
+from_date = "2026-06-08"
+to_date   = "2026-06-15"
+```
+
+---
+
+### 17. Run notebooks in order
+
+Run the notebooks one at a time from the Fabric portal. Click **Run all** in the toolbar of each notebook.
+
+**Order is mandatory:**
 
 ```
-nb_00_entity_resolution  → seeds security_master and initializes quarantine tables
-nb_01_form4_to_silver    → bronze sec_form4 → silver_insider_txn
-nb_02_prices_to_silver   → bronze prices_eod → silver_prices
+1. nb_00_entity_resolution   — seeds security_master; creates quarantine tables
+2. nb_01_form4_to_silver     — bronze sec_form4 → silver_insider_txn
+3. nb_02_prices_to_silver    — bronze prices_eod → silver_prices
 ```
 
-Pass the pipeline parameters `from_date` / `to_date` (default: last 7 days) and `edgar_user_agent` (your contact email per SEC requirement).
+`nb_01` is the slowest — it makes one EDGAR HTTP call per new Form 4 accession number to fetch the full filing XML (transaction amounts are not in the search index). For a 7-day backfill expect 3–5 minutes. Subsequent daily runs only fetch new filings; already-processed accession numbers are skipped automatically.
 
-### 17. Verify silver output
+Watch the cell outputs for progress messages like:
+```
+Fetched 10823 tickers from SEC
+security_master: 10823 rows
+Merged 4231 rows into silver_insider_txn
+Merged 21 rows into silver_prices
+```
 
-In the `auspex_bronze` SQL endpoint (or from a Fabric notebook):
+If a cell raises an error, read the traceback. Common issues:
+- **Table not found** — run `nb_00` first; it creates the control tables.
+- **No such file or directory** (`Files/bronze/…`) — the bronze lakehouse is not attached as default, or the date range has no data yet.
+- **403 from EDGAR** — rate limit; reduce the window or add a longer sleep.
+
+---
+
+### 18. Verify silver output
+
+Open the `auspex_bronze` SQL analytics endpoint (Fabric portal → `auspex_bronze` → **SQL analytics endpoint** tab) and run:
 
 ```sql
-SELECT COUNT(*) FROM silver_insider_txn;
-SELECT COUNT(*) FROM silver_prices;
-SELECT COUNT(*) FROM security_master;
-SELECT reason, COUNT(*) FROM silver_security_quarantine GROUP BY reason;
+-- Row counts
+SELECT 'security_master'          AS tbl, COUNT(*) AS rows FROM security_master
+UNION ALL
+SELECT 'silver_insider_txn',               COUNT(*)        FROM silver_insider_txn
+UNION ALL
+SELECT 'silver_prices',                    COUNT(*)        FROM silver_prices;
+
+-- Quarantine breakdown — should be dominated by NO_NONDERIVATIVE_TXNS (options-only filings, normal)
+SELECT reason, COUNT(*) AS n
+FROM silver_security_quarantine
+GROUP BY reason
+ORDER BY n DESC;
+
+-- PIT sanity: no knowledge_date in the future
+SELECT COUNT(*) AS violations
+FROM silver_insider_txn
+WHERE knowledge_date > CAST(GETDATE() AS DATE);
+
+-- Sample insider buys
+SELECT TOP 10
+    accession_no, issuer_ticker, issuer_name,
+    reporter_name, txn_code, is_buy,
+    shares, price, value_usd, event_date, knowledge_date
+FROM silver_insider_txn
+WHERE is_buy = 1
+ORDER BY event_date DESC;
+
+-- Sample prices
+SELECT TOP 10 symbol, date, close, volume, knowledge_date
+FROM silver_prices
+ORDER BY date DESC;
 ```
+
+Expected state after a successful E4 run:
+
+| Table | Expected rows |
+|---|---|
+| `security_master` | ~10 000 (all SEC-listed tickers) |
+| `silver_insider_txn` | Several thousand (7-day backfill of Form 4 filings) |
+| `silver_prices` | 3 rows × days (AAPL, MSFT, NVDA for the test window) |
+| `silver_security_quarantine` | Some rows, mostly `NO_NONDERIVATIVE_TXNS` (derivative-only filings — expected) |
 
 ---
 
