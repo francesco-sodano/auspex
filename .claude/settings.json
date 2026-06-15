@@ -1,3 +1,11 @@
 {
-  "enableAllProjectMcpServers": true
+  "enableAllProjectMcpServers": true,
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "PowerShell(*)",
+      "Write(*)",
+      "Edit(*)"
+    ]
+  }
 }
