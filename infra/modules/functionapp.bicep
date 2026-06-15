@@ -1,9 +1,13 @@
-// functionapp.bicep — Reusable module for Azure Functions (Flex Consumption plan)
+// functionapp.bicep — Reusable module for Azure Functions (Consumption Y1 plan)
 // Used for both the ingestion Function App (auspex-{env}-func) and
 // the web API Function App (auspex-{env}-wapi).
 //
-// Flex Consumption requires functionAppConfig on site creation (ARM API requirement).
-// Storage uses system-assigned managed identity (no shared keys).
+// Uses Consumption (Y1/Dynamic) rather than Flex Consumption.
+// allowSharedKeyAccess: true is required — Kudu's remote build uploads the squashfs
+// artifact to blob storage using the AzureWebJobsStorage connection string.
+// A policy exemption for MCAPSGovDeployPolicies/StorageAccount_DisableLocalAuth_Modify
+// must be in place on the ingest RG; see doc/operations.md.
+// Runtime uses AzureWebJobsStorage__credential=managedidentity (no key at runtime).
 
 @description('Function App resource name (e.g. auspex-prod-func)')
 param appName string
@@ -33,10 +37,9 @@ param onelakeWorkspaceId string = ''
 param onelakeLakehouseName string = 'auspex_bronze'
 
 var storageAccountName = take(replace('${appName}st', '-', ''), 24)
-var deploymentContainerName = 'deploymentpackage'
 
 // ---------------------------------------------------------------------------
-// Storage account for the Functions host
+// Storage account for the Functions host (keyless — MI only)
 // ---------------------------------------------------------------------------
 
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
@@ -50,26 +53,12 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     minimumTlsVersion: 'TLS1_2'
     allowBlobPublicAccess: false
     supportsHttpsTrafficOnly: true
-    allowSharedKeyAccess: false  // keyless — MI only
-  }
-}
-
-// Blob container for Flex Consumption deployment packages
-resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
-  parent: storageAccount
-  name: 'default'
-}
-
-resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
-  parent: blobService
-  name: deploymentContainerName
-  properties: {
-    publicAccess: 'None'
+    allowSharedKeyAccess: true
   }
 }
 
 // ---------------------------------------------------------------------------
-// Flex Consumption hosting plan
+// Consumption hosting plan
 // ---------------------------------------------------------------------------
 
 resource hostingPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
@@ -77,8 +66,8 @@ resource hostingPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   location: location
   kind: 'functionapp'
   sku: {
-    name: 'FC1'
-    tier: 'FlexConsumption'
+    name: 'Y1'
+    tier: 'Dynamic'
   }
   properties: {
     reserved: true // Linux
@@ -90,6 +79,14 @@ resource hostingPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
 // ---------------------------------------------------------------------------
 
 var baseAppSettings = [
+  {
+    name: 'FUNCTIONS_WORKER_RUNTIME'
+    value: 'python'
+  }
+  {
+    name: 'FUNCTIONS_EXTENSION_VERSION'
+    value: '~4'
+  }
   {
     name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
     value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=${appInsightsKvSecretName})'
@@ -103,16 +100,8 @@ var baseAppSettings = [
     value: storageAccountName
   }
   {
-    name: 'AzureWebJobsStorage__blobServiceUri'
-    value: storageAccount.properties.primaryEndpoints.blob
-  }
-  {
-    name: 'AzureWebJobsStorage__queueServiceUri'
-    value: storageAccount.properties.primaryEndpoints.queue
-  }
-  {
-    name: 'AzureWebJobsStorage__tableServiceUri'
-    value: storageAccount.properties.primaryEndpoints.table
+    name: 'AzureWebJobsStorage__credential'
+    value: 'managedidentity'
   }
 ]
 
@@ -150,8 +139,7 @@ var ingestionExtraSettings = isIngestion ? [
 var appSettings = concat(baseAppSettings, ingestionExtraSettings)
 
 // ---------------------------------------------------------------------------
-// Function App (Flex Consumption)
-// functionAppConfig is mandatory for Flex Consumption site creation.
+// Function App (Consumption Y1, Linux, Python 3.12)
 // ---------------------------------------------------------------------------
 
 resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
@@ -163,27 +151,9 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   }
   properties: {
     serverFarmId: hostingPlan.id
-    functionAppConfig: {
-      deployment: {
-        storage: {
-          type: 'blobContainer'
-          value: '${storageAccount.properties.primaryEndpoints.blob}${deploymentContainerName}'
-          authentication: {
-            type: 'SystemAssignedIdentity'
-          }
-        }
-      }
-      scaleAndConcurrency: {
-        maximumInstanceCount: 100
-        instanceMemoryMB: 2048
-      }
-      runtime: {
-        name: 'python'
-        version: '3.11'
-      }
-    }
     siteConfig: {
       appSettings: appSettings
+      linuxFxVersion: 'Python|3.12'
       http20Enabled: true
       minTlsVersion: '1.2'
       ftpsState: 'Disabled'
@@ -191,7 +161,6 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
     httpsOnly: true
     publicNetworkAccess: 'Enabled'
   }
-  dependsOn: [deploymentContainer]
 }
 
 // ---------------------------------------------------------------------------
