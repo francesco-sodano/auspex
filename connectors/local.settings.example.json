@@ -1,0 +1,14 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "COSMOS_ENDPOINT": "https://auspex-dev-cosmos.documents.azure.com:443/",
+    "ONELAKE_WORKSPACE_ID": "<fabric-workspace-guid>",
+    "ONELAKE_LAKEHOUSE_NAME": "auspex_bronze",
+    "EDGAR_USER_AGENT": "Auspex/1.0 your@email.com",
+    "ALPHAVANTAGE_API_KEY": "<key>",
+    "FMP_API_KEY": "<key>",
+    "FINNHUB_API_KEY": "<key>"
+  }
+}

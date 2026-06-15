@@ -3,17 +3,24 @@ from typing import Optional
 
 
 @dataclass
-class RunContext:
-    run_id: str
-    source_id: str
-
-
-@dataclass
 class Watermark:
     source_id: str
     last_event_ts: Optional[str] = None
     last_cursor: Optional[str] = None
     updated_at: Optional[str] = None
+
+
+@dataclass
+class Batch:
+    records: list
+    new_wm: Watermark
+    window: str  # deterministic string used in batch_id
+
+
+@dataclass
+class RunContext:
+    run_id: str
+    source_id: str
 
 
 @dataclass
