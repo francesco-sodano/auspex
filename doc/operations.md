@@ -134,10 +134,13 @@ Free account sign-ups:
 
 > `prices_eod` uses Alpha Vantage (`TIME_SERIES_DAILY`) rather than Finnhub — Finnhub's free tier does not include historical candle data.
 
-### 6. Create the Bronze Lakehouse in Fabric
+### 6. Create the Bronze and Silver Lakehouses in Fabric
 
 - Fabric portal → `auspex-dev` workspace → **+ New item** → **Lakehouse**
-- Name: `auspex_bronze`
+- Name: `auspex_bronze` — bronze Files layer (`Files/bronze/...`)
+- Repeat: **+ New item** → **Lakehouse** → Name: `auspex_silver` — silver Delta tables (E4+)
+
+> The E4 silver notebooks attach `auspex_bronze` as the default lakehouse (to read `Files/bronze/`) but write silver Delta tables to the **default Tables section**. If you want a separate silver lakehouse, update the notebook `saveAsTable` calls to use explicit ABFS paths.
 
 ### 7. Get the Fabric workspace GUID
 
@@ -271,6 +274,39 @@ Invoke-RestMethod `
 ```
 
 Check the Fabric portal → `auspex_bronze` lakehouse → Files → `bronze/sec_form4/` for the NDJSON output.
+
+---
+
+## E4 — Silver Transforms + Entity Resolution
+
+### 15. Import notebooks into Fabric
+
+The three E4 notebooks live in `fabric/notebooks/`. Import them into the `auspex-dev` workspace:
+
+- Fabric portal → `auspex-dev` workspace → **+ New item** → **Notebook** → **Import**
+- Import `nb_00_entity_resolution.py`, `nb_01_form4_to_silver.py`, `nb_02_prices_to_silver.py`
+- For each notebook: **Add lakehouse** → select `auspex_bronze` → set as **Default**
+
+### 16. Run notebooks in order
+
+```
+nb_00_entity_resolution  → seeds security_master and initializes quarantine tables
+nb_01_form4_to_silver    → bronze sec_form4 → silver_insider_txn
+nb_02_prices_to_silver   → bronze prices_eod → silver_prices
+```
+
+Pass the pipeline parameters `from_date` / `to_date` (default: last 7 days) and `edgar_user_agent` (your contact email per SEC requirement).
+
+### 17. Verify silver output
+
+In the `auspex_bronze` SQL endpoint (or from a Fabric notebook):
+
+```sql
+SELECT COUNT(*) FROM silver_insider_txn;
+SELECT COUNT(*) FROM silver_prices;
+SELECT COUNT(*) FROM security_master;
+SELECT reason, COUNT(*) FROM silver_security_quarantine GROUP BY reason;
+```
 
 ---
 
