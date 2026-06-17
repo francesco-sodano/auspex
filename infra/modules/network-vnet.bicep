@@ -27,9 +27,9 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
           addressPrefix: '10.0.1.0/24'
           delegations: [
             {
-              name: 'delegation-web-serverfarms'
+              name: 'delegation-app-environments'
               properties: {
-                serviceName: 'Microsoft.Web/serverFarms'
+                serviceName: 'Microsoft.App/environments'
               }
             }
           ]
@@ -42,9 +42,9 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
           addressPrefix: '10.0.2.0/24'
           delegations: [
             {
-              name: 'delegation-web-serverfarms'
+              name: 'delegation-app-environments'
               properties: {
-                serviceName: 'Microsoft.Web/serverFarms'
+                serviceName: 'Microsoft.App/environments'
               }
             }
           ]
