@@ -2,12 +2,8 @@
 // Used for both the ingestion Function App (auspex-{env}-func) and
 // the web API Function App (auspex-{env}-wapi).
 //
-// Uses Consumption (Y1/Dynamic) rather than Flex Consumption.
-// allowSharedKeyAccess: true is required — Kudu's remote build uploads the squashfs
-// artifact to blob storage using the AzureWebJobsStorage connection string.
-// A policy exemption for MCAPSGovDeployPolicies/StorageAccount_DisableLocalAuth_Modify
-// must be in place on the ingest RG; see doc/operations.md.
-// Runtime uses AzureWebJobsStorage__credential=managedidentity (no key at runtime).
+// Storage uses managed identity (no shared key). Policy WEBSITE_RUN_FROM_PACKAGE
+// deployment via portal blob upload does not require shared key access.
 
 @description('Function App resource name (e.g. auspex-prod-func)')
 param appName string
@@ -36,6 +32,12 @@ param onelakeWorkspaceId string = ''
 @description('Fabric Lakehouse name for bronze layer (ingestion only)')
 param onelakeLakehouseName string = 'auspex_bronze'
 
+@description('Subnet resource ID for VNet integration')
+param vnetIntegrationSubnetId string
+
+@description('Log Analytics workspace resource ID for diagnostic settings')
+param logAnalyticsWorkspaceId string
+
 var storageAccountName = take(replace('${appName}st', '-', ''), 24)
 
 // ---------------------------------------------------------------------------
@@ -53,7 +55,15 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     minimumTlsVersion: 'TLS1_2'
     allowBlobPublicAccess: false
     supportsHttpsTrafficOnly: true
-    allowSharedKeyAccess: true
+    // Shared key disabled — matches StorageAccount_DisableLocalAuth_Modify policy.
+    // Function App runtime uses MI via AzureWebJobsStorage__accountName + credential=managedidentity.
+    allowSharedKeyAccess: false
+    // Trusted service bypass allows the Functions runtime and Azure Monitor to reach storage.
+    // Private endpoint (created in network.bicep) handles data-plane access from within the VNet.
+    networkAcls: {
+      defaultAction: 'Deny'
+      bypass: 'AzureServices, Logging, Metrics'
+    }
   }
 }
 
@@ -160,6 +170,35 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
     }
     httpsOnly: true
     publicNetworkAccess: 'Enabled'
+    // Regional VNet integration — all outbound traffic routes through the VNet,
+    // enabling the Function App to reach private endpoints for Cosmos DB and Key Vault.
+    virtualNetworkSubnetId: vnetIntegrationSubnetId
+    vnetRouteAllEnabled: true
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic settings — stream FunctionAppLogs to Log Analytics
+// Fixes FunctionApps_DiagnosticSetting_Audit compliance finding.
+// ---------------------------------------------------------------------------
+
+resource diagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: 'diag-${appName}'
+  scope: functionApp
+  properties: {
+    workspaceId: logAnalyticsWorkspaceId
+    logs: [
+      {
+        category: 'FunctionAppLogs'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
   }
 }
 
@@ -216,3 +255,6 @@ output functionAppId string = functionApp.id
 
 @description('Storage account name for the Functions host')
 output storageAccountName string = storageAccount.name
+
+@description('Storage account resource ID (used by network module for private endpoint)')
+output storageAccountId string = storageAccount.id

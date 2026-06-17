@@ -51,9 +51,12 @@ resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
     ]
     enableAutomaticFailover: false
     enableMultipleWriteLocations: false
-    // Disable local auth — use managed identity only
-    disableLocalAuth: false
-    publicNetworkAccess: 'Enabled'
+    // Managed identity only — matches CosmosDB_LocalAuth_Modify policy effect
+    disableLocalAuth: true
+    // Private endpoint is the only access path; public internet is blocked.
+    // The private endpoint is created in network.bicep.
+    publicNetworkAccess: 'Disabled'
+    networkAclBypass: 'None'
   }
 }
 

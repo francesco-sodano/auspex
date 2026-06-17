@@ -31,9 +31,9 @@ resource openAiAccount 'Microsoft.CognitiveServices/accounts@2024-04-01-preview'
   properties: {
     customSubDomainName: openAiName
     publicNetworkAccess: 'Enabled'
-    // Disable local (API key) auth — managed identity only.
-    // Comment out disableLocalAuth if you need key-based access during initial setup.
-    disableLocalAuth: false
+    // Managed identity only — matches CognitiveServices_LocalAuth_Modify policy effect.
+    // publicNetworkAccess remains Enabled; private endpoint hardening is deferred to E10.
+    disableLocalAuth: true
   }
 }
 

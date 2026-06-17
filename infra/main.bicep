@@ -8,23 +8,23 @@
 //     --parameters @infra/params/dev.json
 //
 // Deployment order enforced by explicit dependsOn / output references:
-//   1. Resource groups (all five, in parallel)
-//   2. Monitor (Log Analytics + App Insights) — outputs App Insights connection string
-//   3. Ingestion Function App + Web API Function App (in parallel) — output principal IDs
-//   4. Key Vault — uses principal IDs for RBAC; stores App Insights connection string as secret
-//   5. Cosmos DB — uses principal IDs for data-plane RBAC
-//   6. Fabric Capacity — uses ingest func principal ID for Contributor RBAC
-//   7. AI Search — uses web API func principal ID for Search Index Data Reader RBAC
-//   8. Azure OpenAI — no cross-dependencies
-//   9. Static Web App — no cross-dependencies
+//   1.  Resource groups (all five, in parallel)
+//   1b. Network-VNet — VNet + subnets deployed immediately after RGs so subnet IDs
+//       exist before Function Apps configure VNet integration.
+//   2.  Monitor (Log Analytics + App Insights) — outputs App Insights connection string
+//   3.  Ingestion Function App + Web API Function App (in parallel, after monitor + network-vnet)
+//   4.  Key Vault — uses principal IDs for RBAC; stores App Insights connection string as secret
+//   5.  Cosmos DB — uses principal IDs for data-plane RBAC
+//   6.  Fabric Capacity — uses ingest func principal ID for Contributor RBAC (manual step)
+//   7.  AI Search — uses web API func principal ID for Search Index Data Reader RBAC
+//   8.  Azure OpenAI — no cross-dependencies
+//   9.  Static Web App — no cross-dependencies
+//  10.  Network — private DNS zones + private endpoints; deployed last because private
+//       endpoints require resource IDs from modules above. VNet ID flows from step 1b.
 //
 // Circular-dependency avoidance:
-//   The Function Apps need the Cosmos endpoint and Fabric capacity name as app settings,
-//   but Cosmos and Fabric need the Function App principal IDs for RBAC.
-//   We break the circle by computing these deterministic values as local variables
-//   (they are predictable from the naming pattern) rather than reading them from
-//   module outputs. ARM will still deploy them in the correct order via the RBAC
-//   dependencies, and the app settings will have the correct values.
+//   Cosmos endpoint / KV name / Fabric capacity name: computed as deterministic local
+//   variables so Function Apps don't need to wait for those module outputs.
 
 targetScope = 'subscription'
 
@@ -86,7 +86,20 @@ resource rgWeb 'Microsoft.Resources/resourceGroups@2024-03-01' = {
 }
 
 // ---------------------------------------------------------------------------
-// Step 1: Observability (shared RG)
+// Step 1b: VNet + subnets (shared RG) — must exist before Function Apps
+// ---------------------------------------------------------------------------
+
+module networkVnet 'modules/network-vnet.bicep' = {
+  name: 'networkVnet'
+  scope: rgShared
+  params: {
+    env: env
+    location: location
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Step 2: Observability (shared RG)
 // ---------------------------------------------------------------------------
 
 module monitor 'modules/monitor.bicep' = {
@@ -100,7 +113,7 @@ module monitor 'modules/monitor.bicep' = {
 }
 
 // ---------------------------------------------------------------------------
-// Step 2a: Ingestion Function App (ingest RG)
+// Step 3a: Ingestion Function App (ingest RG)
 // Deployed before Key Vault and Cosmos so their RBAC assignments can reference
 // this app's system-assigned managed identity principal ID.
 // ---------------------------------------------------------------------------
@@ -108,7 +121,7 @@ module monitor 'modules/monitor.bicep' = {
 module ingestFunc 'modules/functionapp.bicep' = {
   name: 'ingestFunc'
   scope: rgIngest
-  dependsOn: [monitor]
+  dependsOn: [monitor, networkVnet]
   params: {
     appName: 'auspex-${env}-func'
     location: location
@@ -116,23 +129,27 @@ module ingestFunc 'modules/functionapp.bicep' = {
     isIngestion: true
     cosmosEndpoint: cosmosEndpoint
     fabricCapacityName: fabricCapacityName
+    vnetIntegrationSubnetId: networkVnet.outputs.ingestSubnetId
+    logAnalyticsWorkspaceId: monitor.outputs.workspaceId
   }
 }
 
 // ---------------------------------------------------------------------------
-// Step 2b: Web API Function App (web RG)
+// Step 3b: Web API Function App (web RG)
 // ---------------------------------------------------------------------------
 
 module webApiFunc 'modules/functionapp.bicep' = {
   name: 'webApiFunc'
   scope: rgWeb
-  dependsOn: [monitor]
+  dependsOn: [monitor, networkVnet]
   params: {
     appName: 'auspex-${env}-wapi'
     location: location
     keyVaultName: kvName
     isIngestion: false
     cosmosEndpoint: cosmosEndpoint
+    vnetIntegrationSubnetId: networkVnet.outputs.wapiSubnetId
+    logAnalyticsWorkspaceId: monitor.outputs.workspaceId
   }
 }
 
@@ -219,6 +236,26 @@ module staticWebApp 'modules/staticwebapp.bicep' = {
   params: {
     env: env
     swaLocation: 'westeurope'
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Step 10: Network — private DNS zones + private endpoints (shared RG)
+// Deployed last: requires resource IDs from Cosmos DB, Key Vault, and both
+// Function App storage accounts. VNet ID comes from step 1b.
+// ---------------------------------------------------------------------------
+
+module network 'modules/network.bicep' = {
+  name: 'network'
+  scope: rgShared
+  params: {
+    env: env
+    location: location
+    vnetId: networkVnet.outputs.vnetId
+    cosmosAccountId: cosmos.outputs.accountId
+    kvId: keyVault.outputs.keyVaultId
+    storageFuncId: ingestFunc.outputs.storageAccountId
+    storageWapiId: webApiFunc.outputs.storageAccountId
   }
 }
 

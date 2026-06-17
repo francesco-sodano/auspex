@@ -43,10 +43,14 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     enableSoftDelete: true
     softDeleteRetentionInDays: 90
     enablePurgeProtection: true
-    publicNetworkAccess: 'Enabled'
+    // Function Apps reach Key Vault via private endpoint + private DNS zone.
+    // AzureServices bypass retained for ARM operations (e.g., Bicep secret writes
+    // during deployment from a Microsoft-hosted runner — a trusted service).
+    publicNetworkAccess: 'Disabled'
     networkAcls: {
       bypass: 'AzureServices'
-      defaultAction: 'Allow'
+      defaultAction: 'Deny'
+      virtualNetworkRules: []
     }
   }
 }
