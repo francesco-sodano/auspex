@@ -10,6 +10,9 @@ param location string
 @description('Log Analytics retention in days. Use 30 for dev, 90 for prod.')
 param retentionDays int
 
+@description('Email address for operational alerts (build failures, capacity events)')
+param alertEmailAddress string = 'auspex@auspex.ai'
+
 var workspaceName = 'auspex-${env}-law'
 var appInsightsName = 'auspex-${env}-ai'
 
@@ -38,6 +41,22 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
     IngestionMode: 'LogAnalytics'
     publicNetworkAccessForIngestion: 'Enabled'
     publicNetworkAccessForQuery: 'Enabled'
+  }
+}
+
+resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
+  name: 'auspex-${env}-ag'
+  location: 'global'
+  properties: {
+    groupShortName: 'auspex'
+    enabled: true
+    emailReceivers: [
+      {
+        name: 'ops-email'
+        emailAddress: alertEmailAddress
+        useCommonAlertSchema: true
+      }
+    ]
   }
 }
 
@@ -73,7 +92,9 @@ customMetrics
         }
       ]
     }
-    actions: {}
+    actions: {
+      actionGroups: [actionGroup.id]
+    }
   }
 }
 
@@ -109,9 +130,14 @@ customEvents
         }
       ]
     }
-    actions: {}
+    actions: {
+      actionGroups: [actionGroup.id]
+    }
   }
 }
+
+@description('Action group resource ID for alert notifications')
+output actionGroupId string = actionGroup.id
 
 @description('Resource ID of the Log Analytics workspace')
 output workspaceId string = logAnalyticsWorkspace.id

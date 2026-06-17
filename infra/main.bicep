@@ -168,6 +168,7 @@ module keyVault 'modules/keyvault.bicep' = {
     ingestFuncPrincipalId: ingestFunc.outputs.principalId
     webApiFuncPrincipalId: webApiFunc.outputs.principalId
     appInsightsConnectionString: monitor.outputs.appInsightsConnectionString
+    logAnalyticsWorkspaceId: monitor.outputs.workspaceId
   }
 }
 
@@ -184,6 +185,7 @@ module cosmos 'modules/cosmos.bicep' = {
     location: location
     ingestFuncPrincipalId: ingestFunc.outputs.principalId
     webApiFuncPrincipalId: webApiFunc.outputs.principalId
+    logAnalyticsWorkspaceId: monitor.outputs.workspaceId
   }
 }
 
@@ -207,6 +209,7 @@ module aiSearch 'modules/aisearch.bicep' = {
     env: env
     location: location
     webApiFuncPrincipalId: webApiFunc.outputs.principalId
+    logAnalyticsWorkspaceId: monitor.outputs.workspaceId
   }
 }
 
@@ -221,6 +224,7 @@ module openAi 'modules/openai.bicep' = {
   params: {
     env: env
     location: location
+    logAnalyticsWorkspaceId: monitor.outputs.workspaceId
   }
 }
 
@@ -256,6 +260,55 @@ module network 'modules/network.bicep' = {
     kvId: keyVault.outputs.keyVaultId
     storageFuncId: ingestFunc.outputs.storageAccountId
     storageWapiId: webApiFunc.outputs.storageAccountId
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Resource locks — CanNotDelete on all RGs in prod
+// ---------------------------------------------------------------------------
+
+resource rgSharedLock 'Microsoft.Authorization/locks@2020-05-01' = if (env == 'prod') {
+  name: 'lock-${rgShared.name}'
+  scope: rgShared
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Prevent accidental deletion of shared infrastructure'
+  }
+}
+
+resource rgIngestLock 'Microsoft.Authorization/locks@2020-05-01' = if (env == 'prod') {
+  name: 'lock-${rgIngest.name}'
+  scope: rgIngest
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Prevent accidental deletion of shared infrastructure'
+  }
+}
+
+resource rgDataLock 'Microsoft.Authorization/locks@2020-05-01' = if (env == 'prod') {
+  name: 'lock-${rgData.name}'
+  scope: rgData
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Prevent accidental deletion of shared infrastructure'
+  }
+}
+
+resource rgAiLock 'Microsoft.Authorization/locks@2020-05-01' = if (env == 'prod') {
+  name: 'lock-${rgAi.name}'
+  scope: rgAi
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Prevent accidental deletion of shared infrastructure'
+  }
+}
+
+resource rgWebLock 'Microsoft.Authorization/locks@2020-05-01' = if (env == 'prod') {
+  name: 'lock-${rgWeb.name}'
+  scope: rgWeb
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Prevent accidental deletion of shared infrastructure'
   }
 }
 

@@ -17,6 +17,9 @@ param location string
 @description('Principal ID of the web API Function App managed identity')
 param webApiFuncPrincipalId string
 
+@description('Log Analytics workspace resource ID for diagnostic settings')
+param logAnalyticsWorkspaceId string
+
 var searchServiceName = 'auspex-${env}-search'
 
 // Search Index Data Reader — allows querying indexes (not management)
@@ -36,15 +39,30 @@ resource searchService 'Microsoft.Search/searchServices@2024-03-01-preview' = {
     partitionCount: 1
     hostingMode: 'default'
     publicNetworkAccess: 'Enabled'
-    authOptions: {
-      // RBAC-only; disable API key auth for managed identity access.
-      // Note: 'aadOrApiKey' allows both; 'rbac' disables API keys entirely.
-      // Using aadOrApiKey for CI tooling compatibility; switch to rbac for hardening.
-      aadOrApiKey: {
-        aadAuthFailureMode: 'http401WithBearerChallenge'
-      }
-    }
+    // Managed identity only — disableLocalAuth: true disables API key auth entirely.
+    // authOptions is incompatible with disableLocalAuth and has been removed.
+    disableLocalAuth: true
     semanticSearch: 'free'
+  }
+}
+
+resource searchDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: 'diag-${searchServiceName}'
+  scope: searchService
+  properties: {
+    workspaceId: logAnalyticsWorkspaceId
+    logs: [
+      {
+        category: 'OperationLogs'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
   }
 }
 

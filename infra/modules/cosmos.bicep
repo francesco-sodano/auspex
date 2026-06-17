@@ -19,6 +19,9 @@ param ingestFuncPrincipalId string
 @description('Principal ID of the web API Function App managed identity')
 param webApiFuncPrincipalId string
 
+@description('Log Analytics workspace resource ID for diagnostic settings')
+param logAnalyticsWorkspaceId string
+
 var accountName = 'auspex-${env}-cosmos'
 var databaseName = 'auspex'
 
@@ -53,6 +56,7 @@ resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
     enableMultipleWriteLocations: false
     // Managed identity only — matches CosmosDB_LocalAuth_Modify policy effect
     disableLocalAuth: true
+    minimalTlsVersion: 'Tls12'
     // Private endpoint is the only access path; public internet is blocked.
     // The private endpoint is created in network.bicep.
     publicNetworkAccess: 'Disabled'
@@ -163,6 +167,34 @@ resource webApiFuncCosmosRole 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssi
     roleDefinitionId: '${cosmosAccount.id}/sqlRoleDefinitions/${cosmosDataReaderRoleId}'
     principalId: webApiFuncPrincipalId
     scope: cosmosAccount.id
+  }
+}
+
+resource cosmosDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: 'diag-${accountName}'
+  scope: cosmosAccount
+  properties: {
+    workspaceId: logAnalyticsWorkspaceId
+    logs: [
+      {
+        category: 'DataPlaneRequests'
+        enabled: true
+      }
+      {
+        category: 'QueryRuntimeStatistics'
+        enabled: true
+      }
+      {
+        category: 'ControlPlaneRequests'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'Requests'
+        enabled: true
+      }
+    ]
   }
 }
 

@@ -3,15 +3,17 @@
 // The VNet and subnets live in network-vnet.bicep (deployed before Function Apps).
 //
 // Private DNS zones (linked to VNet):
-//   privatelink.documents.azure.com   — Cosmos DB
-//   privatelink.blob.core.windows.net — Storage (both function app accounts)
-//   privatelink.vaultcore.azure.net   — Key Vault
+//   privatelink.documents.azure.com     — Cosmos DB
+//   privatelink.blob.core.windows.net   — Storage (both function app accounts)
+//   privatelink.queue.core.windows.net  — Storage queue (Functions timer triggers, host lock)
+//   privatelink.table.core.windows.net  — Storage table (Functions durable leases)
+//   privatelink.vaultcore.azure.net     — Key Vault
 //
 // Private endpoints (all in snet-private-endpoints):
 //   Cosmos DB → subresource Sql
 //   Key Vault → subresource vault
-//   Storage (ingest func) → subresource blob
-//   Storage (wapi func)   → subresource blob
+//   Storage (ingest func) → subresource blob, queue, table
+//   Storage (wapi func)   → subresource blob, queue, table
 
 @description('Environment name (dev or prod)')
 param env string
@@ -50,6 +52,16 @@ resource dnsZoneBlob 'Microsoft.Network/privateDnsZones@2020-06-01' = {
   location: 'global'
 }
 
+resource dnsZoneQueue 'Microsoft.Network/privateDnsZones@2020-06-01' = {
+  name: 'privatelink.queue.core.windows.net'
+  location: 'global'
+}
+
+resource dnsZoneTable 'Microsoft.Network/privateDnsZones@2020-06-01' = {
+  name: 'privatelink.table.core.windows.net'
+  location: 'global'
+}
+
 resource dnsZoneKv 'Microsoft.Network/privateDnsZones@2020-06-01' = {
   name: 'privatelink.vaultcore.azure.net'
   location: 'global'
@@ -72,6 +84,26 @@ resource dnsLinkCosmos 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@20
 resource dnsLinkBlob 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
   parent: dnsZoneBlob
   name: 'link-${env}-blob'
+  location: 'global'
+  properties: {
+    virtualNetwork: { id: vnetId }
+    registrationEnabled: false
+  }
+}
+
+resource dnsLinkQueue 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
+  parent: dnsZoneQueue
+  name: 'link-${env}-queue'
+  location: 'global'
+  properties: {
+    virtualNetwork: { id: vnetId }
+    registrationEnabled: false
+  }
+}
+
+resource dnsLinkTable 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
+  parent: dnsZoneTable
+  name: 'link-${env}-table'
   location: 'global'
   properties: {
     virtualNetwork: { id: vnetId }
@@ -235,6 +267,158 @@ resource peStorageWapiZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZo
         name: 'privatelink-blob-core-windows-net'
         properties: {
           privateDnsZoneId: dnsZoneBlob.id
+        }
+      }
+    ]
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Private endpoint — ingest Function App storage (subresource: queue)
+// ---------------------------------------------------------------------------
+
+resource peStorageFuncQueue 'Microsoft.Network/privateEndpoints@2023-11-01' = {
+  name: 'auspex-${env}-pe-stfunc-queue'
+  location: location
+  properties: {
+    subnet: {
+      id: peSubnetId
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'conn-stfunc-queue'
+        properties: {
+          privateLinkServiceId: storageFuncId
+          groupIds: ['queue']
+        }
+      }
+    ]
+  }
+}
+
+resource peStorageFuncQueueZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = {
+  parent: peStorageFuncQueue
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'privatelink-queue-core-windows-net'
+        properties: {
+          privateDnsZoneId: dnsZoneQueue.id
+        }
+      }
+    ]
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Private endpoint — ingest Function App storage (subresource: table)
+// ---------------------------------------------------------------------------
+
+resource peStorageFuncTable 'Microsoft.Network/privateEndpoints@2023-11-01' = {
+  name: 'auspex-${env}-pe-stfunc-table'
+  location: location
+  properties: {
+    subnet: {
+      id: peSubnetId
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'conn-stfunc-table'
+        properties: {
+          privateLinkServiceId: storageFuncId
+          groupIds: ['table']
+        }
+      }
+    ]
+  }
+}
+
+resource peStorageFuncTableZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = {
+  parent: peStorageFuncTable
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'privatelink-table-core-windows-net'
+        properties: {
+          privateDnsZoneId: dnsZoneTable.id
+        }
+      }
+    ]
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Private endpoint — web API Function App storage (subresource: queue)
+// ---------------------------------------------------------------------------
+
+resource peStorageWapiQueue 'Microsoft.Network/privateEndpoints@2023-11-01' = {
+  name: 'auspex-${env}-pe-stwapi-queue'
+  location: location
+  properties: {
+    subnet: {
+      id: peSubnetId
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'conn-stwapi-queue'
+        properties: {
+          privateLinkServiceId: storageWapiId
+          groupIds: ['queue']
+        }
+      }
+    ]
+  }
+}
+
+resource peStorageWapiQueueZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = {
+  parent: peStorageWapiQueue
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'privatelink-queue-core-windows-net'
+        properties: {
+          privateDnsZoneId: dnsZoneQueue.id
+        }
+      }
+    ]
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Private endpoint — web API Function App storage (subresource: table)
+// ---------------------------------------------------------------------------
+
+resource peStorageWapiTable 'Microsoft.Network/privateEndpoints@2023-11-01' = {
+  name: 'auspex-${env}-pe-stwapi-table'
+  location: location
+  properties: {
+    subnet: {
+      id: peSubnetId
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'conn-stwapi-table'
+        properties: {
+          privateLinkServiceId: storageWapiId
+          groupIds: ['table']
+        }
+      }
+    ]
+  }
+}
+
+resource peStorageWapiTableZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = {
+  parent: peStorageWapiTable
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'privatelink-table-core-windows-net'
+        properties: {
+          privateDnsZoneId: dnsZoneTable.id
         }
       }
     ]
