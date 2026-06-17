@@ -218,10 +218,6 @@ resource hostingPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
 
 var baseAppSettings = [
   {
-    name: 'FUNCTIONS_WORKER_RUNTIME'
-    value: 'python'
-  }
-  {
     name: 'FUNCTIONS_EXTENSION_VERSION'
     value: '~4'
   }
