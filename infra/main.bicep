@@ -121,7 +121,6 @@ module monitor 'modules/monitor.bicep' = {
 module ingestFunc 'modules/functionapp.bicep' = {
   name: 'ingestFunc'
   scope: rgIngest
-  dependsOn: [monitor, networkVnet]
   params: {
     appName: 'auspex-${env}-func'
     location: location
@@ -141,7 +140,6 @@ module ingestFunc 'modules/functionapp.bicep' = {
 module webApiFunc 'modules/functionapp.bicep' = {
   name: 'webApiFunc'
   scope: rgWeb
-  dependsOn: [monitor, networkVnet]
   params: {
     appName: 'auspex-${env}-wapi'
     location: location
@@ -265,51 +263,37 @@ module network 'modules/network.bicep' = {
 
 // ---------------------------------------------------------------------------
 // Resource locks — CanNotDelete on all RGs in prod
+// Must use modules: subscription-scope Bicep cannot deploy RG-scoped resources inline (BCP139).
 // ---------------------------------------------------------------------------
 
-resource rgSharedLock 'Microsoft.Authorization/locks@2020-05-01' = if (env == 'prod') {
-  name: 'lock-${rgShared.name}'
+module rgSharedLock 'modules/lock.bicep' = if (env == 'prod') {
+  name: 'rgSharedLock'
   scope: rgShared
-  properties: {
-    level: 'CanNotDelete'
-    notes: 'Prevent accidental deletion of shared infrastructure'
-  }
+  params: { rgName: rgShared.name }
 }
 
-resource rgIngestLock 'Microsoft.Authorization/locks@2020-05-01' = if (env == 'prod') {
-  name: 'lock-${rgIngest.name}'
+module rgIngestLock 'modules/lock.bicep' = if (env == 'prod') {
+  name: 'rgIngestLock'
   scope: rgIngest
-  properties: {
-    level: 'CanNotDelete'
-    notes: 'Prevent accidental deletion of shared infrastructure'
-  }
+  params: { rgName: rgIngest.name }
 }
 
-resource rgDataLock 'Microsoft.Authorization/locks@2020-05-01' = if (env == 'prod') {
-  name: 'lock-${rgData.name}'
+module rgDataLock 'modules/lock.bicep' = if (env == 'prod') {
+  name: 'rgDataLock'
   scope: rgData
-  properties: {
-    level: 'CanNotDelete'
-    notes: 'Prevent accidental deletion of shared infrastructure'
-  }
+  params: { rgName: rgData.name }
 }
 
-resource rgAiLock 'Microsoft.Authorization/locks@2020-05-01' = if (env == 'prod') {
-  name: 'lock-${rgAi.name}'
+module rgAiLock 'modules/lock.bicep' = if (env == 'prod') {
+  name: 'rgAiLock'
   scope: rgAi
-  properties: {
-    level: 'CanNotDelete'
-    notes: 'Prevent accidental deletion of shared infrastructure'
-  }
+  params: { rgName: rgAi.name }
 }
 
-resource rgWebLock 'Microsoft.Authorization/locks@2020-05-01' = if (env == 'prod') {
-  name: 'lock-${rgWeb.name}'
+module rgWebLock 'modules/lock.bicep' = if (env == 'prod') {
+  name: 'rgWebLock'
   scope: rgWeb
-  properties: {
-    level: 'CanNotDelete'
-    notes: 'Prevent accidental deletion of shared infrastructure'
-  }
+  params: { rgName: rgWeb.name }
 }
 
 // ---------------------------------------------------------------------------
