@@ -1,9 +1,10 @@
-// functionapp.bicep — Reusable module for Azure Functions (Consumption Y1 plan)
+// functionapp.bicep — Reusable module for Azure Functions (Flex Consumption plan)
 // Used for both the ingestion Function App (auspex-{env}-func) and
 // the web API Function App (auspex-{env}-wapi).
 //
-// Storage uses managed identity (no shared key). Policy WEBSITE_RUN_FROM_PACKAGE
-// deployment via portal blob upload does not require shared key access.
+// Storage uses managed identity (no shared key). Deployment packages are uploaded
+// to the 'deployments' blob container; the Function App reads them via its
+// system-assigned MI (SystemAssignedIdentity auth — no shared key required).
 
 @description('Function App resource name (e.g. auspex-prod-func)')
 param appName string
@@ -39,6 +40,7 @@ param vnetIntegrationSubnetId string
 param logAnalyticsWorkspaceId string
 
 var storageAccountName = take(replace('${appName}st', '-', ''), 24)
+var deploymentContainerName = 'deployments'
 
 // ---------------------------------------------------------------------------
 // Storage account for the Functions host (keyless — MI only)
@@ -181,7 +183,20 @@ resource tableDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = 
 }
 
 // ---------------------------------------------------------------------------
-// Consumption hosting plan
+// Deployment blob container — Flex Consumption reads the code package from here.
+// SystemAssignedIdentity auth means no shared key needed for deployment.
+// ---------------------------------------------------------------------------
+
+resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobService
+  name: deploymentContainerName
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Flex Consumption hosting plan
 // ---------------------------------------------------------------------------
 
 resource hostingPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
@@ -189,8 +204,8 @@ resource hostingPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   location: location
   kind: 'functionapp'
   sku: {
-    name: 'Y1'
-    tier: 'Dynamic'
+    name: 'FC1'
+    tier: 'FlexConsumption'
   }
   properties: {
     reserved: true // Linux
@@ -262,7 +277,7 @@ var ingestionExtraSettings = isIngestion ? [
 var appSettings = concat(baseAppSettings, ingestionExtraSettings)
 
 // ---------------------------------------------------------------------------
-// Function App (Consumption Y1, Linux, Python 3.12)
+// Function App (Flex Consumption, Linux, Python 3.12)
 // ---------------------------------------------------------------------------
 
 resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
@@ -276,17 +291,38 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
     serverFarmId: hostingPlan.id
     siteConfig: {
       appSettings: appSettings
-      linuxFxVersion: 'Python|3.12'
       http20Enabled: true
       minTlsVersion: '1.2'
       ftpsState: 'Disabled'
     }
     httpsOnly: true
     publicNetworkAccess: 'Enabled'
-    // Regional VNet integration — all outbound traffic routes through the VNet,
+    // VNet integration — all outbound traffic routes through the VNet,
     // enabling the Function App to reach private endpoints for Cosmos DB and Key Vault.
     virtualNetworkSubnetId: vnetIntegrationSubnetId
     vnetRouteAllEnabled: true
+    // Flex Consumption: runtime + deployment config.
+    // deploymentContainer.name reference creates implicit dependency so the
+    // container exists before the Function App configures it.
+    functionAppConfig: {
+      deployment: {
+        storage: {
+          type: 'blobContainer'
+          value: '${storageAccount.properties.primaryEndpoints.blob}${deploymentContainer.name}'
+          authentication: {
+            type: 'SystemAssignedIdentity'
+          }
+        }
+      }
+      scaleAndConcurrency: {
+        maximumInstanceCount: 100
+        instanceMemoryMB: 2048
+      }
+      runtime: {
+        name: 'python'
+        version: '3.12'
+      }
+    }
   }
 }
 
