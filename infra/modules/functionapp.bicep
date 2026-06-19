@@ -290,6 +290,10 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
       http20Enabled: true
       minTlsVersion: '1.2'
       ftpsState: 'Disabled'
+      cors: {
+        allowedOrigins: ['https://portal.azure.com']
+        supportCredentials: false
+      }
     }
     httpsOnly: true
     publicNetworkAccess: 'Enabled'
