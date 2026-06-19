@@ -8,9 +8,14 @@
     "location": {
       "value": "switzerlandnorth"
     },
-"logRetentionDays": {
+    "logRetentionDays": {
       "value": 30
+    },
+    "onelakeWorkspaceId": {
+      "value": "2036bed1-3b4a-4958-958e-fe9a3b11971c"
+    },
+    "onelakeLakehouseName": {
+      "value": "503baa23-d625-4281-83f6-d50b6f34cc5a"
     }
   }
 }
-
