@@ -532,6 +532,141 @@ Conclusion: E4 is operationally validated for the currently implemented E3 sourc
 
 ---
 
+## E5 — Gold Star Schema
+
+Current status: this guide validates the first E5 gold path for the implemented E4 sources (`sec_form4`, `prices_eod`). The notebook creates the gold table contract, loads dimensions/facts for current data, and creates empty forward-compatible fact tables for later E8 sources.
+
+### 19. Create the silver-to-gold notebook in Fabric
+
+Create or sync the notebook:
+
+```
+fabric/notebooks/nb_03_silver_to_gold.py
+```
+
+Attach it to the same `auspex_bronze` Lakehouse used by E4. It reads E4 Delta tables and writes gold Delta tables in the Lakehouse.
+
+Optional Warehouse promotion DDL lives in:
+
+```
+fabric/warehouse/01_dims.sql
+fabric/warehouse/02_facts.sql
+fabric/warehouse/03_fx.sql
+```
+
+These SQL files define the Fabric Warehouse contract for the same gold tables. The E5 notebook is the current manual validation path; Warehouse promotion is part of the later Fabric Git/deployment pipeline.
+
+### 20. Run E5 after E4 validation
+
+Run `nb_03_silver_to_gold` after all E4 notebooks have completed and E4 SQL checks have passed.
+
+Expected outputs include row counts for:
+
+```
+dim_security
+dim_date
+dim_source
+dim_entity
+fact_market_daily
+fact_insider_txn
+fact_institutional_holding
+fact_ownership_event
+fact_news_sentiment
+fact_contract_award
+fact_macro
+fact_fx_rate
+```
+
+For the current E3/E4 source set, only `fact_market_daily` and `fact_insider_txn` should be populated. The other fact tables should exist and usually have 0 rows until E8 sources are implemented.
+
+### 21. Verify gold output
+
+Open the `auspex_bronze` SQL analytics endpoint and run:
+
+```sql
+-- Core row counts
+SELECT 'dim_security' AS tbl, COUNT(*) AS rows FROM dim_security
+UNION ALL
+SELECT 'dim_date', COUNT(*) FROM dim_date
+UNION ALL
+SELECT 'dim_source', COUNT(*) FROM dim_source
+UNION ALL
+SELECT 'dim_entity', COUNT(*) FROM dim_entity
+UNION ALL
+SELECT 'fact_market_daily', COUNT(*) FROM fact_market_daily
+UNION ALL
+SELECT 'fact_insider_txn', COUNT(*) FROM fact_insider_txn;
+
+-- FK sanity: no market facts without dim_security
+SELECT COUNT(*) AS orphan_market_rows
+FROM fact_market_daily f
+LEFT JOIN dim_security s ON f.security_sk = s.security_sk
+WHERE s.security_sk IS NULL;
+
+-- FK sanity: no insider facts without dim_security
+SELECT COUNT(*) AS orphan_insider_rows
+FROM fact_insider_txn f
+LEFT JOIN dim_security s ON f.security_sk = s.security_sk
+WHERE s.security_sk IS NULL;
+
+-- PIT sanity: fact PIT columns must be populated
+SELECT 'fact_market_daily' AS tbl, COUNT(*) AS missing_pit_rows
+FROM fact_market_daily
+WHERE event_date IS NULL OR knowledge_date IS NULL
+UNION ALL
+SELECT 'fact_insider_txn', COUNT(*)
+FROM fact_insider_txn
+WHERE event_date IS NULL OR knowledge_date IS NULL;
+
+-- Idempotency sanity: no duplicate market grain
+SELECT security_sk, date_sk, COUNT(*) AS duplicate_count
+FROM fact_market_daily
+GROUP BY security_sk, date_sk
+HAVING COUNT(*) > 1;
+
+-- Idempotency sanity: no duplicate insider transaction grain
+SELECT accession_no, line_no, COUNT(*) AS duplicate_count
+FROM fact_insider_txn
+GROUP BY accession_no, line_no
+HAVING COUNT(*) > 1;
+```
+
+Expected results:
+
+| Check | Expected |
+|---|---|
+| `fact_market_daily` rows | equals `silver_prices` rows for the current E4 run |
+| `fact_insider_txn` rows | equals `silver_insider_txn` rows for the current E4 run |
+| orphan market rows | 0 |
+| orphan insider rows | 0 |
+| missing PIT rows | 0 |
+| duplicate market grain | no rows |
+| duplicate insider grain | no rows |
+
+Replay check: rerun `nb_03_silver_to_gold` on the same E4 data and rerun the duplicate-grain SQL. Row counts should converge and duplicate checks should still return no rows.
+
+Validated dev run (2026-06-27):
+
+| Check | Result |
+|---|---:|
+| `dim_security` | 10433 rows |
+| `dim_date` | 64 rows |
+| `dim_source` | 2 rows |
+| `dim_entity` | 2014 rows |
+| `fact_market_daily` | 3996 rows |
+| `fact_insider_txn` | 4608 rows |
+| future E8 fact tables | 0 rows each |
+| orphan market rows | 0 rows |
+| orphan insider rows | 0 rows |
+| missing PIT rows | 0 rows |
+| duplicate `fact_market_daily` grain | no rows |
+| duplicate `fact_insider_txn` grain | no rows |
+| duplicate `dim_entity.entity_natural_id` | no rows |
+
+Conclusion: E5 is operationally validated for the currently implemented E4 source set (`sec_form4`, `prices_eod`). Later E8 sources must populate the empty forward-compatible fact tables through source-specific silver/gold loaders.
+
+---
+
 ## Future CI/CD — GitHub Actions (OIDC, E10)
 
 GitHub Actions are **not used for the current E1-E4 deployment path**. The supported deployment path is the manual/local procedure above. The workflows in `.github/workflows/` are future E10 automation and should remain disabled until the manual deployment and smoke checks are stable.

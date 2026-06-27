@@ -45,6 +45,8 @@ class E4NotebookContractTests(unittest.TestCase):
         self.assertIn("TXN_PARSE_FAILED", nb)
         self.assertIn("terminal_quarantine_set", nb)
         self.assertIn("NO_NONDERIVATIVE_TXNS", nb)
+        self.assertIn("PIT_MISSING", nb)
+        self.assertIn("Removed {legacy_bad} legacy silver_insider_txn", nb)
         self.assertIn("DeltaTable.forName(spark, \"silver_security_quarantine\")", nb)
         self.assertIn("natural_key", nb)
 

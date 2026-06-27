@@ -85,6 +85,12 @@ def _to_date(s):
         return None
 
 
+def _coerce_date(value):
+    if isinstance(value, date):
+        return value
+    return _to_date(value)
+
+
 def _merge_security_quarantine(rows: list[dict]) -> None:
     if not rows:
         return
@@ -178,16 +184,28 @@ spark.sql("""
 """)
 _ensure_columns("silver_insider_txn", {"security_sk": "security_sk BIGINT"})
 
+legacy_bad = (
+    spark.table("silver_insider_txn")
+    .filter(F.col("security_sk").isNull() | F.col("event_date").isNull() | F.col("knowledge_date").isNull())
+    .count()
+)
+if legacy_bad:
+    DeltaTable.forName(spark, "silver_insider_txn").delete(
+        "security_sk IS NULL OR event_date IS NULL OR knowledge_date IS NULL"
+    )
+    print(f"Removed {legacy_bad} legacy silver_insider_txn rows with missing security/PIT fields")
+
 # COMMAND ----------
 # --- Skip only already-resolved filings; reprocess legacy rows with missing security_sk ---
 done_set = {
     r.accession_no
     for r in (
-        spark.table("silver_insider_txn")
-        .filter(F.col("security_sk").isNotNull())
-        .select("accession_no")
-        .distinct()
-        .collect()
+        spark.sql("""
+            SELECT accession_no
+            FROM silver_insider_txn
+            GROUP BY accession_no
+            HAVING SUM(CASE WHEN security_sk IS NULL OR event_date IS NULL OR knowledge_date IS NULL THEN 1 ELSE 0 END) = 0
+        """).collect()
     )
 }
 terminal_quarantine_set = {
@@ -370,8 +388,8 @@ def _quarantine_row(meta: dict, reason: str, details: str | None = None, line_no
         "raw_identifier": meta["accession_no"],
         "reason": reason,
         "details": details,
-        "event_date": _to_date(meta.get("period_of_report")),
-        "knowledge_date": _to_date(meta.get("file_date")),
+        "event_date": _coerce_date(meta.get("event_date") or meta.get("period_of_report")),
+        "knowledge_date": _coerce_date(meta.get("knowledge_date") or meta.get("file_date")),
         "batch_id": meta.get("batch_id"),
         "quarantined_at": datetime.now(timezone.utc),
     }
@@ -433,9 +451,19 @@ for row in unresolved_txns:
         line_no=row.get("line_no"),
     ))
 
+pit_missing_txns = [row for row in resolved_txns if row.get("event_date") is None or row.get("knowledge_date") is None]
+for row in pit_missing_txns:
+    quarantine.append(_quarantine_row(
+        row,
+        "PIT_MISSING",
+        details=f"event_date={row.get('event_date')}; knowledge_date={row.get('knowledge_date')}",
+        line_no=row.get("line_no"),
+    ))
+resolved_txns = [row for row in resolved_txns if row.get("event_date") is not None and row.get("knowledge_date") is not None]
+
 print(
     f"Transactions parsed: {len(all_txns)} | "
-    f"resolved: {len(resolved_txns)} | unresolved: {len(unresolved_txns)} | "
+    f"resolved: {len(resolved_txns)} | unresolved: {len(unresolved_txns)} | pit_missing: {len(pit_missing_txns)} | "
     f"quarantine rows: {len(quarantine)}"
 )
 

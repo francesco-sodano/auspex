@@ -1302,7 +1302,9 @@ auspex/
 
 **E5 Gold star schema** — *dimensions + facts with PIT columns.*
 - *Design:* the §5.3 DDL — conformed dims (`dim_security/date/entity/source`) + fact tables, **each carrying `event_date` + `knowledge_date`**; idempotent `MERGE` loads on natural keys.
-- *Artifacts:* `fabric/warehouse/{01_dims.sql,02_facts.sql,03_fx.sql}`; `fabric/notebooks/nb_silver_to_gold`.
+- *Current implementation:* the reference E5 path creates the full gold table contract, loads `dim_date`, `dim_source`, `dim_entity`, `fact_market_daily`, and `fact_insider_txn` from the currently implemented E4 sources, and creates empty forward-compatible E8 fact tables (`fact_institutional_holding`, `fact_ownership_event`, `fact_news_sentiment`, `fact_contract_award`, `fact_macro`, `fact_fx_rate`). `dim_security` is reused as the conformed SCD2 security dimension from E4.
+- *Validated in Fabric (dev, 2026-06-27):* `nb_03_silver_to_gold` converged on replay with `dim_security=10433`, `dim_date=64`, `dim_source=2`, `dim_entity=2014`, `fact_market_daily=3996`, and `fact_insider_txn=4608`. Future E8 fact tables exist and are empty. SQL checks returned 0 orphan market rows, 0 orphan insider rows, 0 missing PIT rows, and no duplicate `fact_market_daily`, `fact_insider_txn`, or `dim_entity` keys.
+- *Artifacts:* `fabric/warehouse/{01_dims.sql,02_facts.sql,03_fx.sql}`; `fabric/notebooks/nb_03_silver_to_gold.py`.
 - *Contract:* in: `silver.*` + `dim_security` → out: gold `dim_*` / `fact_*` (market, insider, institutional, ownership, news_sentiment, contract, macro/risk-free, fx).
 - *Depends:* E4. *DoD:* MERGE convergence on replay; FK integrity to `dim_security`; PIT columns populated.
 
