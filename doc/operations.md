@@ -16,9 +16,9 @@ This subscription is governed by the **MCAPSGovDeployPolicies** initiative assig
 In addition, the `frsodano@microsoft.com` guest account is subject to **Microsoft corporate Conditional Access** that blocks Azure Storage data plane calls from local machines and Cloud Shell. Only the Azure Portal (server-side) bypasses this.
 
 Consequences for deployment:
-- `func azure functionapp publish` and Kudu zip deploy both fail — they require `AzureWebJobsStorage` as a shared-key connection string so Kudu can upload the built squashfs artifact to blob storage.
+- `func azure functionapp publish` fails — it requires the Functions Core Tools/Kudu publish path that expects shared-key host storage behavior blocked by this subscription.
 - Azure CLI storage data plane commands (`az storage container create`, `az storage blob upload`) fail from both local machine and Cloud Shell under the Microsoft guest account.
-- The workaround is **portal-based blob upload + `WEBSITE_RUN_FROM_PACKAGE`**, which bypasses Kudu entirely.
+- The working connector deployment path is a prebuilt Linux-compatible zip deployed with `az functionapp deployment source config-zip`.
 
 ---
 
@@ -67,15 +67,15 @@ az deployment sub create `
 
 > Repeat with `infra/params/prod.json` for production.
 
-### 2. Create Fabric capacity (manual — cannot be automated via Bicep)
+### 2. Verify Fabric capacity from Bicep, then create Fabric workspace (manual)
 
-Fabric capacity must be provisioned from the Azure portal after a tenant admin enables Fabric:
+Fabric capacity is an Azure resource and is provisioned by Bicep as `auspexdevfab` for dev or `auspexprodfab` for prod (SKU F2, Switzerland North). Fabric workspace, Lakehouse, Warehouse, notebooks, and pipelines are Fabric items, not ARM/Bicep resources, so they are created/synced through the Fabric portal and Fabric Git integration.
 
-- Azure portal → **Create a resource** → search **Microsoft Fabric**
-- Name: `auspex-dev-fabric` / SKU: F2 (minimum) / Region: Switzerland North
-- Assign yourself as capacity admin
+- Azure portal → confirm the Microsoft Fabric capacity exists in `auspex-dev-data` or `auspex-prod-data`
+- Fabric portal → create workspace `auspex-dev` or `auspex-prod`
+- Assign the workspace to the Bicep-created capacity
 
-> Fabric capacity is billed by the hour when running. The capacity scheduler Function (Timer trigger) handles resume/suspend automatically once E3 is complete.
+> The capacity name must match `FABRIC_CAPACITY_NAME` in the ingestion Function App. Bicep derives that setting as `auspex${env}fab`, so do not use hyphens. Fabric capacity is billed by the hour when running. The capacity scheduler Function handles resume/suspend automatically once the scheduler work is implemented.
 
 ### 3. Connect Fabric workspace to GitHub (one-time)
 
@@ -108,7 +108,7 @@ az role assignment create `
   --role "Key Vault Secrets Officer" `
   --assignee-object-id $myId `
   --assignee-principal-type User `
-  --scope $(az keyvault show --name auspex-dev-kv --resource-group auspex-dev-ingest --query id -o tsv)
+  --scope $(az keyvault show --name auspex-dev-kv --resource-group auspex-dev-shared --query id -o tsv)
 ```
 
 > Use `--assignee-object-id` (not `--assignee email`) — guest accounts cannot be resolved by UPN.
@@ -134,13 +134,12 @@ Free account sign-ups:
 
 > `prices_eod` uses Alpha Vantage (`TIME_SERIES_DAILY`) rather than Finnhub — Finnhub's free tier does not include historical candle data.
 
-### 6. Create the Bronze and Silver Lakehouses in Fabric
+### 6. Create the Bronze Lakehouse in Fabric
 
 - Fabric portal → `auspex-dev` workspace → **+ New item** → **Lakehouse**
 - Name: `auspex_bronze` — bronze Files layer (`Files/bronze/...`)
-- Repeat: **+ New item** → **Lakehouse** → Name: `auspex_silver` — silver Delta tables (E4+)
 
-> The E4 silver notebooks attach `auspex_bronze` as the default lakehouse (to read `Files/bronze/`) but write silver Delta tables to the **default Tables section**. If you want a separate silver lakehouse, update the notebook `saveAsTable` calls to use explicit ABFS paths.
+> The E4 silver notebooks attach `auspex_bronze` as the default lakehouse (to read `Files/bronze/`) and write silver Delta tables to the same lakehouse's **Tables** section. A separate silver lakehouse can be introduced later, but the notebooks must first be updated to use explicit ABFS paths.
 
 ### 7. Get the Fabric workspace GUID
 
@@ -154,11 +153,16 @@ https://app.fabric.microsoft.com/groups/<WORKSPACE-GUID>/...
 - `auspex-dev` workspace → settings (gear icon) → **Manage access**
 - **+ Add people or groups** → search `auspex-dev-func` → role: **Contributor** → **Add**
 
-### 9. Set ONELAKE_WORKSPACE_ID in the Function App
+### 9. Configure OneLake GUIDs in the Function App
 
-- Azure portal → `auspex-dev-func` → **Settings → Environment variables**
-- Set `ONELAKE_WORKSPACE_ID` = `<WORKSPACE-GUID>` from step 7
+No Bicep re-run is required for this step. After the Fabric workspace and Lakehouse exist, set the OneLake GUIDs directly on the ingestion Function App:
+
+- Azure portal → `auspex-dev-func` → **Settings → Environment variables** → **App settings**
+- Set `ONELAKE_WORKSPACE_ID` = the Fabric workspace GUID from step 7
+- Set `ONELAKE_LAKEHOUSE_NAME` = the Fabric Lakehouse item GUID for `auspex_bronze`
 - **Apply → Confirm**
+
+The setting name is `ONELAKE_LAKEHOUSE_NAME` for compatibility with the connector code, but the value must be the Lakehouse item GUID. Do not use the friendly Lakehouse name.
 
 ### 10. Build the deployment package (Linux-compatible)
 
@@ -188,38 +192,28 @@ Compress-Archive -Path $items.FullName -DestinationPath ..\function-deploy.zip -
 Write-Host "Zip size: $([math]::Round((Get-Item ..\function-deploy.zip).Length/1MB, 2)) MB"
 ```
 
-### 11. Upload zip and set WEBSITE_RUN_FROM_PACKAGE
+### 11. Deploy the Function package
 
-Kudu-based deployment is blocked by the subscription policy (see Subscription constraints). The workaround is to upload the package directly to blob storage via the portal and point the runtime at it.
-
-**Upload via portal** (portal runs server-side — bypasses local Conditional Access):
-
-1. Portal → Storage accounts → **`auspexdevfuncst`** → Data storage → **Containers**
-2. **+ Container** → name: `deployments`, access: Private → **Create**
-3. Click into `deployments` → **Upload** → select `function-deploy.zip` → **Upload**
-4. Click `function-deploy.zip` → **Generate SAS** tab
-   - Signing method: **User delegation key** (auto-selected when shared key is disabled)
-   - Permissions: **Read**
-   - Expiry: **+6 days** (maximum for user delegation SAS)
-5. Click **Generate SAS token and URL** → copy the **Blob SAS URL**
-
-**Set the app setting** (use ARM REST API — the `&` in SAS URLs breaks `az functionapp config appsettings set` on Windows):
+Deploy the package with Azure CLI zip deployment. Do **not** set `WEBSITE_RUN_FROM_PACKAGE` for this Flex Consumption app; the app uses its configured deployment storage container.
 
 ```powershell
-$token = az account get-access-token --resource https://management.azure.com/ --query accessToken -o tsv
-$sasUrl = '<paste Blob SAS URL here>'
+# Ensure any previous run-from-package setting is absent.
+az functionapp config appsettings delete `
+  --subscription 3d043edc-4478-4153-a922-ec782b4b97fe `
+  --resource-group auspex-dev-ingest `
+  --name auspex-dev-func `
+  --setting-names WEBSITE_RUN_FROM_PACKAGE
 
-$getUri = "https://management.azure.com/subscriptions/3d043edc-4478-4153-a922-ec782b4b97fe/resourceGroups/auspex-dev-ingest/providers/Microsoft.Web/sites/auspex-dev-func/config/appsettings/list?api-version=2023-12-01"
-$current = Invoke-RestMethod -Uri $getUri -Method POST -Headers @{Authorization = "Bearer $token"} -ContentType "application/json"
+az functionapp deployment source config-zip `
+  --subscription 3d043edc-4478-4153-a922-ec782b4b97fe `
+  --resource-group auspex-dev-ingest `
+  --name auspex-dev-func `
+  --src D:\Projects\auspex\function-deploy.zip
 
-$settings = $current.properties
-$settings | Add-Member -NotePropertyName "WEBSITE_RUN_FROM_PACKAGE" -NotePropertyValue $sasUrl -Force
-
-$body = @{ properties = $settings } | ConvertTo-Json -Depth 10
-$putUri = "https://management.azure.com/subscriptions/3d043edc-4478-4153-a922-ec782b4b97fe/resourceGroups/auspex-dev-ingest/providers/Microsoft.Web/sites/auspex-dev-func/config/appsettings?api-version=2023-12-01"
-Invoke-RestMethod -Uri $putUri -Method PUT -Headers @{Authorization = "Bearer $token"} -Body $body -ContentType "application/json" | Out-Null
-
-az functionapp restart --name auspex-dev-func --resource-group auspex-dev-ingest
+az functionapp restart `
+  --subscription 3d043edc-4478-4153-a922-ec782b4b97fe `
+  --resource-group auspex-dev-ingest `
+  --name auspex-dev-func
 ```
 
 **Verify functions loaded:**
@@ -229,9 +223,9 @@ Start-Sleep -Seconds 30
 az functionapp function list --name auspex-dev-func --resource-group auspex-dev-ingest --query "[].name" -o tsv
 ```
 
-Expected output: `auspex-dev-func/sec_form4_run` and `auspex-dev-func/prices_eod_run`.
+Expected output: `auspex-dev-func/sec_form4_run`, `auspex-dev-func/prices_eod_run`, and `auspex-dev-func/run_connector`.
 
-> The SAS URL expires in 6 days. On each redeployment repeat steps 10–11. For CI/CD, GitHub Actions generates a fresh SAS using OIDC bearer-token blob writes (no shared key needed) and updates the setting automatically.
+> GitHub Actions automation is deferred to E10 and is not used for the current E1-E4 deployment path.
 
 ### 12. Grant yourself Cosmos DB data-plane access
 
@@ -268,16 +262,58 @@ $key = az functionapp keys list `
 
 # Trigger sec_form4
 Invoke-RestMethod `
-  -Uri "https://auspex-dev-func.azurewebsites.net/api/sec_form4/run" `
+  -Uri "https://auspex-dev-func.azurewebsites.net/api/run" `
   -Method POST `
-  -Headers @{"x-functions-key" = $key}
+  -Headers @{"x-functions-key" = $key; "Content-Type" = "application/json"} `
+  -Body '{"source_id":"sec_form4"}'
 ```
 
 Check the Fabric portal → `auspex_bronze` lakehouse → Files → `bronze/sec_form4/` for the NDJSON output.
 
+```powershell
+# Trigger prices_eod for a small synchronous chunk. Run nb_01_form4_to_silver
+# first to seed Files/config/prices_universe.json. Full-universe HTTP calls can
+# exceed the Function HTTP request lifetime even when the Alpha Vantage plan has
+# no daily limit, so use symbol_offset/symbol_limit chunks until E10 automation
+# moves this to an async/orchestrated path.
+Invoke-RestMethod `
+  -Uri "https://auspex-dev-func.azurewebsites.net/api/run" `
+  -Method POST `
+  -Headers @{"x-functions-key" = $key; "Content-Type" = "application/json"} `
+  -Body '{"source_id":"prices_eod","symbol_offset":0,"symbol_limit":200}'
+```
+
+Repeat chunked `prices_eod` calls by increasing `symbol_offset` until the whole
+universe has landed. With `AV_RPM=75`, a chunk of 200 symbols takes roughly
+3 minutes plus overhead and stays inside the synchronous HTTP path. Example
+offsets for an 803-symbol universe: `0`, `200`, `400`, `600`, `800`.
+
+> `symbol_offset` / `symbol_limit` require the latest Function App package. If a
+> full `prices_eod` call returns a generic server error after several minutes,
+> redeploy the connector package and use chunked calls rather than rerunning the
+> full universe synchronously.
+
+### 14a. Manual E1-E4 smoke checklist
+
+Use this checklist before considering E1-E4 ready for further automation:
+
+- **Azure substrate:** `az deployment sub create` from step 1 completes successfully.
+- **Fabric resources:** Bicep-created capacity is named `auspexdevfab`; workspace `auspex-dev` exists; Lakehouse `auspex_bronze` exists.
+- **Workspace access:** `auspex-dev-func` managed identity is Contributor on the Fabric workspace.
+- **Function App settings:** `auspex-dev-func` has `ONELAKE_WORKSPACE_ID` set to the Fabric workspace GUID and `ONELAKE_LAKEHOUSE_NAME` set to the `auspex_bronze` Lakehouse item GUID.
+- **Function package:** `az functionapp function list --name auspex-dev-func --resource-group auspex-dev-ingest --query "[].name" -o tsv` lists `sec_form4_run`, `prices_eod_run`, and `run_connector`.
+- **Control plane:** `python -m scripts.seed_sources` completes and the Cosmos `sources` container contains `sec_form4` and `prices_eod` with `enabled=true`.
+- **Bronze Form 4:** `POST /api/run` with `{"source_id":"sec_form4"}` returns `status=ok` or `status=empty`; the bronze path appears under `Files/bronze/sec_form4/{yyyy}/{mm}/{dd}/` using the batch partition date.
+- **Silver Form 4:** run `nb_00_entity_resolution`, then `nb_01_form4_to_silver`; verify `security_master`, `dim_security`, `silver_insider_txn.security_sk`, and `Files/config/prices_universe.json` exist.
+- **Bronze prices:** `POST /api/run` with `{"source_id":"prices_eod"}` returns `status=ok` or `status=empty`; the bronze path appears under `Files/bronze/prices_eod/{yyyy}/{mm}/{dd}/`.
+- **Silver prices:** run `nb_02_prices_to_silver`; verify `silver_prices.security_sk` has rows for the requested date window and unresolved symbols are in `silver_security_quarantine`.
+- **PIT sanity:** the SQL checks in step 18 return zero future `knowledge_date` violations.
+
 ---
 
 ## E4 — Silver Transforms + Entity Resolution
+
+Current status: this guide validates the E4 reference path for the implemented sources (`sec_form4`, `prices_eod`): `security_master`, canonical `dim_security`, `silver_insider_txn`, `silver_prices`, PIT sanity, and replay-safe quarantine. Exact CIK/ticker resolution is implemented now; ISIN/fuzzy fallback is reserved for later sources that provide those identifiers.
 
 Three PySpark notebooks transform raw bronze NDJSON into cleaned, deduplicated silver Delta tables.  
 They all use the `auspex_bronze` lakehouse as their default (reads `Files/bronze/…`, writes Delta tables to `Tables/`).
@@ -326,28 +362,34 @@ The `.py` files use `# COMMAND ----------` as a cell separator. Each block of co
 
 ### 16. Add notebook parameters
 
-Each notebook reads optional pipeline parameters via `dbutils.widgets.get()` with a fallback default. You can set them directly in the notebook for a manual run, or leave the defaults.
+Each notebook reads optional pipeline parameters via `mssparkutils.widgets.get()` with a fallback default. You can set them directly in the notebook for a manual run, or leave the defaults.
 
-The notebooks read parameters via `dbutils.widgets.get()` with hardcoded fallback defaults, so **no configuration is required for a manual run** — just run them as-is.
+The notebooks read parameters via `mssparkutils.widgets.get()` with hardcoded fallback defaults, so **no configuration is required for a manual run** — just run them as-is.
 
-If you want to change the date window or user-agent for a manual run, edit the values directly in the first cell of the notebook (the `_widget(...)` fallback values):
+If you want to change the date window, user-agent, or EDGAR throttle for a manual run, edit the values directly in the first cell of the notebook (the `_widget(...)` fallback values):
 
 **`nb_00_entity_resolution`** — edit the fallback in the first cell:
 ```python
-EDGAR_USER_AGENT = _widget("edgar_user_agent", "Auspex/1.0 fsodano79@gmail.com")
+EDGAR_USER_AGENT = _widget("edgar_user_agent", "Auspex/1.0 auspex@auspex.ai")
 ```
+
+`nb_00` fetches SEC `company_tickers.json`, seeds `security_master`, maintains `dim_security`, and creates/upgrades the replay-safe quarantine tables.
 
 **`nb_01_form4_to_silver`** — edit the fallbacks in the first cell:
 ```python
-from_date        = _widget("from_date", "2026-06-08")   # change as needed
-to_date          = _widget("to_date",   "2026-06-15")
-EDGAR_USER_AGENT = _widget("edgar_user_agent", "Auspex/1.0 fsodano79@gmail.com")
+from_date        = _widget("from_date", "2026-06-10")   # change as needed
+to_date          = _widget("to_date",   "2026-06-17")
+EDGAR_USER_AGENT = _widget("edgar_user_agent", "Auspex/1.0 auspex@auspex.ai")
+EDGAR_REQUESTS_PER_MINUTE = int(_widget("edgar_requests_per_minute", "450"))
+_MAX_WORKERS = max(1, int(_widget("max_workers", "5")))
 ```
+
+`EDGAR_REQUESTS_PER_MINUTE` is the aggregate request cap for the whole notebook process. It is not multiplied by `_MAX_WORKERS`; workers only overlap network wait time. EDGAR's fair-use ceiling is 10 requests/second (600/minute); the default 450/minute keeps a 25% buffer. This is separate from Alpha Vantage's `AV_RPM` limit.
 
 **`nb_02_prices_to_silver`** — edit the fallbacks in the first cell:
 ```python
-from_date = _widget("from_date", "2026-06-08")
-to_date   = _widget("to_date",   "2026-06-15")
+from_date = _widget("from_date", "2026-06-10")
+to_date   = _widget("to_date",   "2026-06-17")
 ```
 
 > **Pipeline integration (later):** when the Fabric Data Factory pipeline calls these notebooks, it passes values via **Base parameters** in the Notebook activity. To allow the pipeline to override a variable, mark the first cell as a parameter cell: hover over it → click **`···`** (More commands) → **Toggle parameter cell**. A grey **Parameters** badge appears on the cell. The pipeline then injects its values at runtime, overriding the fallback defaults.
@@ -362,16 +404,23 @@ Run the notebooks one at a time from the Fabric portal. Click **Run all** in the
 
 ```
 1. nb_00_entity_resolution   — seeds security_master; creates quarantine tables
-2. nb_01_form4_to_silver     — bronze sec_form4 → silver_insider_txn
-3. nb_02_prices_to_silver    — bronze prices_eod → silver_prices
+2. nb_01_form4_to_silver     — bronze sec_form4 → entity-resolved silver_insider_txn
+3. nb_02_prices_to_silver    — bronze prices_eod → entity-resolved silver_prices
 ```
 
-`nb_01` is the slowest — it makes one EDGAR HTTP call per new Form 4 accession number to fetch the full filing XML (transaction amounts are not in the search index). For a 7-day backfill expect 3–5 minutes. Subsequent daily runs only fetch new filings; already-processed accession numbers are skipped automatically.
+`nb_01` is the slowest — each new Form 4 accession may require 2–3 EDGAR HTTP calls to discover and fetch the full filing XML (transaction amounts are not in the search index). With the default aggregate cap of 450 requests/minute and 5 workers, a 7-day backfill can take **30–60 minutes** depending on filing count, XML discovery path, and SEC response latency. Subsequent daily runs are much faster — already-processed accession numbers are skipped via `done_set`, so only that day's new filings are fetched.
+
+`nb_00` creates/upgrades `dim_security`, `silver_security_quarantine`, `silver_dq_quarantine`, and `silver_parse_errors`. If you are upgrading an existing E4-lite lakehouse, run `nb_00` first so later notebooks can add `security_sk` and merge quarantine rows by `natural_key`.
+
+`nb_01` also writes `Files/config/prices_universe.json` to the lakehouse at the end of each run — a JSON file containing the distinct resolved `issuer_ticker` values from the full `silver_insider_txn` table. The `prices_eod` connector reads this file to know which symbols to fetch, so **nb_01 must complete before triggering the prices_eod connector**.
+
+When upgrading from the earlier E4-lite notebooks, rerun `nb_01` for the desired Form 4 window. It skips already resolved filings but reprocesses legacy rows where `security_sk` is missing. Rerun `nb_02` after the next `prices_eod` bronze pull; it backfills `security_sk` for resolvable legacy `silver_prices` rows.
 
 Watch the cell outputs for progress messages like:
 ```
 Fetched 10823 tickers from SEC
 security_master: 10823 rows
+dim_security current rows: 10823
 Merged 4231 rows into silver_insider_txn
 Merged 21 rows into silver_prices
 ```
@@ -379,7 +428,8 @@ Merged 21 rows into silver_prices
 If a cell raises an error, read the traceback. Common issues:
 - **Table not found** — run `nb_00` first; it creates the control tables.
 - **No such file or directory** (`Files/bronze/…`) — the bronze lakehouse is not attached as default, or the date range has no data yet.
-- **403 from EDGAR** — rate limit; reduce the window or add a longer sleep.
+- **HTTP 430 `TooManyRequestsForCapacity`** — Fabric could not schedule the Spark job because the capacity is saturated. Open Fabric → workspace `auspex-dev` → **Monitoring hub** or **Workspace settings → Job management**; cancel stale/running Spark jobs, wait a few minutes for capacity to free, then rerun only one notebook at a time. This is Fabric capacity contention, not an EDGAR request-rate problem.
+- **403 from EDGAR** — rate limit; reduce `edgar_requests_per_minute` or the date window. Do not raise `_MAX_WORKERS` to solve this; the cap is aggregate across workers.
 
 ---
 
@@ -391,9 +441,15 @@ Open the `auspex_bronze` SQL analytics endpoint (Fabric portal → `auspex_bronz
 -- Row counts
 SELECT 'security_master'          AS tbl, COUNT(*) AS rows FROM security_master
 UNION ALL
+SELECT 'dim_security_current',             COUNT(*)        FROM dim_security WHERE is_current = 1
+UNION ALL
 SELECT 'silver_insider_txn',               COUNT(*)        FROM silver_insider_txn
 UNION ALL
-SELECT 'silver_prices',                    COUNT(*)        FROM silver_prices;
+SELECT 'silver_prices',                    COUNT(*)        FROM silver_prices
+UNION ALL
+SELECT 'silver_security_quarantine',       COUNT(*)        FROM silver_security_quarantine
+UNION ALL
+SELECT 'silver_dq_quarantine',             COUNT(*)        FROM silver_dq_quarantine;
 
 -- Quarantine breakdown — should be dominated by NO_NONDERIVATIVE_TXNS (options-only filings, normal)
 SELECT reason, COUNT(*) AS n
@@ -402,13 +458,37 @@ GROUP BY reason
 ORDER BY n DESC;
 
 -- PIT sanity: no knowledge_date in the future
-SELECT COUNT(*) AS violations
+SELECT 'silver_insider_txn' AS tbl, COUNT(*) AS violations
 FROM silver_insider_txn
+WHERE knowledge_date > CAST(GETDATE() AS DATE)
+UNION ALL
+SELECT 'silver_prices', COUNT(*)
+FROM silver_prices
 WHERE knowledge_date > CAST(GETDATE() AS DATE);
+
+-- Entity-resolution sanity: silver rows must be resolved to dim_security
+SELECT 'silver_insider_txn' AS tbl, COUNT(*) AS unresolved_rows
+FROM silver_insider_txn
+WHERE security_sk IS NULL
+UNION ALL
+SELECT 'silver_prices', COUNT(*)
+FROM silver_prices
+WHERE security_sk IS NULL;
+
+-- Replay sanity: quarantine natural keys must be unique
+SELECT natural_key, COUNT(*) AS duplicate_count
+FROM silver_security_quarantine
+GROUP BY natural_key
+HAVING COUNT(*) > 1
+UNION ALL
+SELECT natural_key, COUNT(*)
+FROM silver_dq_quarantine
+GROUP BY natural_key
+HAVING COUNT(*) > 1;
 
 -- Sample insider buys
 SELECT TOP 10
-    accession_no, issuer_ticker, issuer_name,
+    security_sk, accession_no, issuer_ticker, issuer_name,
     reporter_name, txn_code, is_buy,
     shares, price, value_usd, event_date, knowledge_date
 FROM silver_insider_txn
@@ -416,7 +496,7 @@ WHERE is_buy = 1
 ORDER BY event_date DESC;
 
 -- Sample prices
-SELECT TOP 10 symbol, date, close, volume, knowledge_date
+SELECT TOP 10 security_sk, symbol, date, close, volume, knowledge_date
 FROM silver_prices
 ORDER BY date DESC;
 ```
@@ -426,15 +506,37 @@ Expected state after a successful E4 run:
 | Table | Expected rows |
 |---|---|
 | `security_master` | ~10 000 (all SEC-listed tickers) |
+| `dim_security` | ~10 000 current rows, with SCD2-ready inactive rows accumulating over time |
 | `silver_insider_txn` | Several thousand (7-day backfill of Form 4 filings) |
-| `silver_prices` | 3 rows × days (AAPL, MSFT, NVDA for the test window) |
-| `silver_security_quarantine` | Some rows, mostly `NO_NONDERIVATIVE_TXNS` (derivative-only filings — expected) |
+| `silver_prices` | One row per resolved security per trading day in the window (driven by the prices universe) |
+| `silver_security_quarantine` | Some rows, mostly `NO_NONDERIVATIVE_TXNS`; any `SECURITY_UNRESOLVED` rows need review before gold |
+| `silver_dq_quarantine` | Usually 0; non-zero rows indicate invalid source price/date records |
+
+Validated dev run (2026-06-27):
+
+| Check | Result |
+|---|---:|
+| `security_master` | 10433 rows |
+| `dim_security` current rows | 10433 rows |
+| `sec_form4` bronze records | 2915 rows |
+| `silver_insider_txn` merged rows | 4614 rows |
+| `silver_security_quarantine` `NO_NONDERIVATIVE_TXNS` | 644 rows |
+| `silver_security_quarantine` `SECURITY_UNRESOLVED` | 47 rows |
+| `prices_eod` bronze rows across chunks | 3996 rows |
+| `silver_prices` merged rows | 3996 rows |
+| unresolved `security_sk` in silver | 0 rows |
+| future `knowledge_date` violations | 0 rows |
+| duplicate quarantine natural keys / duplicate price keys | 0 rows |
+
+Conclusion: E4 is operationally validated for the currently implemented E3 sources (`sec_form4`, `prices_eod`). Later E8 sources must extend E4 with their own source-specific silver parsers, DQ checks, and entity-resolution rules.
 
 ---
 
-## CI/CD — GitHub Actions (OIDC)
+## Future CI/CD — GitHub Actions (OIDC, E10)
 
-The workflows in `.github/workflows/` authenticate to Azure via OIDC (no stored credentials). Set these GitHub Actions secrets in the `dev` environment:
+GitHub Actions are **not used for the current E1-E4 deployment path**. The supported deployment path is the manual/local procedure above. The workflows in `.github/workflows/` are future E10 automation and should remain disabled until the manual deployment and smoke checks are stable.
+
+When E10 enables CI/CD, the workflows authenticate to Azure via OIDC (no stored credentials). Set these GitHub Actions secrets in the `dev` environment:
 
 | Secret | Value |
 |--------|-------|
@@ -451,9 +553,9 @@ Setup steps:
 
 The deployment workflow must:
 - Build Python packages on a Linux runner (correct platform — no manylinux targeting needed)
-- Upload the zip to `auspexdevfuncst/deployments/` using `az storage blob upload --auth-mode login` (bearer token, no shared key)
-- Generate a user-delegation SAS (`az storage blob generate-sas --as-user --auth-mode login`, max 6 days)
-- Update `WEBSITE_RUN_FROM_PACKAGE` via ARM REST API (avoid `&` shell-parsing issues)
+- Deploy the package with `az functionapp deployment source config-zip`
+- Verify `WEBSITE_RUN_FROM_PACKAGE` is absent
+- Verify `run_connector`, `sec_form4_run`, and `prices_eod_run` are indexed after deployment
 
 ---
 

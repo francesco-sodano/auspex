@@ -1,6 +1,6 @@
 # Auspex — Architecture Document (arc42)
 
-> **Product name:** Auspex (internal codename: FIP — Financial Insight Platform).
+> **Product name:** Auspex.
 
 > **Status:** Draft for implementation
 > **Audience:** Autonomous coding agents building the system, plus the product owner.
@@ -23,14 +23,16 @@
 11. Risks and Technical Debt
 12. Glossary
 - Appendix A — Repository layout & naming conventions
-- Appendix B — Implementation backlog (epics & order)
+- Appendix B — Epic design & implementation specification
+- Appendix C — Review findings & where they landed
+- Appendix D — End-to-end flow & coherence review
 
 ---
 
 ## 1. Introduction and Goals
 
 ### 1.1 Purpose
-Auspex is an **MVP SaaS personal financial assistant** (single-tenant today, designed to later be sold to banks to embed in their systems). It:
+Auspex is an **MVP SaaS personal financial assistant** (multi-user from day one, designed to later be sold to banks to embed in their systems). It:
 - ingests market news, regulatory filings, prices, fundamentals, macro data, and government-contract data on a daily schedule;
 - aggregates that data into a dimensional model exposing reusable **metrics** sliced by reusable **dimensions**;
 - serves the model to an AI agent that (a) surfaces, within a chosen theme, the less-obvious **enablers** that are healthy and not yet priced-in (thesis-driven, §8.6.3) and (b) tracks a user-held portfolio and **suggests** buy/sell/hold actions;
@@ -40,7 +42,9 @@ Auspex is an **MVP SaaS personal financial assistant** (single-tenant today, des
 
 **Decision support, not a return promise.** Auspex is an *evidence-grounded decision-support tool*: its value is surfacing opportunities **with the evidence behind them**, disciplining them with a valuation brake, and being honest about uncertainty. It does **not** promise or forecast returns. Any forward-looking view it shows (e.g. the Home monthly outlook) is an explicitly **uncertain estimate with a range**, never a prediction or guarantee (ADR-043).
 
-**MVP, not production.** Favour the simplest thing that delivers the core loop (ingest → rank → portfolio view → suggest → explain). Production-grade concerns (the heavier risk models, multi-tenant isolation, DR, network hardening) are designed for but **deferred** — see §1.5.
+**The distinctive lens — the Narrative Premium.** What separates Auspex from a commodity fundamental score is *not* better fundamentals (banks, Bloomberg and MSCI already own that surface). It is an explicit, measured read of **how much of a price is story versus substance**: for every name, Auspex computes a **fundamental anchor** (what the numbers justify), a **narrative intensity** (how much attention/story is propelling the price), and the **Narrative Premium** — the part of the valuation that fundamentals do *not* explain, *attributed* to narrative (§8.6.6). This is the quantitative, validatable form of the "story vs substance" read (§8.6.3). Crucially the premium is **deterministic mathematics**: an LLM is used only as a *sensor* that reads narrative out of text into reproducible numbers and to *narrate* grounded evidence — never as the oracle that decides the score (ADR-045). That keeps the edge (a genuinely new point of view) **and** the bank-grade explainability and reproducibility a regulated buyer requires.
+
+**MVP, not production.** Favour the simplest thing that delivers the core loop (ingest → rank → portfolio view → suggest → explain) as an end-to-end demonstrable product. Production-grade concerns (the heavier risk models, per-bank tenant isolation, DR, network hardening) are designed for but **deferred** — see §1.5.
 
 ### 1.2 Business goals
 | # | Goal | Description |
@@ -50,50 +54,50 @@ Auspex is an **MVP SaaS personal financial assistant** (single-tenant today, des
 | BG-3 | Auditable evidence | Every signal must be traceable to source records (which filing, which article, which price). |
 | BG-4 | Low cost & low ops | Run cheaply (pausable capacity, consumption billing) and require minimal manual operation. |
 
-### 1.3 Quality goals (top 7)
+### 1.3 Quality goals (top 8)
 | # | Quality | Concrete goal |
 |---|---------|---------------|
-| QG-1 | **Correctness (point-in-time)** | No look-ahead bias. Any query "as of date D" returns only facts known on or before D. |
+| QG-1 | **Correctness (point-in-time)** | No look-ahead bias. Any query "as of date D" returns only facts known on or before D — **including the text the LLM sensor reads** (§8.6.7). |
 | QG-2 | **Freshness** | The daily build completes and publishes gold data before the user's morning (target 06:00 CET), with data no older than the previous trading close. |
 | QG-3 | **Extensibility** | A new data source can be added by implementing one connector contract, with no change to downstream layers. |
 | QG-4 | **Cost efficiency** | Steady-state infra cost stays within a defined monthly budget; compute scales to zero when idle. |
 | QG-5 | **Traceability** | Every gold record links back to its bronze source record(s). |
-| QG-6 | **Explainability (usability)** | Every number shown to the user has a plain-language meaning and a good/bad direction; every recommendation states *why* with one-click evidence. |
-| QG-7 | **Selection validity** | Selection is validated point-in-time and theme-relative — the engine ships only if its shortlist beats the theme (excess-vs-theme; catalyst event-study hit-rate), not assumed. |
+| QG-6 | **Explainability (usability)** | Every number shown to the user has a plain-language meaning and a good/bad direction; every recommendation states *why* with one-click evidence; the **Narrative Premium decomposes into its drivers with cited passages** (§8.6.6, §8.21). |
+| QG-7 | **Selection validity** | Selection is validated point-in-time and theme-relative — the engine ships only if its shortlist beats the theme (excess-vs-theme; catalyst event-study hit-rate), **and the Narrative Premium adds information beyond known factors (value/momentum/quality/size)** under orthogonalization (§8.15), not assumed. |
+| QG-8 | **Reproducibility** | Any past output is reconstructable: given a `decision_id`, the exact recommendation, score, premium, drivers and evidence re-derive from a pinned model/prompt version + an input snapshot (§8.25–8.26). |
 
 ### 1.4 Stakeholders
 | Role | Expectation |
 |------|-------------|
 | Product owner / user (Francesco) | Trustworthy daily signals; cheap to run; understandable. |
 | Coding agent squad | Unambiguous contracts, schemas, naming, and acceptance criteria they can implement without further clarification. |
-| (Implicit) Regulators / data licensors | Respect for source terms of use; personal, non-redistributive use. |
+| (Implicit) Regulators | Clear advisory boundary, traceability, reproducibility, and basic suitability/disclosure records. |
 | (Future) Bank integrators | A clean, embeddable product with defensible signals and clear isolation seams. |
 
 ### 1.5 MVP scope
 The MVP is judged on one honest question: **does Auspex help the user make better-reasoned, evidence-grounded portfolio decisions** — surfacing near-term opportunities with the evidence behind them, disciplining them with a valuation brake, and **validating that its selection beats naive theme exposure** (§8.15). That is a *decision-quality* KPI, not a promise of returns: beating the market with public, lagged signals is genuinely hard, so Auspex is measured on whether its picks add value over the theme and whether its reasoning is sound and auditable — not on a return guarantee (ADR-043). So the **engine must be fully operational** — every planned signal flowing — and selection quality must be **measured, not assumed**. Production hardening is out of scope of this document and is *not* to be built now.
 
 **In the MVP (build now):**
-- **All planned data sources** (§3.3): SEC Form 4 / 13F / 13D-G / 8-K / **S-1**, EOD prices (Finnhub), fundamentals + news-sentiment + FX + risk-free via **Alpha Vantage**, Finnhub company news, gov contracts, **US thematic-ETF holdings (TRS)**, plus manual portfolio entry. The three external pillars are **Alpha Vantage + Finnhub + SEC EDGAR** (ADR-042). **US-only retires the FRED macro and SNB/ECB FX connectors** — USD is the single source currency and CHF conversion + the USD risk-free fold into Alpha Vantage. Free/public tiers for the MVP (ADR-034); Alpha Vantage premium (throughput/real-time) and commercial **redistribution** licensing are a Phase-2 step before bank deployment.
-- Gold star schema + the **thesis graph** + the **Opportunity Score** (six thesis legs incl. the valuation brake, §8.6.3) + **thesis validation** (does the shortlist beat the theme, §8.15) + the **recommender** (advisory buy/sell/hold sized on total value, net of costs).
+- **All planned data sources** (§3.3): SEC Form 4 / 13F / 13D-G / 8-K / **S-1**, EOD prices (Alpha Vantage), fundamentals + news-sentiment + FX + risk-free via **Alpha Vantage**, Finnhub company news, gov contracts, **US thematic-ETF holdings (TRS)**, plus manual portfolio entry. The three primary external pillars are **Alpha Vantage + Finnhub + SEC EDGAR** (ADR-042), with **FMP as an auxiliary MVP provider** for fallback fundamentals and thematic-ETF holdings. **US-only retires the FRED macro and SNB/ECB FX connectors** — USD is the single source currency and CHF conversion + the USD risk-free fold into Alpha Vantage. The provider layer stays isolated so source plans can be upgraded without changing downstream modeling.
+- Gold star schema + the **thesis graph** + the **Opportunity Score** (six thesis legs incl. the valuation brake, §8.6.3) + the **Narrative Premium / divergence engine** (fundamental anchor + narrative-intensity sensor + attributed residual + the story-vs-substance map, §8.6.6–8.6.7) + **thesis validation** (does the shortlist beat the theme *and* does the premium survive orthogonalization, §8.15) + the **recommender** (advisory buy/sell/hold sized on total value, net of costs).
 - Manual portfolio *view* (cash + stocks), daily valuation, advisory `recommendation`s, the data-completeness gate, and agent grounding.
 - A simple web app + API (candidates, portfolio, evidence, grounded chat) with federated sign-in.
 - **Multi-user with per-user data isolation:** federated registration (first sign-in creates the account) and every account sees only its own portfolio (§8.22).
 - **Market: US-listed equities and ETFs only** for the MVP. Concentrating on the US market shrinks the information surface (one trading calendar — NYSE/Nasdaq, one source currency — USD, the deepest free data and the richest thematic-ETF coverage) and is where the thesis sources are strongest. Other markets are a later step.
 - **Asset coverage: stocks and ETFs** (no bonds, funds, or structured products in the MVP).
-- **Language: English only** for the MVP (localization is a later step).
+- **Language: English only** for the MVP.
 - **Score explanation:** alongside the Auspex score, the Discussion tab shows *why* that score was assigned — the factor breakdown (§8.21).
 - **User risk profile aligned to the bank's client risk bands**, with FINMA-oriented suitability elements (§8.24).
 - A full **control-plane Home** (value, change, cash, allocation, risk, holdings, recommendations) — the density is intentional, not a simplification target.
 
 **Out of scope of the MVP — these are *expected, accepted* boundaries, not defects:**
 - **Bank integration for trade execution and automatic position tracking.** Manual transaction entry is the deliberate MVP approach; reading positions from a bank's custody and any execution hand-off come when Auspex is embedded by a bank.
-- **Localization** beyond English (i18n is a later step).
 - **Bonds, funds, structured products** and other asset classes beyond stocks/ETFs.
-- Production hardening: DR/RTO-RPO, SLOs, schema-migration runners, Private Endpoints/WAF — specified when hardening for bank integration.
+- Production hardening: DR/RTO-RPO, SLOs, schema-migration runners, WAF/full private ingress, and bank-grade network isolation — specified when hardening for bank integration. Private endpoints for required data-plane dependencies are part of the MVP Bicep baseline because of subscription policy and keyless-access constraints.
 - **Per-bank tenant isolation** (RLS, per-tenant infra): the MVP isolates per *end-user*; a bank embedding Auspex is a separate, later tenancy layer.
 - Advanced book-level risk analytics (covariance/factor/stress), broker CSV import, streaming/intraday.
 
-Keeping these out keeps the MVP focused: a fully operational engine + a clear, single-language, stocks/ETFs web app — with the bank-integration and localization work explicitly deferred, not forgotten.
+Keeping these out keeps the MVP focused: a fully operational engine + a clear, English-only, stocks/ETFs web app — with the bank-integration work explicitly deferred, not forgotten.
 
 ---
 
@@ -106,9 +110,10 @@ Keeping these out keeps the MVP focused: a fully operational engine + a clear, s
 | TC-2 | Microsoft Fabric is the data platform. | Storage = OneLake; transforms = Fabric Notebooks/Dataflows; serving = Fabric Warehouse (T-SQL endpoint). |
 | TC-2b | Frontend is a **custom web app on first-party Azure hosting**. | Azure Static Web Apps (SPA) + Azure Functions web API + Entra auth. No Power BI as the delivery surface. |
 | TC-3 | Batch/scheduled, not streaming, for v1. | Daily cadence with intraday polling where useful. No Event Hubs in the core. |
-| TC-4 | Single tenant, single user. | No multi-tenant isolation, no complex auth flows. Managed identity everywhere. |
-| TC-5 | Infrastructure as Code via **Bicep**. | All Azure resources declared in Bicep; Fabric items version-controlled via Fabric Git integration. |
+| TC-4 | Multi-user MVP with per-user isolation. | Federated sign-in, registration on first use, `owner_user_sk` on every per-user row, and API-enforced scoping. Per-bank tenant isolation is deferred. |
+| TC-5 | Infrastructure as Code via **Bicep**. | All Azure infrastructure resources are declared in Bicep up front; Fabric workspace items are version-controlled via Fabric Git integration. |
 | TC-6 | Region: **Switzerland North**. | Data residency for a Swiss-resident user; all resources pinned to this region where available. |
+| TC-7 | **Scoring is deterministic; the LLM is a sensor, not the scorer.** | The Opportunity Score, the fundamental anchor and the Narrative Premium are computed by reproducible code over gold facts. An LLM (Azure OpenAI) is used only to (a) extract structured, cited features and graph edges from text and (b) narrate grounded evidence — at temperature 0 with a pinned model/prompt version. The model never sees price when scoring narrative and never emits the recommendation directly (ADR-045). |
 
 ### 2.2 Organizational / process constraints
 | # | Constraint |
@@ -122,7 +127,7 @@ Keeping these out keeps the MVP focused: a fully operational engine + a clear, s
 - **Data formats:** raw landed as JSON/NDJSON in bronze; Delta (Parquet) for silver; Warehouse tables for gold.
 - **Time:** all timestamps stored in UTC; presentation converts to CET/CEST.
 - **Money:** all monetary facts normalized to USD at event date via `fact_fx_rate`; original currency retained.
-- **Trading calendar:** `dim_date.is_trading_day` is seeded from an exchange calendar (NYSE/Nasdaq primary; SIX for Swiss names) and used by all momentum/volatility windows.
+- **Trading calendar:** `dim_date.is_trading_day` is seeded from a US exchange calendar (NYSE/Nasdaq) and used by all momentum/volatility windows.
 - **FX:** Alpha Vantage USD→base (CHF) rate feeds `fact_fx_rate`; conversions use the rate at the fact's `event_date` (PIT-correct). US-only means USD is the single source currency, so one FX pair suffices.
 - **Base currency:** the portfolio is valued in a configurable **base currency (default CHF)**, held in `app_config`. Market facts stay normalized to USD; portfolio values convert USD/native → base via `fact_fx_rate`.
 
@@ -131,7 +136,6 @@ Keeping these out keeps the MVP focused: a fully operational engine + a clear, s
 - **No trade execution, money movement, custody, or settlement.** Auspex never touches the user's money — it shows a portfolio view and suggestions only.
 - **No bank integration for execution or automatic position tracking in the MVP** — an *expected, accepted* boundary. Manual entry is the deliberate MVP approach; reading positions from a bank's custody (read-only) and execution hand-off are Phase-2 bank-integration work.
 - English-only; stocks and ETFs only — both deliberate MVP boundaries (§1.5).
-- No redistribution of licensed source data.
 - Not production-hardened in the MVP (see §1.5).
 
 ---
@@ -176,30 +180,30 @@ flowchart LR
 | AI agent | outbound | Warehouse SQL endpoint + Azure AI Search REST | TDS (SQL), HTTPS REST |
 | User (web) | outbound | Auspex web app (Static Web Apps SPA) → web API | HTTPS / REST + JSON |
 | Web API | both | Reads Warehouse SQL + AI Search + Cosmos; writes portfolio/actions | TDS, HTTPS REST |
-| User (portfolio) | inbound | Entered in the web app → web API → Cosmos/OneLake | HTTPS REST |
+| User (portfolio) | inbound | Entered in the web app → web API → owner-scoped transaction ledger | HTTPS REST |
 | Operator | both | Azure Portal, Fabric portal, Monitor | HTTPS |
 
 ### 3.3 v1 source inventory (connector targets)
-> Endpoints/limits change; treat as starting targets and confirm current terms before coding. `reliability_weight` is an initial value. **Full connection contracts** — auth, exact endpoints, rate limits, pagination, watermark field, response→bronze, and commercial-licensing notes — are detailed in `docs/source-and-connector-spec.md` (in the repo). Ingestion uses direct provider **REST APIs, not MCP** (rationale and where MCP could fit later are in that spec, §6).
+> Endpoints/limits change; treat as starting targets and confirm current provider documentation before coding. `reliability_weight` is an initial value. **Full connection contracts** — auth, exact endpoints, rate limits, pagination, watermark field, and response→bronze mappings — are detailed in `doc/source-and-connector-spec.md` (to be maintained with this architecture document). Ingestion uses direct provider **REST APIs, not MCP** (rationale and where MCP could fit later are in that spec, §6).
 
-| source_id | Provider / endpoint | Cadence | Produces (silver) | License class | reliability |
+| source_id | Provider / endpoint | Cadence | Produces (silver) | Source class | reliability |
 |-----------|--------------------|---------|-------------------|---------------|-------------|
 | `sec_form4` | SEC EDGAR submissions/Form 4 (official JSON/RSS) | daily (intraday optional) | `insider_txn` | public/official | 1.00 |
 | `sec_13f` | SEC EDGAR 13F | quarterly | `holdings_13f` | public/official | 1.00 |
 | `sec_13dg` | SEC EDGAR 13D/13G | event/daily | `ownership_events` | public/official | 1.00 |
 | `sec_8k` | SEC EDGAR 8-K (material events) | daily | `news` (filing type) | public/official | 1.00 |
 | `sec_s1` | SEC EDGAR **S-1 / S-1-A / 424B** (IPO registration + prospectus) | daily | `filings` (registration) | public/official | 1.00 |
-| `prices_eod` | **Finnhub** EOD quotes/candles (+ FMP fallback) | daily | `prices` | free-tier API | 0.85 |
-| `prices_yf` | Yahoo via library (fallback only) | daily | `prices` | unofficial | 0.40 |
-| `alpha_vantage` | **Alpha Vantage** (NASDAQ-licensed) — `OVERVIEW`+`BALANCE_SHEET`+`CASH_FLOW` fundamentals/valuation (incl. net-debt/EBITDA, FCF yield), `NEWS_SENTIMENT`, USD→base FX, `TREASURY_YIELD` risk-free | daily/weekly | `fundamentals`, `news`, `fx`, `macro` | licensed API (premium tier for throughput/real-time) | 0.90 |
-| `fundamentals` | FMP fundamentals — **fallback** to Alpha Vantage | daily/weekly | `fundamentals` | free-tier API | 0.80 |
-| `news` | **Finnhub** company-news (+ AV `NEWS_SENTIMENT`) | daily (or hourly) | `news` | free-tier/licensed | 0.75 |
+| `prices_eod` | **Alpha Vantage** `TIME_SERIES_DAILY` EOD prices | daily | `prices` | provider API | 0.85 |
+| `prices_yf` | Yahoo via library (fallback only) | daily | `prices` | fallback feed | 0.40 |
+| `alpha_vantage` | **Alpha Vantage** — `OVERVIEW`+`BALANCE_SHEET`+`CASH_FLOW` fundamentals/valuation (incl. net-debt/EBITDA, FCF yield), `NEWS_SENTIMENT`, USD→base FX, `TREASURY_YIELD` risk-free | daily/weekly | `fundamentals`, `news`, `fx`, `macro` | provider API | 0.90 |
+| `fundamentals` | FMP fundamentals — **fallback** to Alpha Vantage | daily/weekly | `fundamentals` | provider API | 0.80 |
+| `news` | **Finnhub** company-news (+ AV `NEWS_SENTIMENT`) | daily (or hourly) | `news` | provider API | 0.75 |
 | `contracts` | USASpending.gov API | daily/weekly | `contracts` | public/official | 0.95 |
-| `etf_holdings` | FMP `/etf-holder` for curated **US thematic ETFs** | weekly | `etf_holdings` | free-tier API | 0.95 |
+| `etf_holdings` | FMP `/etf-holder` for curated **US thematic ETFs** | weekly | `etf_holdings` | provider API | 0.95 |
 | `portfolio` | Manual entry in the web app (positions, cash, transactions) | on change | `portfolio_transaction` → positions/cash/valuation | user data | 1.00 |
 
-### 3.4 Source connection contracts (MVP = free tier)
-The MVP runs entirely on **free/public tiers** (ADR-034). Ingestion is direct provider **REST** (no MCP). Every connector implements the §8.1 contract; secrets live in **Key Vault** and reach the Functions as env vars via **managed identity** (no secrets in code/config).
+### 3.4 Source connection contracts
+Ingestion is direct provider **REST** (no MCP). Every connector implements the §8.1 contract; secrets live in **Key Vault** and reach the Functions as env vars via **managed identity** (no secrets in code/config).
 
 **Secrets (Key Vault → env var):**
 
@@ -209,23 +213,23 @@ The MVP runs entirely on **free/public tiers** (ADR-034). Ingestion is direct pr
 | `ALPHAVANTAGE_API_KEY` | `ALPHAVANTAGE-API-KEY` | `alpha_vantage` | required (premium for throughput/real-time) |
 | `AV_RPM` | — | `alpha_vantage` | requests/min for your AV plan (free=5, Premium-75=75, Premium-150=150) |
 | `FMP_API_KEY` | `FMP-API-KEY` | `fundamentals` | required (free key) |
-| `FINNHUB_API_KEY` | `FINNHUB-API-KEY` | `prices_eod`, `news` | required (free key) |
+| `FINNHUB_API_KEY` | `FINNHUB-API-KEY` | `news` | required for E8 news connector |
 | — | — | `contracts`, `prices_yf` | no key |
 
 **Per-source connection contract:**
 
-| source_id | Auth | Endpoint (base + call) | Free-tier limit* | Watermark | License (MVP → commercial) |
+| source_id | Auth | Endpoint (base + call) | Rate limit* | Watermark | Notes |
 |---|---|---|---|---|---|
 | `sec_form4`/`13f`/`13dg`/`8k` | UA header only | `efts.sec.gov/LATEST/search-index?forms={4\|13F-HR\|SC 13D,SC 13G\|8-K}&startdt&enddt&from` | ~10 req/s fair-access | `file_date` | public domain → **OK** |
-| `prices_eod` | key (`token`) | `finnhub.io/api/v1/stock/candle?symbol&resolution=D&from&to` | ~60 calls/min | last trading `date` | free non-commercial → ⚠️ **paid for banks** |
-| `prices_yf` 🔁 | none | Yahoo via `yfinance` lib (fallback, disabled) | n/a | last `date` | ⚠️⚠️ **not licensable — replace** |
-| `fundamentals` | key (`apikey`) | `financialmodelingprep.com/api/v3/key-metrics-ttm/{sym}`, `/profile/{sym}` | ~250 calls/day | daily snapshot | free non-commercial → ⚠️ **paid for banks** |
-| `news` | key (`token`) | `finnhub.io/api/v1/news?category=general`; `/company-news?symbol&from&to` | ~60 calls/min | article `datetime` | free non-commercial → ⚠️ **paid for banks** |
-| `alpha_vantage` | key (`apikey`) | `www.alphavantage.co/query?function=OVERVIEW|BALANCE_SHEET|CASH_FLOW|NEWS_SENTIMENT|CURRENCY_EXCHANGE_RATE|TREASURY_YIELD` | **Premium-75 (chosen): 75/min, 15-min delayed**, no daily cap (free 5/min·25/day) | `fetched` / obs `date` | NASDAQ-licensed; real-time + **redistribution** need a separate commercial license → **license before bank deploy** |
-| `contracts` | none | `api.usaspending.gov/api/v2/search/spending_by_award/` (**POST**) | generous | `Action Date` | public domain → **OK** |
-| `portfolio` | (web API, Entra) | `POST /transactions` (manual entry, owner-scoped §8.22) | n/a | n/a | user's own data |
+| `prices_eod` | key (`apikey`) | `www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol&outputsize=compact` | Plan-driven (`AV_RPM`) | last trading `date` | Provider API; throttle per registry. |
+| `prices_yf` 🔁 | none | Yahoo via `yfinance` lib (fallback, disabled) | n/a | last `date` | Fallback only; never load-bearing. |
+| `fundamentals` | key (`apikey`) | `financialmodelingprep.com/api/v3/key-metrics-ttm/{sym}`, `/profile/{sym}` | ~250 calls/day | daily snapshot | Fallback to Alpha Vantage where possible. |
+| `news` | key (`token`) | `finnhub.io/api/v1/news?category=general`; `/company-news?symbol&from&to` | ~60 calls/min | article `datetime` | Shared signal feed. |
+| `alpha_vantage` | key (`apikey`) | `www.alphavantage.co/query?function=OVERVIEW|BALANCE_SHEET|CASH_FLOW|NEWS_SENTIMENT|CURRENCY_EXCHANGE_RATE|TREASURY_YIELD` | Plan-driven (`AV_RPM`) | `fetched` / obs `date` | Primary provider for fundamentals, sentiment, FX, and risk-free. |
+| `contracts` | none | `api.usaspending.gov/api/v2/search/spending_by_award/` (**POST**) | generous | `Action Date` | Public official source. |
+| `portfolio` | (web API, Entra) | `POST /transactions` (manual entry, owner-scoped §8.22) | n/a | n/a | User-entered transaction ledger; not an external market-data source. |
 
-\*Limits and free-tier terms change — confirm before coding. Request params, pagination, and full **response→bronze field mappings** are in `docs/source-and-connector-spec.md` (shipped in the repo), which is the squad's build reference; this table is the at-a-glance contract.
+\*Limits change — confirm current provider documentation before coding. Request params, pagination, and full **response→bronze field mappings** are in `doc/source-and-connector-spec.md`, which is the squad's build reference; this table is the at-a-glance contract.
 
 **MCP:** not used for ingestion (a scheduled REST pull gains nothing from it). Auspex may later expose *its own* MCP server over the gold layer for the agent or a bank's tooling — a Phase-2 outbound surface, not MVP ingestion.
 
@@ -238,11 +242,13 @@ The MVP runs entirely on **free/public tiers** (ADR-034). Ingestion is direct pr
 | Heterogeneous sources / cadences | One **connector contract**; each source = isolated Function. Central **source registry** + **watermarks** in Cosmos DB. | New sources are additive; one failing source can't break others. |
 | Turning raw feeds into analytics | **Medallion** (bronze → silver → gold) on OneLake; star schema in Warehouse. | Replayable raw, conformed silver, query-friendly gold. |
 | "Metrics & dimensions" | Conformed dimensions + fact tables + a **metric layer** of SQL views/measures. | Reusable, sliceable analytics; single definition per metric. |
+| Story vs substance (the edge) | Compute a **fundamental anchor** (peer/sector fair-multiple model) and a **narrative-intensity** composite, then measure the **Narrative Premium** as the valuation residual *attributed* to narrative — a deterministic residual, not an LLM verdict. | A measured, validatable "how much are you paying for the story" that a fundamental score can't give and an LLM oracle can't defend (§8.6.6). |
+| Reading narrative out of text | An LLM **sensor** turns news/filings/transcripts into reproducible scalar features (sentiment velocity, theme concentration, forward-promise ratio, …), cached by `(doc_hash, model_version, prompt_version)`; retrieval is time-filtered for PIT. | Captures the unstructured signal **and** stays reproducible/auditable — the LLM never computes the score (§8.6.7, ADR-045/048). |
 | Correctness | Every fact carries `event_date` and `knowledge_date`; queries filter by `knowledge_date`. | Eliminates look-ahead bias for validation and for the agent. |
 | Identity of a company across sources | A dedicated **entity-resolution** pipeline producing `dim_security` (SCD2). | Joins are only as good as the security key. |
 | Unstructured retrieval | Text (news, filing sections) embedded into **Azure AI Search** (hybrid + vector). | The agent needs semantic recall, not just SQL. |
 | Cost | Consumption Functions, serverless Cosmos, **pausable Fabric capacity** (F2), scale-to-zero. | Pay for the daily run, not 24/7. |
-| Repeatability | **Bicep** for Azure, **Fabric Git** for Fabric items, GitHub Actions CI/CD. | Coding agents deploy deterministically. |
+| Repeatability | **Bicep** for Azure, **Fabric Git** for Fabric items, and documented manual deployment steps for now. GitHub Actions automation is deferred to E10. | Coding agents deploy deterministically once the manual path is stable. |
 
 ---
 
@@ -274,7 +280,7 @@ flowchart TB
     WEB[Static Web App<br/>React SPA + Entra auth]
   end
   subgraph Scheduler["Capacity Scheduler"]
-    SCHED[Timer Function / Logic App<br/>resume → run → pause]
+    SCHED[Durable Functions<br/>resume → run → pause]
   end
   subgraph Observability
     MON[Azure Monitor + App Insights]
@@ -315,7 +321,7 @@ flowchart TB
 
 #### BB-2 Control Plane (Cosmos DB serverless)
 - **Containers:**
-  - `sources` — registry: `{source_id, name, type, schedule, base_url, auth_secret_ref, latency_class, reliability_weight, enabled, schema_version}`.
+  - `sources` — registry: `{source_id, name, type, schedule, base_url, auth_secret_ref, latency_class, reliability_weight, implementation_status, enabled, schema_version}`. `enabled=true` means the source has deployed connector code and is safe for orchestration to call; planned sources stay registered but disabled until their route exists.
   - `watermarks` — `{source_id, last_event_ts, last_cursor, updated_at}` (partition key `source_id`).
   - `runs` — per-execution log `{run_id, source_id, started_at, ended_at, status, records_in, bytes, error}`.
   - `dedup` — idempotency keys `{key, source_id, first_seen_at, ttl}` (key = natural id or content hash).
@@ -328,7 +334,7 @@ flowchart TB
 
 #### BB-4 Lakehouse (OneLake)
 - **Bronze (Files):** `bronze/{source_id}/{yyyy}/{mm}/{dd}/{batch_id}.ndjson` — raw records wrapped in an ingestion envelope.
-- **Silver (Delta tables):** cleaned, typed, conformed, **entity-resolved**, deduplicated. One table per canonical entity (`silver.insider_txn`, `silver.news`, `silver.prices`, `silver.holdings_13f`, `silver.ownership_events`, `silver.contracts`, `silver.macro`, `silver.fundamentals`, `silver.fx`, `silver.portfolio_position`), plus control tables (`silver.security_quarantine`, `silver.dq_quarantine`, `silver.parse_errors`).
+- **Silver (Delta tables):** cleaned, typed, conformed, **entity-resolved**, deduplicated. One table per canonical entity (`silver.insider_txn`, `silver.news`, `silver.prices`, `silver.holdings_13f`, `silver.ownership_events`, `silver.contracts`, `silver.macro`, `silver.fundamentals`, `silver.fx`, `silver.portfolio_transaction`), plus control tables (`silver.security_quarantine`, `silver.dq_quarantine`, `silver.parse_errors`).
 
 #### BB-5 Transform & Modeling (Fabric Notebooks, PySpark)
 - **Responsibilities:** bronze→silver (parse, validate, conform, dedup), entity resolution (`dim_security`), silver→gold (load dimensions & facts), metric computation (gold views/measures), and embedding-payload preparation for AI Search.
@@ -340,6 +346,7 @@ flowchart TB
 #### BB-7 Vector serving (Azure AI Search + Azure OpenAI + Azure AI Language)
 - AI Search index over news + filing text chunks. Embeddings from Azure OpenAI (`text-embedding-3-large` or current first-party model). Hybrid (BM25 + vector) with semantic ranker; filterable by security and date for PIT-safe retrieval.
 - **Sentiment** is computed first-party via **Azure OpenAI** (article-level, prompt-based scoring to a −1..1 score with a relevance weight); the prompt/model version is recorded in provenance so scores stay auditable and reproducible. No third-party sentiment API (TC-1).
+- **Narrative-intensity features (LLM-as-sensor, §8.6.7):** the same Azure OpenAI runtime, used as a *sensor*, also emits the structured scalar features that feed the Narrative Premium (sentiment level/velocity, theme concentration, forward-promise-vs-realized ratio, …), each with the cited passages. Extractions are **idempotently cached** keyed by `(doc_hash, model_version, prompt_version)`; retrieval is **time-filtered** (`knowledge_date le {asof}`) so backtests have no text look-ahead. The sensor never sees price and never outputs a score (TC-7, ADR-045/048).
 - **Index schema (`idx-news-filings`):**
 
 ```jsonc
@@ -362,19 +369,35 @@ flowchart TB
 ```
 > Agents MUST always add `knowledge_date le {asof}` to retrieval filters to stay PIT-correct.
 
-#### BB-10 Capacity Scheduler (Timer Function or Logic App)
+#### BB-10 Capacity Scheduler (Durable Functions)
 - **Problem it solves:** a Fabric pipeline cannot resume the very capacity it needs to run on. A small external scheduler owns the capacity lifecycle.
-- **Responsibility:** on a timer (e.g., 04:55 CET), call `Microsoft.Fabric/capacities/{name}/resume` (ARM REST / `az` CLI) → trigger the daily pipeline (Fabric REST job) → poll for completion → call `.../suspend`. Emits a watchdog alert if suspend fails (cost guard).
-- **Why not Azure Automation:** Timer Function (already in the Function App) keeps the service count minimal (OC-2); Logic App is an acceptable low-code alternative.
+- **Responsibility:** a timer-triggered Durable Functions orchestration starts at 04:55 CET, calls `Microsoft.Fabric/capacities/{name}/resume` (ARM REST) → triggers the daily pipeline (Fabric REST job) → waits/polls durably for completion → calls `.../suspend`. It emits a watchdog alert if suspend fails (cost guard).
+- **Why Durable Functions:** the resume/run/pause flow is a small but stateful, long-running orchestration. Durable Functions gives retries, durable timers, replay-safe state, and clearer failure recovery while keeping the service count minimal (OC-2).
 
 #### BB-8 Auspex web application (Azure Static Web Apps + Functions web API)
-- **Frontend:** a single-page app (React) hosted on **Azure Static Web Apps**. Pages: candidate ranking (by `opportunity_score`), a story-vs-substance view, portfolio with buy/sell suggestions and rationale, evidence drill-down (links to filings/news), and source-health. Optionally an agent chat panel.
-- **Web API (`BB-11`):** an **Azure Functions** app (separate from ingestion) that the SPA calls over REST. It is the *only* component the browser talks to and the single place per-user isolation is enforced; it reads the Warehouse SQL endpoint (`v_security_daily_features`, owner-scoped `v_portfolio_with_features`/`v_portfolio_summary`, `recommendation`), queries Azure AI Search for evidence, and writes user input (portfolio edits, watchlist, accepted/dismissed suggestions) to Cosmos/OneLake — always filtered by the caller's `owner_user_sk`. Endpoints serving the UI: `GET /me` (registers on first call), `POST /onboarding`, `GET /portfolio/summary`, `GET /portfolio/holdings`, `GET /recommendations`, `GET|POST /transactions`, `PUT|DELETE /transactions/{id}`, `GET /transactions/summary`, `POST /chat`, `GET /stock/{code}/lookup`.
+- **Frontend:** a single-page app (React) hosted on **Azure Static Web Apps**. Pages: candidate ranking (by `opportunity_score`), the **Narrative-Premium / story-vs-substance map** (the 2D fundamental-anchor × narrative-premium view, §8.6.6), portfolio with buy/sell suggestions and rationale, evidence drill-down (links to filings/news), and source-health. Optionally an agent chat panel.
+- **Web API (`BB-11`):** an **Azure Functions** app (separate from ingestion) that the SPA calls over REST. It is the *only* component the browser talks to and the single place per-user isolation is enforced; it reads the Warehouse SQL endpoint (`v_security_daily_features`, owner-scoped `v_portfolio_with_features`/`v_portfolio_summary`, `recommendation`), queries Azure AI Search for evidence, and writes user input to owner-scoped operational stores: portfolio edits append to the Cosmos transaction ledger, while watchlist and accepted/dismissed suggestions are recorded as user events. Fabric then derives portfolio positions and valuations from the ledger. Endpoints serving the UI: `GET /me` (registers on first call), `POST /onboarding`, `GET /portfolio/summary`, `GET /portfolio/holdings`, `GET /recommendations`, `GET|POST /transactions`, `PUT|DELETE /transactions/{id}`, `GET /transactions/summary`, `POST /chat`, `GET /stock/{code}/lookup`.
 - **Auth & registration:** federated sign-in only — **Microsoft, Google, GitHub via Microsoft Entra External ID** (no Auspex passwords). The SPA's built-in auth gates access; the web API validates the principal and maps it to exactly one `app_user`. The **first** authenticated call for a new identity **registers** the account (then first-run onboarding sets base currency + risk appetite). Every data read/write is scoped to the authenticated user (§8.22); the browser never reaches Fabric/Cosmos directly.
-- **Why this stack:** first-party (TC-1), cheap (SWA free/standard tier, Functions consumption), product-grade UX you fully control, and a clean path to multi-user/commercial later (add tenanting at the API + `dim_user`). Power BI is intentionally *not* the delivery surface.
+- **Why this stack:** first-party (TC-1), cheap (SWA free/standard tier, Functions consumption), product-grade UX you fully control, and multi-user from day one via API-mediated owner scoping. Power BI is intentionally *not* the delivery surface.
 
 #### BB-9 Cross-cutting services
 - Key Vault (secrets), Entra managed identity (auth), Azure Monitor + Application Insights (logs/metrics/alerts).
+
+#### BB-12 Fundamental-Anchor model (Fabric notebook, deterministic)
+- **Responsibility:** for each security per `as_of`, compute the **fundamentally-justified valuation** and the security's position relative to it. **Primary anchor EV/Sales** (universal coverage incl. loss-makers; the multiple narrative inflates), with EV/EBITDA + P/FCF as secondary anchors where defined, via a **robust (Huber) within-sector regression** of the log-multiple on fundamentals (growth, margin, ROIC/quality, leverage, cash burn) and a **peer-percentile fallback**. Output: `fundamental_anchor` band + `fundamental_anchor_z` (price's standardized distance above/below fair, in σ). Full recipe + DDL in §8.6.8.
+- **Interface:** reads `v_fundamentals_latest`, `fact_market_daily`; writes `fact_fundamental_anchor` (gold) + `v_fundamental_anchor`. PIT via `knowledge_date` on **as-reported** fundamental vintages. No LLM (TC-7). The anchor residual is the **valuation residual** consumed by the valuation brake (§8.6.4) and the Narrative Premium (§8.6.6 step 3).
+- **Note:** consensus-forward inputs are *themselves* partly narrative; the model flags when the anchor leans on forward estimates vs realized results, and negatives are excluded from the affected multiple, never imputed.
+
+#### BB-13 Narrative-Intensity Extractor (Azure OpenAI as sensor)
+- **Responsibility:** turn the news/filing/transcript corpus into the **reproducible scalar features** of §8.6.7 (sentiment level/velocity, theme concentration, forward-promise ratio, hype density, management-narrative-vs-reality gap), each with cited evidence. Combined with deterministic market/attention signals (revision dispersion, options skew, news-volume z, insider divergence) into a `narrative_intensity` composite.
+- **Interface:** reads the AI Search corpus (time-filtered) + gold facts; writes `fact_narrative_features` and `fact_narrative_intensity` (gold), plus the evidence references. Idempotent cache keyed by `(doc_hash, model_version, prompt_version)`. The sensor outputs **numbers, never a verdict** (ADR-045/048).
+
+#### BB-14 Narrative-Premium / Divergence engine (deterministic)
+- **Responsibility:** combine BB-12 and BB-13 into the headline read. Compute the valuation **residual** (price vs fundamental anchor) and **attribute** the part that co-moves with `narrative_intensity` → `narrative_premium` (σ/%). Classify the `divergence_state` (e.g. *narrative-led overextension*, *narrative on strong fundamentals*, *fundamentally-anchored*, *narrative-neglected* — the unloved good business, *converging*) and place the name on the **2D map** (anchor strength × premium). The engine is **symmetric**: it surfaces both overextension and neglect.
+- **Interface:** reads `fact_fundamental_anchor` + `fact_narrative_intensity`; writes `fact_narrative_premium` and the serving view `v_narrative_premium`; feeds the valuation brake (§8.6.4) and the Discussion-tab map (§5.6, BB-8). Fully reproducible; assembles the per-name **evidence pack** (§8.25).
+
+#### BB-10b Decision log (immutable, append-only)
+- **Responsibility:** persist every published recommendation/score/premium as an append-only record — `decision_id`, UTC timestamp, model & prompt versions, input-snapshot hash, leg/driver attribution, rationale, evidence references — so any past output is reconstructable (QG-8). Backs the bank-embed record-keeping seam (§8.27). Implemented on immutable (WORM) storage / append-only table.
 
 ### 5.3 Gold star schema (Level 2 detail)
 
@@ -424,7 +447,7 @@ CREATE TABLE dim_source (
   source_type      VARCHAR(32),               -- filing | news | price | macro | contract
   latency_class    VARCHAR(16),               -- realtime | daily | quarterly
   reliability_weight DECIMAL(3,2),            -- 0..1, used by metrics/agent
-  license_type     VARCHAR(32)
+  source_class     VARCHAR(32)
 );
 ```
 
@@ -484,7 +507,8 @@ CREATE TABLE fact_macro (
 );
 
 -- FX rates: required to normalize all monetary facts to USD at event_date.
--- Source: ECB / SNB reference rates (first-party-friendly public APIs).
+-- Source: Alpha Vantage CURRENCY_EXCHANGE_RATE (USD->base). US-only retires the
+-- SNB/ECB FX connectors (ADR-040/042); one USD pair suffices.
 CREATE TABLE fact_fx_rate (
   ccy_pair VARCHAR(7) NOT NULL,                -- e.g. EURUSD, CHFUSD
   date_sk INT NOT NULL, rate DECIMAL(18,8) NOT NULL,
@@ -528,6 +552,8 @@ SELECT
   nws.news_sentiment_ewma_14d, nws.news_volume_z_30d,
   -- catalysts
   con.contract_award_usd_trailing_90d,
+  -- story vs substance (the edge)
+  fa.fundamental_anchor_z, ni.narrative_intensity, np.narrative_premium, np.divergence_state,
   -- composites
   cs.opportunity_score,
   -- provenance / freshness
@@ -579,8 +605,6 @@ The frontend is designed so a non-expert can use, verify, and trust it. UX is a 
 **Effortless portfolio entry.** Ticker/ISIN **autocomplete** (resolved against `dim_security`), quantity + price, done; a two-tap flow for dividends/deposits; friendly inline validation. A first-run **onboarding wizard**: enter holdings + cash, pick base currency, set risk appetite.
 
 **Risk appetite as a simple control.** A single conservative ↔ balanced ↔ aggressive selector maps to the risk-aversion `λ` and policy in `app_config` — the user never edits a config table.
-
-**Internationalization.** UI localized for EN / DE / FR / IT (the user's languages); all copy externalized; numbers/currencies/dates formatted per locale.
 
 **Morning summary.** An optional daily notification (email) with "what changed and today's suggestions," linking into the app.
 
@@ -646,18 +670,25 @@ sequenceDiagram
 
 ### 6.6 User updates the portfolio (write scenario)
 1. User edits holdings or accepts/dismisses a suggestion in the SPA.
-2. Web API validates and writes to Cosmos (operational) and/or OneLake (`silver.portfolio_position` upsert), stamped with `as_of_date`.
-3. Next daily build folds the new holdings into `v_portfolio_with_features`; the agent re-evaluates on the next run.
+2. Web API validates the request and appends an owner-scoped transaction or user event to Cosmos; it does **not** upsert derived position snapshots directly.
+3. Next daily build mirrors the transaction ledger into `silver.portfolio_transaction`, derives gold positions/valuation, folds the result into `v_portfolio_with_features`, and the agent re-evaluates on the next run.
 
 ### 6.7 Add current portfolio manually (onboarding scenario)
 1. User creates an account, then enters opening holdings (`OPENING_POSITION` per stock: ticker/ISIN, quantity, cost) and opening cash (`OPENING_CASH`).
-2. Web API validates each transaction, derives the signed `cash_amount`, writes to Cosmos, and **onboards each security** into `dim_security` + the ingestion universe.
+2. Web API validates each transaction, derives the signed `cash_amount`, appends it to the owner-scoped Cosmos transaction ledger, and **onboards each security** into `dim_security` + the ingestion universe.
 3. The SPA shows an immediate quick view (`GET /portfolio/quick`); the nightly build then produces full market valuation and `v_portfolio_summary`.
 
 ### 6.8 Record a cash transaction → rebalance (cash scenario)
 1. User records a `DIVIDEND` or `DEPOSIT` (additional funds) in the SPA.
 2. Cash rises; the next build recomputes `total_value_base` and `investable_cash_base` (after the cash buffer).
 3. The agent proposes how to deploy the new cash: `ADD`/`BUY` into top Opportunity-Score, underweight names sized to the risk budget, or hold as cash — written to `recommendation` with rationale and evidence.
+
+### 6.9 Narrative-Premium computation (story-vs-substance scenario)
+1. **Anchor (deterministic, BB-12):** `nb_fundamental_anchor` fits the within-sector fair-multiple model over the current universe (PIT) and writes `fact_fundamental_anchor` (`fundamental_anchor_z` per security).
+2. **Sensor (LLM-as-sensor, BB-13):** for each name, the narrative-intensity features are read from the **cache**; only documents new since the last run (or a changed prompt/model version) are (re)extracted from the time-filtered corpus, at temperature 0, with cited passages. A **groundedness check** rejects any feature claim not supported by a retrieved passage. Deterministic market/attention signals are joined; the `narrative_intensity` composite is written to `fact_narrative_intensity`.
+3. **Premium (deterministic, BB-14):** the valuation residual (price vs anchor) is attributed to `narrative_intensity`; `narrative_premium`, `divergence_state` and the 2D-map coordinates are written to `fact_narrative_premium` / `v_narrative_premium`, and feed the valuation brake (§8.6.4).
+4. **Evidence pack + decision log:** each name's premium links its driver features, the cited passages, the anchor inputs and the model/prompt versions; the published read is appended to the immutable **decision log** (BB-10b) under a `decision_id` (QG-8).
+5. **Serving:** the Discussion tab renders the map and the per-name decomposition (§5.6, §8.21). **Backtests reuse the same code path** with `@asof` set in the past — the cache and the time-filtered retrieval guarantee no text look-ahead (QS-17).
 
 ---
 
@@ -668,24 +699,24 @@ sequenceDiagram
 ```mermaid
 flowchart TB
   subgraph Subscription
-    subgraph RG-fip-shared ["Resource Group: shared"]
+    subgraph RG-auspex-shared ["Resource Group: shared"]
       KV[Key Vault]
       MON[Log Analytics + App Insights]
       COSMOS[(Cosmos DB serverless)]
     end
-    subgraph RG-fip-ingest ["Resource Group: ingest"]
-      FUNC[Function App<br/>Flex Consumption<br/>connectors + capacity scheduler]
+    subgraph RG-auspex-ingest ["Resource Group: ingest"]
+      FUNC[Function App<br/>Flex Consumption<br/>connectors + Durable Functions scheduler]
       ST[Storage Account<br/>Functions host]
     end
-    subgraph RG-fip-data ["Resource Group: data"]
+    subgraph RG-auspex-data ["Resource Group: data"]
       FAB[Fabric Capacity F2<br/>pausable]
       WS[Fabric Workspace<br/>Lakehouse · WH · Pipelines]
     end
-    subgraph RG-fip-ai ["Resource Group: ai"]
+    subgraph RG-auspex-ai ["Resource Group: ai"]
       AIS[Azure AI Search]
       AOAI[Azure OpenAI<br/>embeddings + sentiment]
     end
-    subgraph RG-fip-web ["Resource Group: web"]
+    subgraph RG-auspex-web ["Resource Group: web"]
       SWA[Static Web App<br/>React SPA]
       WAPI[Function App<br/>web API]
     end
@@ -695,15 +726,16 @@ flowchart TB
 
 - **Region:** Switzerland North for all that support it; nearest paired region for anything that does not (documented per resource).
 - **Identity:** system-assigned managed identities; Key Vault references; no secrets in app settings or code.
-- **Networking (v1):** public endpoints + managed identity + RBAC. Private Endpoints listed as a hardening backlog item, not v1.
+- **Networking (v1):** the SPA + web API are the public surfaces; private endpoints are used for key data-plane dependencies where subscription policy/keyless access requires them (Cosmos DB, Key Vault, Function host storage). Managed identity + RBAC remain the primary security boundary. WAF, private ingress, and bank-grade tenant network isolation are deferred hardening.
 
 ### 7.2 Environments
 - `dev` and `prod` as separate resource groups + Fabric workspaces, same Bicep with parameter files.
 - Fabric items promoted via **Fabric Git integration** + deployment pipelines.
 
-### 7.3 IaC & CI/CD
-- **Bicep** modules per resource group; `main.bicep` composes them.
-- **GitHub Actions:** lint/test → `az deployment` (Bicep) → Fabric Git sync → smoke test (trigger a no-op pipeline run).
+### 7.3 IaC & deployment automation
+- **Bicep** modules per resource group; `main.bicep` composes all Azure infrastructure resources up front, including resources consumed by later application epics. Application code may arrive later, but the infrastructure is not deployed in later feature waves. Fabric workspace items are synced via Fabric Git because they are not ARM/Bicep resources.
+- **Current deployment path:** manual/local commands documented in `doc/operations.md` are the supported path for E1-E4.
+- **Deferred automation:** GitHub Actions CI/CD is an E10 hardening item, not an E1 completion requirement.
 
 ---
 
@@ -827,7 +859,7 @@ Auspex does **not** rank by predicting returns from price cycles. It ranks by **
 
 **What feeds the legs (ADR-042).** The leg-source views read concrete gold, not sketches: `fact_fundamentals` → `v_fundamentals_latest` backs the **fundamental-health** and **valuation** legs (`pe_ratio`, `peg_ratio`, `ps_ratio`, `ev_ebitda`, `gross_margin`, `profit_margin`, `rev_growth_yoy`), sourced from **Alpha Vantage `OVERVIEW`** (FMP fallback) and normalized into source-agnostic columns by `nb_av_to_gold`. The **attention** leg reads `v_news_count_30d` vs `v_news_count_prev_30d` (article-volume acceleration), and the **sentiment** signal reads `v_news_sentiment_30d` — both fed by AV `NEWS_SENTIMENT` (per-ticker score) alongside Finnhub company-news in `fact_company_news`. AV `CURRENCY_EXCHANGE_RATE` lands `fact_fx_rate` (USD→CHF). `net_debt_to_ebitda` is computed from AV `BALANCE_SHEET` (net debt = total debt − cash) over `OVERVIEW` EBITDA, and `fcf_yield` from AV `CASH_FLOW` (operating cash flow − capex) over market cap — so the fundamental-health and valuation legs are fully fed, not imputed. Any field a source genuinely lacks still stays NULL and the leg COALESCEs it. The pure field mapping lives in `connectors/alpha_vantage/mapping.py` (unit-tested); the notebook mirrors it.
 
-**Story vs substance.** Each name carries a read on *narrative strength* (linkage + attention) and *substance* (health + valuation). Strong story with reasonable substance is the opportunity (the early enabler); strong story with stretched valuation is the crowded late trade the valuation brake flags. That is the discipline that stops the engine chasing hype.
+**Story vs substance — now measured (§8.6.6).** Each name carries a read on *narrative strength* and *substance*. In the MVP this is no longer only a qualitative leg read: the **narrative strength** is the measured `narrative_intensity` composite (§8.6.7) and the **substance** is the `fundamental_anchor` (§8.6.6), and their interaction is the **Narrative Premium** — the part of the price fundamentals don't explain, attributed to narrative. Strong story with reasonable substance is the opportunity (the early enabler); strong story with a large unexplained premium is the crowded late trade the valuation brake flags; strong substance with *no* narrative is the neglected name the engine also surfaces. That is the discipline that stops the engine chasing hype — and the quantitative form of this read is defined next.
 
 ### 8.7 Security
 - Managed identity for all service-to-service calls; **no connection strings/keys in code**.
@@ -845,9 +877,9 @@ Auspex does **not** rank by predicting returns from price cycles. It ranks by **
 - AI Search: smallest tier that fits the index; Azure OpenAI embeddings batched.
 - See §10 budget scenario.
 
-### 8.10 Compliance & licensing
-- Respect each source's ToS; store a `license_type` per source; do not redistribute.
-- Unofficial endpoints (e.g., Yahoo via library) flagged as `reliability_weight` low and `license_type=unofficial`; treated as best-effort, never load-bearing.
+### 8.10 Compliance posture
+- Advisory-only framing, disclosure acknowledgment, evidence packs, and immutable decision logs provide the MVP's basic regulatory spine.
+- Source reliability is tracked per source; fallback feeds are flagged with low `reliability_weight` and treated as best-effort, never load-bearing.
 
 ### 8.11 Schema evolution
 - Bronze envelope carries `schema_version`. Silver parsers are versioned and tolerant (additive changes don't break; breaking changes bump the version and add a branch).
@@ -873,6 +905,8 @@ Auspex does **not** rank by predicting returns from price cycles. It ranks by **
 ### 8.15 Thesis validation (does selection beat the theme?)
 The thesis engine is **not** validated by predicting returns from price cycles. The honest, bank-relevant test is whether the engine's **shortlist beats naive exposure to the theme** — the equal-weight basket and the obvious leaders — which isolates *selection skill* from *theme beta*, needs far less data, and is exactly what a bank asks. Two checks: a **theme-relative** comparison (`adds_value` is true only if the picks beat the theme itself, after costs and vs a benchmark) and **catalyst event studies** (when an insider cluster + attention acceleration + a contract fire together, the forward-outcome distribution — mean and hit-rate). **Implemented** in `backtest/`: `thesis_validation.py` is canonical, `engine.py` provides generic ranking statistics as a *diagnostic* (not a factor gate), `run.py` is a demo, and results persist to `dbo.validation_result` (`04_validation.sql`); `warehouse_panel.sql` supplies the PIT forward returns. Forward windows are evaluated at **multiple horizons — 21, 63, and 126 trading days (1, 3, 6 months)** — with **~1 quarter (63d) as the primary advisory horizon** (ADR-044). The *shape* of the excess return across horizons is itself the test: a real fundamental/insider signal **builds** from 1→3→6 months, whereas attention noise shows up at 1 month and is **gone by 3** — so `thesis_validation.horizon_term_structure` reports the per-horizon mean/hit-rate/excess and a drift-vs-noise signature. The gate is "beat the theme, not just ride it" — there is no factor-IC SHIP gate. Honest caveat: a strong year inside a hot theme is mostly *theme beta*; this measurement is what separates skill from beta.
 
+**Is the Narrative Premium actually new? (orthogonalization).** Because the premium is a novel factor, it carries a specific failure mode: it could be a repackaging of value+momentum rather than information of its own. The decisive test — run before the premium is ever used as a *ranking* input — is **orthogonalization**: neutralize `narrative_premium` against the known factors (value, momentum, quality, size, low-vol) and check whether the **residual** still carries information. If it survives, Auspex has a proprietary, bank-defensible factor; if it collapses, it does **not** ship as a ranking factor — it ships only as the decision-support *visualization* ("here is how much of the price is story"), which is useful regardless (ADR-046/047, R-17). Two further honesties about a sentiment/narrative factor: it is **regime-dependent and decays** (validate champion/challenger over regimes, treat it as one input — R-18), and it predicts **volatility and drawdown** more reliably than direction — so the premium is validated against **multiple targets** (forward return, forward realized vol, max drawdown) with **calibration curves** (does the 90th-percentile premium correspond to the claimed outcome distribution?), not against forward return alone.
+
 **Two TRS-based yardsticks make this concrete (§8.6.5).** The relevant **US thematic ETF is the benchmark-to-beat**: `thesis_validation.beat_the_theme` compares the picks' daily series against the ETF's on **Sharpe (×√252), cumulative return, and max drawdown** (the THEME paper's metrics), and `beats_theme` is true only when the picks beat the ETF on Sharpe *and* CR. Separately, **retrieval precision** against the ETF/sector constituents (`v_theme_ground_truth`) is scored with **HR@k / P@k** (`retrieval_metrics`, k∈{3,5,10}) — the check that catches hallucinated graph edges before any UI trusts them.
 
 ### 8.16 Transaction costs, frictions & tax awareness
@@ -890,6 +924,74 @@ The TRS is used three ways, **without any model fine-tuning**:
 3. **Benchmark** selection: the thematic ETF *is* the "naive theme exposure" basket to beat (§8.15).
 
 Honest framing: ETFs are biased toward popular sectors and **slow to add emerging names** — which is the very thing Auspex exists to catch. So the ETF is the **seed and the benchmark-to-beat, not the candidate universe**; the alpha is finding the enabler *before* it enters the ETF. (Retrieval with off-the-shelf Azure OpenAI embeddings is "decent, not state-of-the-art"; the TRS ground truth is exactly what would later let us decide whether fine-tuning is worth it — a deliberate Phase-2 question, not an MVP one.)
+
+### 8.6.6 Narrative Premium — story vs substance, as a number
+The Narrative Premium is Auspex's distinctive read and the quantitative form of "story vs substance" (§8.6.3). It answers one question per name: **how much of this price do fundamentals justify, and how much is narrative?** It is computed in three deterministic moves (an LLM contributes only the *features* of step 2, never the verdict — TC-7, ADR-045).
+
+1. **Fundamental anchor (BB-12, full design §8.6.8).** Within each sector, fit a **fair-multiple model** whose **primary anchor is EV/Sales** — chosen because it is defined for virtually every name *including the unprofitable growth/enabler names the product exists to judge*, and because EV/S is precisely the multiple narrative inflates (you pay N× sales for a *story* about future margins). EV/EBITDA and P/FCF are **secondary anchors where defined** (positive denominators), blended in by availability so a name cheap on EV/S but dear on EV/EBITDA is still disciplined. Each anchor is a **robust (Huber) cross-sectional regression** of the log-multiple on fundamentals (growth, margin, ROIC/quality, leverage, **cash burn**), with a **peer-percentile fallback** when a sector has too few peers. The fitted value is the *fundamentally-justified* multiple; the security's standardized distance from it is `fundamental_anchor_z`. PIT throughout (as-reported fundamental vintages); negatives are **excluded from the affected multiple, never imputed** (§8.6.8).
+2. **Narrative intensity (BB-13, §8.6.7).** A composite, 0–100, of how much story/attention is propelling the name — measured, reproducible features from text plus deterministic market signals.
+3. **The premium = the attributed residual.** Take the valuation **residual** (where the price/multiple sits above the anchor) and **attribute** the part that co-moves with `narrative_intensity`. That part is `narrative_premium` (in σ or %). This is glass-box: the residual is arithmetic, the attribution is a transparent decomposition — not "the model thinks it's expensive".
+
+**Divergence state & the 2D map.** Each name is placed on a map of **fundamental-anchor strength (x)** × **narrative premium (y)**, yielding a `divergence_state`:
+- *Narrative on strong fundamentals* — high premium **and** strong anchor (e.g. a megacap whose story amplifies real, top-decile fundamentals): premium is real-amplified, not hollow.
+- *Narrative-led overextension* — high premium, **weak/negative** anchor (the price is mostly story): the crowded late trade.
+- *Fundamentally anchored* — low premium: price ≈ fundamentals.
+- *Narrative-neglected* — strong anchor, **low/negative** premium: the unloved good business the story-chasing market ignores — a buy candidate, not a warning.
+- *Converging* — premium compressing toward the anchor.
+
+The engine is therefore **symmetric**: it surfaces both over-extension *and* neglect — a richer product than "spot the bubble". The premium feeds the valuation brake (§8.6.4) as the disciplined, measured version of "don't pay up for the story", and the map is a first-class Discussion-tab surface (§5.6).
+
+**Honest framing.** A large narrative premium is *not* a sell signal on its own — narrative can persist and even compound, and "the market can stay irrational longer than you can stay solvent". The premium predicts **elevated volatility and tail risk** more reliably than it predicts direction (§8.15). Its honest job is to make the trade-off **visible** — "this much of the price is story" — so the user (or a bank's client) decides with eyes open. That is decision support, not a forecast (ADR-043).
+
+### 8.6.7 Narrative-intensity feature set (the LLM as a sensor)
+`narrative_intensity` is built from features that are **structured, scalar, and reproducible** — the discipline that lets an LLM contribute without becoming an un-auditable oracle. Two groups:
+
+**Text-derived (Azure OpenAI as sensor).** For each name, from the time-filtered news/filing/transcript corpus, the model emits scalars in **[0,1]** (or a z-score) **with the passages it cited**:
+- `sentiment_level` / `sentiment_velocity_z` — not just polarity, but the *rate of change* and coverage volume (narrative builds by acceleration).
+- `theme_concentration` — Herfindahl over the dominant themes the model clusters from the corpus; a single, repeated story (e.g. "AI", "Mars") propels price more than scattered news.
+- `forward_promise_ratio` — share of statements that are *future/TAM* language vs *realized results*. This is the feature that most directly captures the SpaceX/OpenAI phenomenon (a valuation priced on a story about the future, not on current P&L).
+- `hype_density` — superlatives / "story words" vs "number words".
+- `mgmt_reality_gap` — tone of management/transcript vs the actual fundamentals.
+
+**Deterministic market/attention signals (no LLM).**
+- `revision_dispersion_z` — std-dev of analyst targets/estimates; narrative names disperse.
+- `options_skew` / implied-vol level — lottery-like demand on story names.
+- `news_volume_z_30d` — reuses §8.6 (article-volume acceleration).
+- `insider_divergence` — insiders **selling into** narrative strength (Form 4) is a classic divergence cue.
+
+**Reproducibility (ADR-048).** Extractions run at **temperature 0** with a **pinned model and prompt version**; results are stored in an **idempotent cache keyed by `(doc_hash, model_version, prompt_version)`**, so a given document is extracted once and re-derives identically. Retrieval is always filtered `knowledge_date le {asof}` so a backtest "as of D" sees only text available by D — closing the text-corpus look-ahead seam that quietly invalidates most NLP signals (QS-17, R-20). A **groundedness pass** rejects any feature value not supported by a retrieved passage. Any change of model or prompt version **bumps the version and triggers re-validation** (§8.15, change-control under §8.26). The sensor **never sees price and never outputs a score** (TC-7, ADR-045).
+
+### 8.6.8 Fundamental-anchor model — design (E20)
+The anchor answers "what multiple do this name's fundamentals justify, versus what the market pays?" Its residual is the **valuation residual** the Narrative Premium attributes (§8.6.6) and the measured form of the valuation brake (§8.6.4). Design choices (selected for the product's goal — judging narrative-heavy, often unprofitable names, robustly and explainably):
+
+**Choice 1 — primary multiple = EV/Sales.** Defined for nearly every issuer including pre-profit growth names; it is the multiple narrative inflates most directly. EV/EBITDA and P/FCF are **secondary anchors where the denominator is positive**, blended by availability. A composite anchor = availability-weighted mean of the per-multiple residuals, so a name expensive on *any* defined multiple is disciplined.
+**Choice 2 — estimator = robust (Huber) within-sector regression of the log-multiple, peer-percentile fallback.** Financial cross-sections have heavy tails; OLS chases outliers, so Huber/RLM is the core. Log-space makes the residual a clean percentage premium. When a sector has `< MIN_PEERS` (default 8) or regression diagnostics fail, fall back to **peer-percentile** (the name's multiple rank within its sector) — graceful degradation, never a fabricated fit.
+**Choice 3 — negatives are excluded, not imputed.** Negative EBITDA/FCF ⇒ that multiple is dropped for the name (it is meaningless), and the name anchors on EV/S + any positive secondary. Negative *regressor* values (loss margins, negative growth) are kept — they correctly lower the justified multiple. Sales ≤ 0 (pre-revenue) ⇒ `anchor_method='unanchorable'`, premium reported at low confidence.
+
+**Recipe (reproducible, per `as_of`, per GICS sector):**
+1. Build the candidate panel from `v_fundamentals_latest` (PIT, **as-reported vintages**) + market cap/EV from `fact_market_daily`. Regressors: `rev_growth_yoy`, `gross_margin`, `profit_margin`, `roic`, `net_debt_to_ebitda`, `fcf_yield`, `cash_burn_flag`.
+2. For each multiple m ∈ {EV/S (always), EV/EBITDA, P/FCF (if denom > 0)}: winsorize inputs at 1/99; `y = ln(m)`; fit `RLM(y ~ standardized regressors)` within sector.
+3. `expected_ln_m = fit.predict`; `residual_m = y − expected_ln_m` (≈ % premium in log space).
+4. Composite `residual = availability-weighted mean(residual_m)`; `fundamental_anchor_z = ` cross-sectional standardization of the studentized composite residual over the universe (sign: **positive = price above fundamental fair = premium**).
+5. Degrade per Choice 2/3; record `anchor_method`, `n_peers`, `r2_sector`, `imputed_flags`, `model_version`.
+
+```sql
+CREATE TABLE fact_fundamental_anchor (
+  security_sk     BIGINT NOT NULL, date_sk INT NOT NULL,        -- grain: (security, as_of)
+  ev_sales        DECIMAL(18,6), ev_ebitda DECIMAL(18,6), p_fcf DECIMAL(18,6),
+  expected_ev_sales DECIMAL(18,6),                              -- fundamentally-justified
+  residual_evs    DECIMAL(12,8), residual_evebitda DECIMAL(12,8), residual_pfcf DECIMAL(12,8),
+  anchor_residual DECIMAL(12,8),                                -- composite (the valuation residual)
+  fundamental_anchor_z DECIMAL(9,6),                            -- standardized; + = premium
+  anchor_method   VARCHAR(16) NOT NULL,                         -- regression | percentile | unanchorable
+  n_peers         INT, r2_sector DECIMAL(5,4), uses_forward BIT,
+  imputed_flags   VARCHAR(256), model_version VARCHAR(32) NOT NULL,
+  source_sk INT, event_date DATE, knowledge_date DATE
+);
+-- v_fundamental_anchor: latest per security, joined to dim_security; the seam BB-14 + the valuation brake read.
+```
+
+**Artifacts:** `engine/fundamental_anchor.py` (pure, unit-tested model logic), `fabric/notebooks/nb_fundamental_anchor` (mirrors it, writes gold), `fabric/warehouse/metrics/14_fundamental_anchor.sql` (DDL + `v_fundamental_anchor`). **Tests:** PIT (no restated fundamentals leak), a golden sector regression, negatives-excluded, percentile fallback under `MIN_PEERS`, and a sign test (a known richly-valued name returns positive `fundamental_anchor_z`).
 
 ### 8.18 Data-completeness & freshness gate (no acting on partial data)
 Before the agent generates any recommendation, a **gate** checks per-source freshness and completeness against thresholds (expected rows, max staleness, quarantine rate). If the gate fails, the build still publishes data marked **provisional**, recommendations are **withheld** (or clearly flagged "based on incomplete data"), and an alert fires. The agent never silently advises on a day a source failed.
@@ -933,6 +1035,28 @@ Auspex is multi-user from day one, and isolation is a hard correctness requireme
 - **Enforcement (defense in depth):** the gold serving views carry `owner_user_sk`; the web API resolves the user from the validated principal and filters **every** query/mutation by it (the data-access layer has no un-scoped method, so cross-user access is structurally impossible); writes use `WHERE owner_user_sk=@user` so editing/deleting another user's row affects zero rows; the daily recommender runs per user.
 - **Scope boundary:** this is per-*end-user* isolation. Per-*bank* tenant isolation (RLS, per-tenant infra) is a later layer (§1.5) for when an institution embeds Auspex.
 
+### 8.25 Deterministic core, LLM-as-sensor & the evidence pack
+The architectural spine of the engine is a strict separation (TC-7, ADR-045):
+- **Deterministic core.** The Opportunity Score, the fundamental anchor and the Narrative Premium are computed by reproducible code over gold facts. Given the same universe, weights and input snapshot, the output is identical.
+- **LLM as sensor and narrator only.** Azure OpenAI is used for exactly two things: (a) **extraction** — reading text into structured, cited features and thesis-graph edges (§8.6.7, §8.6.3); and (b) **narration** — phrasing a rationale whose every claim is grounded in retrieved evidence (§8.19). It is *never* the path that computes a score or emits a recommendation. This is the difference between a signal a bank's model-risk committee can validate and an opaque verdict it must reject.
+- **Evidence pack.** Every published read carries a machine-readable pack: the score/anchor/premium, the signed leg/driver contributions, the underlying data points with `event_date`/`knowledge_date` and source ids (Alpha Vantage field, Finnhub quote, EDGAR accession), the cited passages, and the model & prompt versions. The pack is what powers §8.21 explainability *and* the §8.27 audit trail — the same artifact serves the user and the regulator.
+
+### 8.26 Reproducibility, versioning & change control
+Reproducibility (QG-8) is engineered, not hoped for:
+- **Version everything that affects an output:** the scoring code, `metric_weights`, the fair-multiple model, the extraction **prompts**, and the **model** id. Each carries a semantic version + changelog.
+- **Reconstruct from `decision_id`:** a deterministic pipeline + a pinned model/prompt version + the stored input-snapshot hash re-derive any past recommendation, score, premium, drivers and evidence exactly.
+- **Idempotent feature cache:** `(doc_hash, model_version, prompt_version)` (§8.6.7) means a document is extracted once and never drifts within a version.
+- **Change control:** any change to a scoring weight or to a model/prompt version is a versioned event that **triggers re-validation** (§8.15) before it can affect published output — the discipline a DORA-regulated buyer expects of an ICT change (§8.27).
+- **Immutable decision log (BB-10b):** append-only/WORM record of every published output for record-keeping.
+
+### 8.27 Bank-embed compliance seam (Phase-2: advice boundary, AI Act, MiFID II, DORA)
+The MVP is multi-user and advisory-only, with basic suitability/disclosure records already present so banks can evaluate the product. The heavier bank-embed obligations remain Phase-2, but the design lays the seams so that selling Auspex as an **embedded engine to a bank** (the bank adds full suitability, execution and custody) is a layering exercise, not a rewrite.
+- **Advice boundary (the core seam).** Auspex emits **instrument-level decision-support objects** — score, anchor, narrative premium, divergence state, evidence, confidence, horizon, risk flags — explicitly **not** "buy this for client X". Personalization and **suitability remain the bank's regulated layer**; under MiFID II the suitability obligation sits with the regulated firm, not the tool, and a machine cannot be the legal "advisor". The §8.24 risk bands are built to map 1:1 onto a bank's client categories precisely so this hand-off is clean.
+- **EU AI Act.** Investment advice / portfolio management is **not** classified high-risk under the Act (unlike credit scoring or insurance pricing), so the engine is likely outside the high-risk regime — but **Art. 50 transparency** still applies (the end client is told they are interacting with / receiving AI-generated analysis). The evidence pack (§8.25) and reproducibility (§8.26) pre-satisfy the documentation a high-risk reclassification would demand, de-risking the legal grey zone.
+- **DORA.** Embedded in a bank, Auspex is an **ICT third-party service provider**: the bank must run vendor due diligence, resilience testing and exit planning, and may designate the service critical. The deployment must therefore ship the DORA artifacts — ICT-risk documentation, business-continuity/exit plan, audit rights, change control (§8.26) — as part of the product, not as an afterthought.
+- **When the bank adds automated execution** on top of Auspex's suggestions, **MiFID II algorithmic-trading controls** (RTS 6: pre-trade controls, kill-switch, audit trails, NCA reporting) bind **the bank** — but Auspex must supply the **time-stamped, reproducible rationale trail** those controls reconcile against. Business-clock alignment (UTC, synchronized) matters once an output can feed a trade.
+Out of scope for the MVP (Phase-2): the bank-side suitability questionnaire, the compliance-officer console, formal independent model validation, and per-tenant isolation — all of which layer onto the seams above (§8.24).
+
 ---
 
 ## 9. Architecture Decisions (ADRs)
@@ -948,12 +1072,12 @@ Auspex is multi-user from day one, and isolation is a hard correctness requireme
 | ADR-007 | Cosmos DB serverless as control plane | Accepted | Low-latency watermark/idempotency; cheap. | Table Storage (cheaper, weaker queries); Fabric SQL DB. |
 | ADR-008 | `event_date` + `knowledge_date` on all facts | Accepted | Prevents look-ahead bias (QG-1). | Single timestamp. |
 | ADR-009 | Switzerland North region | Accepted | Swiss-resident data residency. | West Europe (lower latency, weaker residency). |
-| ADR-010 | Bicep IaC + GitHub Actions + Fabric Git | Accepted | Deterministic, agent-friendly deployment. | Terraform (not first-party), manual. |
+| ADR-010 | Bicep IaC + Fabric Git; GitHub Actions deferred | Accepted | Bicep gives repeatable Azure infrastructure now; Fabric Git/manual sync handles Fabric items; GitHub Actions automation is deferred until the manual E1-E4 path is stable. | Terraform (not first-party); making CI/CD a prerequisite before the deployment path is stable. |
 | ADR-011 | Azure AI Foundry Agent Service for the agent | Accepted | First-party agent runtime consuming Auspex interfaces. | Custom orchestrator. |
-| ADR-012 | External Capacity Scheduler owns Fabric resume/pause | Accepted | A pipeline can't resume its own capacity; external timer breaks the cycle and guards cost. | Always-on capacity (cost), manual pause (error-prone). |
+| ADR-012 | Durable Functions Capacity Scheduler owns Fabric resume/pause | Accepted | A pipeline can't resume its own capacity; a durable orchestration breaks the cycle, survives long-running waits, and guards cost. | Always-on capacity (cost), manual pause (error-prone), stateless timer polling. |
 | ADR-013 | First-party sentiment via **Azure OpenAI** (locked) | Accepted | Richer article-level sentiment; auditable, provenance-tracked; keeps TC-1. | Azure AI Language (shallower), third-party APIs (TC-1). |
 | ADR-014 | Normalize money to USD via FX fact at event_date | Accepted | Comparable cross-currency metrics; PIT-correct FX. | Mixed-currency facts (incomparable). |
-| ADR-015 | Custom web app on **Azure Static Web Apps + Functions web API** (not Power BI) | Accepted | Product-grade, fully controlled UX; first-party; cheap; commercializable (path to multi-user). | Power BI Embedded (licensing, less control), App Service (heavier). |
+| ADR-015 | Custom web app on **Azure Static Web Apps + Functions web API** (not Power BI) | Accepted | Product-grade, fully controlled UX; first-party; cheap; multi-user from day one. | Power BI Embedded (less control), App Service (heavier). |
 | ADR-016 | **Federated sign-in via Entra External ID** (Microsoft/Google/GitHub), API-mediated data access | Accepted | No Auspex passwords; one identity broker; browser never touches Fabric/Cosmos; least-privilege. | Anonymous app or direct SQL from client (insecure); per-IdP bespoke auth. |
 | ADR-017 | Portfolio = **transaction log as source of truth**; positions/cash/value derived | Accepted | Accurate cost basis, P&L, history; one consistent total value. | Snapshot-only positions (no history, no realized P&L). |
 | ADR-018 | **Cash is first-class** (modeled as transactions) | Accepted | total_value = cash + stocks; deposits/dividends drive rebalancing. | Stocks-only (can't size or rebalance correctly). |
@@ -966,12 +1090,12 @@ Auspex is multi-user from day one, and isolation is a hard correctness requireme
 | ADR-025 | **Agent grounding guardrails** (no free arithmetic/invented tickers; inputs logged) | Accepted | Auditable, reproducible, safe financial output. | Trust the LLM's own numbers (liability). |
 | ADR-026 | **Conversational agent as primary UI**, grounded | Accepted | Non-expert's main interface; plain, cited answers. | Chat as afterthought. |
 | ADR-027 | **Metric-metadata explainability layer** | Accepted | Every number has meaning (QG-6); trust for non-experts. | Raw numbers, external glossary. |
-| ADR-029 | **English-only MVP; i18n (DE/FR/IT) deferred to Phase 2** | Accepted | Keeps the MVP focused; localization is mechanical and adds no engine value now. | Build full i18n up front (effort before validation). **Consequence:** copy is English-only until a later localization pass. |
+| ADR-029 | **English-only MVP** | Accepted | Keeps the MVP focused; all product copy, prompts and disclosures are English for v1. | Broaden language scope before validating the engine. |
 | ADR-030 | **Advisory & view-only** — no execution / money movement | Accepted | Drastically simpler, lower-risk MVP; user acts at their broker. | Brokerage integration / execution (complexity, regulation, custody). |
 | ADR-031 | **MVP-first; productionisation deferred** (§1.5) | Accepted | Ship the core loop cheaply; build the engine, not the hardening. | Build production-grade up front (slow, costly). |
 | ADR-032 | **Registration on first federated sign-in** (no separate sign-up) | Accepted | Lowest-friction onboarding; one identity source of truth. | A separate registration form / password store. |
 | ADR-033 | **Per-user data isolation via `owner_user_sk` + API-enforced scoping** | Accepted | Hard correctness need for a multi-user SaaS; structurally cross-user-proof; simple (no RLS infra yet). | Trust app code ad-hoc (leak risk); full RLS/multi-tenant now (over-built for MVP). |
-| ADR-034 | **Start on free/public source tiers for the MVP** | Accepted | Builds the full engine now at zero data cost; engine is provider-agnostic. | Buy commercial feeds up front (cost before validation). **Consequence:** FMP/Finnhub free tiers are non-commercial and `prices_yf` isn't licensable — replace/license before any bank deployment (§3.4, §7 of the connector spec). |
+| ADR-034 | **Provider-agnostic source layer for the MVP** | Accepted | Builds the full engine with isolated connectors and lets source plans be upgraded without changing bronze/silver/gold contracts. | Couple downstream modeling directly to one provider. |
 | ADR-035 | **Serve portfolio summary from materialized `fact_portfolio_valuation`; all API SQL parameterized** | Accepted | Avoids per-call scalar-UDF recompute; closes SQL-injection seam. | Live UDF views per request (slow); string-interpolated SQL (unsafe). |
 | ADR-036 | **Tunable advisor prompt wrapped by immutable safety guardrails** | Accepted | User controls goals/tone; safety can't be prompted away (enforced in code/tools). | Single fully-editable prompt (a user could disable safety). |
 | ADR-037 | **Risk profile in bank-aligned bands (Conservative→Aggressive) → λ; minimal FINMA suitability record** | Accepted | Banks map their client risk categories 1:1; gives a credible suitability/disclosure spine without building a full compliance suite now. | Free-form risk slider (no bank mapping); or full questionnaire/model-governance up front (over-build for MVP). |
@@ -981,7 +1105,12 @@ Auspex is multi-user from day one, and isolation is a hard correctness requireme
 | ADR-041 | **TRS from US thematic-ETF holdings as ground truth (no fine-tuning)** | Accepted | Free, expert-curated theme→stock answer key; seeds the graph, scores retrieval (HR@k/P@k), and is the benchmark-to-beat — borrows THEME's idea without training a model. | Trust LLM-extracted edges with no answer key; or fine-tune embeddings now (defer — TRS lets us measure whether it's worth it). |
 | ADR-043 | **Position as evidence-grounded decision support — no return/alpha promise** | Accepted | Beating the market with public, lagged signals is hard and unproven; honesty is the product. The KPI is decision quality + selection beating naive theme exposure (§8.15); any forward view is an uncertain range, not a forecast. Avoids overclaiming and keeps the validation harness as the real gate. (Horizon set separately in ADR-044.) | Frame it as an alpha/return engine — overclaims and sets up failure against its own honest test. |
 | ADR-044 | **Primary advisory horizon = ~1 quarter (63 trading days); validate across 21/63/126 days; Home keeps a monthly glance** | Accepted | Horizon should sit where signals stay useful. Half-lives: attention/sentiment days–weeks (weak, arbitraged); insider Form-4 drift 3–12m; 13F quarterly + 45d-stale; valuation re-rating and the thesis itself 6–18m+. A quarter is where the most signals overlap; **1 month optimizes the *weakest* signal and discards the edge in the best ones**. Validating at 21/63/126d exposes the drift-vs-noise term structure. Review is monthly (Home glance), turnover stays low (cost/tax discipline, §8.16). | ~1 month (too short for an insider/valuation/thesis engine); ~12 months (too long, misses the actionable window); a single validation window (can't tell drift from noise). |
-| ADR-042 | **Consolidate external feeds to three pillars: Alpha Vantage + Finnhub + SEC EDGAR** | Accepted | AV (NASDAQ-licensed) is the workhorse — fundamentals/valuation, news-sentiment, FX, risk-free; Finnhub covers quotes + insider transactions + earnings + news; EDGAR stays for the differentiated, free, licensable smart-money signals (Form 4 / 13F / 13D-G / 8-K) **and S-1 IPO registrations** — the emerging-company text no other source provides. US-only retires FRED + SNB/ECB. **Seeking Alpha rejected**: no official public API (only unofficial RapidAPI/scrapers) → a ToS/compliance liability for a bank-sold product; its quant grades/sentiment are a Phase-2 *licensed* enrichment, not an MVP core. | Keep eight sources (more maintenance, weaker differentiation); or adopt Seeking Alpha now (unlicensable scraping). **Consequence:** AV premium (≈$100/mo, 150 rpm, real-time) unblocks a daily US-universe refresh — the rate limit is the real value; real-time and options are bonuses the daily thesis engine doesn't require. Real-time + redistribution need a **separate commercial license** before bank deployment. |
+| ADR-042 | **Consolidate primary external feeds to Alpha Vantage + Finnhub + SEC EDGAR, with FMP as auxiliary** | Accepted | Alpha Vantage is the workhorse — fundamentals/valuation, news-sentiment, FX, risk-free; Finnhub covers quotes + insider transactions + earnings + news; EDGAR stays for the differentiated smart-money signals (Form 4 / 13F / 13D-G / 8-K) **and S-1 IPO registrations** — the emerging-company text no other source provides. FMP is retained as an auxiliary MVP provider for fallback fundamentals and thematic-ETF holdings/TRS. US-only retires FRED + SNB/ECB. Seeking Alpha is deferred because there is no stable official provider integration for the MVP. | Keep eight primary sources (more maintenance, weaker differentiation); adopt Seeking Alpha now (adds integration fragility before the core engine is proven). **Consequence:** Alpha Vantage plan throughput is the main source-scaling lever for daily US-universe refresh; FMP usage remains isolated behind connector contracts. |
+| ADR-045 | **Deterministic scoring core; the LLM is a sensor, not the scorer** | Accepted | The score/anchor/premium are reproducible code over gold facts; the LLM only extracts cited features/edges and narrates grounded evidence (TC-7, §8.25). This is the line between a signal a bank's model-risk committee can validate and an opaque verdict it must reject — and it preserves the "new point of view" without sacrificing auditability. | Let an LLM emit the buy/sell call or the score directly (un-reproducible, unvalidatable, legally exposed). |
+| ADR-046 | **Narrative Premium as a measured, attributed residual + a 2D divergence map** | Accepted | Formalizes "story vs substance" (§8.6.3) into a first-class number: fundamental anchor + narrative-intensity sensor + the residual attributed to narrative (§8.6.6). Differentiates Auspex from a commodity fundamental score; symmetric (catches over-extension *and* neglect); framed as decision support, not a sell trigger (ADR-043). | Keep story-vs-substance only as a qualitative leg read (not differentiating, not validatable); or a pure fundamental model (the commodity a bank already owns). |
+| ADR-047 | **Validate the Narrative Premium by orthogonalization + multi-target + calibration** | Accepted | A novel factor must be shown to add information beyond value/momentum/quality/size, or it isn't new (§8.15). If it survives → proprietary ranking factor; if not → ships only as the decision-support visualization. Validate against forward return **and** vol **and** drawdown with calibration, because sentiment predicts risk more reliably than direction. | Trust in-sample appearance (the factor may be repackaged value+momentum); validate on return alone (misses the real, risk-shaped signal). |
+| ADR-048 | **Reproducible LLM feature cache keyed by `(doc_hash, model_version, prompt_version)`; re-validate on model/prompt change** | Accepted | Idempotent extraction + time-filtered retrieval close the text-corpus look-ahead seam and give bit-identical re-derivation (QG-8, §8.6.7/§8.26). Versioned change control matches DORA expectations. | Re-extract ad hoc (non-reproducible, drifts across model updates, hidden look-ahead in backtests). |
+| ADR-049 | **Bank-embed compliance seam: instrument-level advice boundary; AI Act Art. 50 / MiFID II suitability boundary / DORA third-party; immutable decision log** (Phase-2) | Accepted | Selling to a bank works only if Auspex stays the *engine* and the bank owns suitability/execution; the seams (advice boundary, evidence pack, reproducibility, decision log) make that a layering, not a rewrite (§8.27). | Position Auspex as the regulated advisor (takes on suitability/execution liability); or bolt compliance on later (forces a rewrite and stalls the bank sale). |
 
 ---
 
@@ -993,6 +1122,9 @@ Auspex is multi-user from day one, and isolation is a hard correctness requireme
 3. Extensibility — QG-3
 4. Cost efficiency — QG-4
 5. Traceability — QG-5
+6. Explainability — QG-6
+7. Selection validity (incl. factor novelty) — QG-7
+8. Reproducibility — QG-8
 
 ### 10.2 Quality scenarios (measurable)
 | ID | Scenario | Stimulus | Response | Measure |
@@ -1011,6 +1143,9 @@ Auspex is multi-user from day one, and isolation is a hard correctness requireme
 | QS-11 | Agent grounding | Agent states a figure or ticker | Every number from a query, every ticker resolved | 0 ungrounded numbers; 0 unresolved tickers; inputs logged & reproducible. |
 | QS-12 | Explain a number | User taps any metric | Plain meaning + direction shown | 100% of displayed metrics have `metric_metadata`. |
 | QS-13 | Net-of-cost advice | A suggestion near break-even | Cost model applied | Suggestion suppressed if edge < cost; Swiss-frictions included. |
+| QS-15 | Reproducibility | Re-run a past `decision_id` | Same pipeline + pinned model/prompt + input snapshot | Byte-identical score, premium, drivers and evidence re-derived (QG-8). |
+| QS-16 | Factor novelty | Orthogonalize `narrative_premium` vs value/momentum/quality/size | Residual information measured | Premium ranks as a factor only if residual is significant; else demoted to visualization-only (§8.15, ADR-047). |
+| QS-17 | Narrative PIT | Extract features `@asof = D` | Sensor reads only `knowledge_date ≤ D` text | 0 features sourced from documents with later `knowledge_date` (automated test, §8.6.7). |
 
 ### 10.3 Indicative cost model (verify against current Azure pricing)
 > Figures are **planning-only ranges**, not quotes. Validate in the Azure Pricing Calculator before commitment.
@@ -1024,7 +1159,7 @@ Auspex is multi-user from day one, and isolation is a hard correctness requireme
 | Azure OpenAI (embeddings) | per token | text volume/day | low |
 | Storage / OneLake | per GB | data retained | low |
 | Static Web Apps | flat (free/standard) | hosting the SPA | very low / free |
-| Web API (Functions) | per execution | user requests | low (single user) |
+| Web API (Functions) | per execution | user requests | low to medium (trial users) |
 
 **Primary cost lever:** Fabric capacity uptime. Resume only for the build window; pause otherwise.
 
@@ -1035,7 +1170,7 @@ Auspex is multi-user from day one, and isolation is a hard correctness requireme
 | ID | Risk | Impact | Mitigation |
 |----|------|--------|-----------|
 | R-1 | Entity-resolution errors (wrong `security_sk`) | Corrupts every joined metric | Confidence thresholds, quarantine, SCD2, periodic audit report. |
-| R-2 | Free-source ToS / rate limits / breakage | Ingestion gaps; compliance | `license_type`, `reliability_weight`, retries, source isolation, never load-bearing on unofficial feeds. |
+| R-2 | Provider rate limits / breakage | Ingestion gaps | `reliability_weight`, retries, source isolation, throttling, and fallback feeds where useful. |
 | R-3 | 13F staleness / look-ahead | False (look-ahead) performance in validation | Strict `knowledge_date` filtering (QG-1, QS-1). |
 | R-4 | Sentiment model quality | Misleading signals | Treat sentiment as one weak input; store provenance; allow weight tuning. |
 | R-5 | Fabric capacity left running | Cost blow-out | Auto-pause + alert (QS-5). |
@@ -1043,15 +1178,19 @@ Auspex is multi-user from day one, and isolation is a hard correctness requireme
 | R-7 | Survivorship bias (delisted names absent) | Skewed validation & event studies | Retain delisted securities in `dim_security` (SCD2 `is_active=0`). |
 | R-8 | Agent over-trust / not financial advice | User harm | Evidence-linked outputs; explicit non-advice disclaimer; human in the loop. The **monthly outlook is shown as an uncertain range, never a point forecast** (§5.6, ADR-043), to prevent false precision and over-trust. |
 | TD-1 | No streaming (intraday latency) | Deferred | Add Fabric Eventstream/Eventhouse later if needed. |
-| TD-2 | No Private Endpoints in v1 | Security hardening debt | Backlog item; managed identity + RBAC in the interim. |
+| TD-2 | No full private ingress/WAF in v1 | Security hardening debt | MVP Bicep includes private endpoints for required data-plane dependencies; WAF, private app ingress, and bank-grade network isolation remain hardening backlog items. |
 | R-9 | Web app is the public attack surface | Data exposure / abuse | Entra auth, API-mediated access (no direct client→data), input validation, rate limiting, secrets in Key Vault, WAF as a hardening item. |
 | R-15 | Broken access control (cross-user leak) | One user sees another's portfolio | Single enforcement point (web API); data-access layer has no un-scoped method; every read/write filtered by `owner_user_sk`; isolation covered by QS-14 + automated tests (§8.22). |
-| R-16 | Free-tier quotas / non-commercial terms | Throttling now; licensing blocker for bank sale | Throttle per-symbol loops + completeness gate (§8.18) tolerate partial pulls; provider-agnostic connectors so vendor feeds (FMP/Finnhub/Yahoo) can be licensed/replaced in Phase 2 (ADR-034, §3.4). |
+| R-16 | Provider quotas / incomplete pulls | Partial data on build day | Throttle per-symbol loops + completeness gate (§8.18) tolerate partial pulls; provider-agnostic connectors let source plans be upgraded without downstream rewrites (ADR-034, §3.4). |
 | R-10 | Leg-weight overfitting | Looks great in-sample, live fails | Theme-relative out-of-sample validation, few leg weights, champion/challenger (§8.15). |
 | R-11 | Overtrading / Swiss tax reclassification | Loss of capital-gains exemption; harm to user | Cost-aware sizing favors few large trades; professional-dealer caution flag; not tax advice (§8.16). |
 | R-12 | Agent hallucinated number or ticker | Wrong financial guidance | Hard grounding guardrails; ticker validation; refuse if unresolved; inputs logged (§8.19). |
 | R-13 | Acting on incomplete data | Bad recommendations on a source-failure day | Completeness/freshness gate withholds or flags (§8.18). |
 | R-14 | Jargon / unclear numbers | User mistrust, misuse | Metric-metadata explainability, plain rationale, confidence (§8.21, QG-6). |
+| R-17 | **Narrative Premium not novel** (collapses into value+momentum) | The "edge" is a known factor in disguise | Orthogonalization gate before it ships as a ranking factor; if it fails, ship as decision-support **visualization only**, still useful (§8.15, ADR-046/047, QS-16). |
+| R-18 | **Sentiment/narrative factor decay & regime-dependence** | A factor that worked stops working | Champion/challenger across regimes; treat as one input; validate against vol/drawdown not just return; honest "story can stay irrational" framing (§8.6.6, §8.15). |
+| R-19 | **LLM drift across model/prompt versions** | Silent change in the narrative features | Pinned model/prompt versions; idempotent cache; any version change is a controlled event that re-triggers validation (§8.26, ADR-048). |
+| R-20 | **Text-corpus look-ahead** in LLM features | False backtest performance from future text | Time-filtered retrieval (`knowledge_date le {asof}`) on the extraction corpus; PIT test on the sensor (QS-17, §8.6.7). |
 
 ---
 
@@ -1086,13 +1225,26 @@ Auspex is multi-user from day one, and isolation is a hard correctness requireme
 | Metric metadata | per-metric display name, plain description, unit, and direction for the UI. |
 | Factor exposure | portfolio tilt to size/value/momentum/quality, etc. |
 | Composite growth score | Weighted blend of metrics ranking growth potential. |
+| Narrative Premium | The part of a security's valuation that fundamentals do not explain, attributed to narrative intensity (§8.6.6). |
+| Fundamental anchor | The fundamentally-justified valuation from the within-sector fair-multiple model; `fundamental_anchor_z` is the price's standardized distance from it (§8.6.6). |
+| Fair-multiple model | Cross-sectional regression (or peer-percentile) of a valuation multiple on fundamentals, per sector — the anchor's engine (BB-12). |
+| Narrative intensity | A measured 0–100 composite of how much story/attention propels a price, from LLM-sensor text features + deterministic market signals (§8.6.7). |
+| Divergence state / map | The classification (overextension / on-strong-fundamentals / anchored / neglected / converging) and the 2D anchor×premium view of a name (§8.6.6). |
+| Forward-promise ratio | Share of statements that are future/TAM language vs realized results — a key narrative-intensity feature (§8.6.7). |
+| Theme concentration | Herfindahl over the dominant themes in a name's coverage; a single repeated story scores high (§8.6.7). |
+| LLM-as-sensor | Using an LLM only to read text into structured, cited features and to narrate grounded evidence — never to compute a score (TC-7, §8.25, ADR-045). |
+| Orthogonalization | Neutralizing a factor against known factors to test whether its residual still carries information — the novelty gate (§8.15, ADR-047). |
+| Groundedness | The check that every LLM-emitted claim/feature is supported by a retrieved source passage (§8.6.7, §8.19). |
+| Evidence pack | The machine-readable bundle behind every output — score/anchor/premium, signed drivers, cited data points & passages, model/prompt versions (§8.25). |
+| Decision log | Append-only/WORM record of every published recommendation/score/premium under a `decision_id` (BB-10b, §8.26). |
+| DORA / MiFID II / EU AI Act | EU regimes shaping the bank-embed path: ICT third-party oversight / suitability & algorithmic-trading controls / AI transparency & risk classification (§8.27). |
 
 ---
 
 ## Appendix A — Repository layout & naming conventions
 
 ```
-fip/
+auspex/
   infra/                      # Bicep
     main.bicep
     modules/{keyvault,cosmos,functionapp,aisearch,openai,monitor,fabric}.bicep
@@ -1111,34 +1263,172 @@ fip/
     candidates/ portfolio/ recommendations/ evidence/
   search/                     # AI Search index schema + indexing job
   tests/                      # PIT tests, idempotency tests, DQ tests
-  .github/workflows/          # CI/CD
+  .github/workflows/          # future CI/CD automation (E10; disabled for now)
 ```
 
-**Naming:** resources `fip-{env}-{component}` (e.g., `fip-prod-func`); Cosmos containers lower_snake; Warehouse objects `dim_*`, `fact_*`, `v_*` (views), `metric_weights` (config).
+**Naming:** resources `auspex-{env}-{component}` (e.g., `auspex-prod-func`); Cosmos containers lower_snake; Warehouse objects `dim_*`, `fact_*`, `v_*` (views), `metric_weights` (config).
 
-## Appendix B — Implementation backlog (recommended order)
+## Appendix B — Epic design & implementation specification
 
-1. **E1 Foundation:** Bicep for shared RG (Key Vault, Cosmos, Monitor), Fabric capacity + workspace, CI/CD skeleton.
-2. **E2 Control plane:** Cosmos containers + `sources` seed + watermark/dedup helpers.
-3. **E3 Connector framework:** `BaseConnector`, bronze envelope, two reference connectors (SEC Form 4 + prices).
-4. **E4 Silver + entity resolution:** parsers, DQ, `dim_security` pipeline + quarantine.
-5. **E5 Gold:** dimensions + facts (MERGE loads), PIT columns.
-6. **E6 Metrics:** metric views + `metric_weights` + composite score.
-7. **E7 Vector serving:** AI Search index + embedding job over news/filings.
-8. **E8 Remaining connectors:** 13F, 13D/G, news, macro, contracts, fundamentals.
-9. **E9 Web app:** Static Web App (React SPA) + Functions web API + Entra auth; pages for candidates, risk-vs-growth, portfolio, evidence drill-down; portfolio write-back.
-19. **E19 Identity, registration & isolation:** `app_user` + `owner_user_sk` on per-user tables (`05_identity.sql`), owner-scoped views, federated registration + onboarding, API auth + per-user repository, isolation tests (§8.22).
-10. **E10 Hardening:** alerts, auto-pause, PIT/idempotency test suite, backfill pipeline, cost-budget guard.
-11. **E11 Web API:** REST backend the SPA codes against (candidates, portfolio, recommendations, evidence).
-12. **E12 Portfolio management:** `dim_account`, `fact_portfolio_transaction` (cash + stocks), derived positions/cash/valuation, `app_config` (base currency CHF + policy), portfolio views, universe-onboard hook, manual-entry API, and the `recommendation` rebalancer.
-13. **E13 Thesis validation:** theme-relative check (beat the theme) + catalyst event study, `validation_result` (§8.15).
-14. **E14 Valuation brake:** fundamentals-based brake so the engine doesn't pay up for the story (§8.6.4).
-15. **E15 Cost- & tax-aware recommender:** friction model + Swiss flags (§8.16); the target-weight policy.
-16. **E16 Agent + guardrails:** Foundry agent, grounding, ticker validation, input logging, completeness gate (§8.18–8.19).
-17. **E17 Explainability & UX:** `metric_metadata`, plain rationale + confidence, home hierarchy, onboarding, risk-appetite control (§5.6, §8.21).
-18. **E18 Conversational agent, i18n & notifications:** grounded chat, EN/DE/FR/IT, morning summary (§5.6).
+> Epics are listed in **build/dependency order** (the corrected order — see Appendix D.1). **IDs are canonical** (referenced across the document); the leading number is build sequence. Each epic states **Goal · Design · Artifacts · Contract (in → out) · Depends · DoD**. The global **Definition of Done** also applies to every epic: code + Bicep/SQL merged; idempotent re-run verified; PIT tests pass; observability emitting; documented in repo README. Status language is explicit: **Target** means the required epic contract; **Current smoke** means the narrower manual check that proves today's implementation slice; **Deferred** means accepted out-of-scope work.
 
-**Definition of Done (per epic):** code + Bicep merged; idempotent re-run verified; PIT tests pass; observability emitting; documented in repo README.
+### Phase 0 — Platform & ingestion
+
+**E1 Foundation** — *the empty, deployable Azure substrate.*
+- *Target design:* Bicep per-RG modules declare all Azure infrastructure resources up front (including surfaces consumed by later epics), with system-assigned managed identities + Key Vault references (no secrets in settings), Switzerland North where supported, and private endpoints for required data-plane dependencies. Fabric capacity is Bicep-managed; Fabric workspace/lakehouse/items are created/synced through Fabric portal + Fabric Git because they are not ARM/Bicep resources. The OneLake workspace/Lakehouse GUIDs are set on the ingestion Function App after the Fabric workspace and Lakehouse exist.
+- *Artifacts:* `infra/main.bicep`, `infra/modules/{keyvault,cosmos,functionapp,aisearch,openai,monitor,network-vnet,network,fabric,staticwebapp}.bicep`, `infra/params/{dev,prod}.json`, `doc/operations.md`.
+- *Contract:* in: Bicep params + manual Fabric workspace/lakehouse creation → out: provisioned Azure RGs, KV, Cosmos, Monitor, Function Apps, Search/OpenAI/SWA, Fabric capacity, identities/RBAC, private endpoints; Fabric workspace is ready for manual/Git-synced items.
+- *Depends:* —. *DoD:* documented `az deployment sub create` succeeds in dev/prod; `ONELAKE_WORKSPACE_ID`, `ONELAKE_LAKEHOUSE_NAME`, and `FABRIC_CAPACITY_NAME` are correct for the Fabric resources; manual deployment smoke checks in `doc/operations.md` pass.
+
+**E2 Control plane** — *Cosmos registry + idempotency primitives.*
+- *Design:* four serverless containers `sources` / `watermarks` / `runs` / `dedup` (§5.2 BB-2); partition keys on `source_id`; helpers for atomic watermark-upsert and content-hash dedup.
+- *Artifacts:* `connectors/shared/control_plane.py`, `connectors/shared/seeds/sources.seed.json`.
+- *Contract:* in: source registry seed → out: read/advance-watermark, dedup-check, run-log APIs used by every connector.
+- *Depends:* E1. *DoD:* seed loads; watermark upsert is atomic + re-runnable; dedup rejects a replayed key.
+
+**E3 Connector framework** — *the §8.1 contract + two reference connectors.*
+- *Design:* `BaseConnector` (read watermark → fetch since → deterministic `batch_id` → idempotent bronze write → advance watermark); bronze envelope; HTTP-trigger `/run`. Reference: `sec_form4` + `prices_eod` (Alpha Vantage).
+- *Artifacts:* `connectors/shared/base_connector.py`, `connectors/sec_form4/`, `connectors/prices_eod/`, `connectors/shared/envelope.py`.
+- *Contract:* in: `{source_id, run_id, mode}` → out: `bronze/{source_id}/…/{batch_id}.ndjson` + watermark/run record.
+- *Depends:* E1, E2. *DoD:* two connectors land bronze; re-run on same window is a no-op (idempotency test).
+
+**E4 Silver + entity resolution** — *raw → conformed, entity-resolved, deduplicated.*
+- *Target design:* per-source PySpark parsers (typed, validated); `dim_security` resolution order CIK → ticker → ISIN → fuzzy (§8.4); SCD2; unresolved → `silver.security_quarantine`, bad rows → `silver.dq_quarantine`/`parse_errors`.
+- *Current implementation:* the reference E4 path now creates `security_master`, canonical `dim_security`, replay-safe quarantine tables, `silver_insider_txn`, and `silver_prices` with `security_sk` and PIT columns for the implemented E3 sources (`sec_form4`, `prices_eod`). Resolution currently covers exact SEC CIK/ticker because those are the identifiers available in the implemented sources; ISIN/fuzzy fallback stays as the extension path for later feeds that carry those identifiers.
+- *Validated in Fabric (dev, 2026-06-27):* `nb_00_entity_resolution` loaded `security_master=10433` and `dim_security current=10433`; `sec_form4` landed 2915 bronze records; `nb_01_form4_to_silver` merged 4614 resolved insider transaction rows and quarantined 644 `NO_NONDERIVATIVE_TXNS` plus 47 `SECURITY_UNRESOLVED`; chunked `prices_eod` landed 3996 bronze price rows; `nb_02_prices_to_silver` merged 3996 `silver_prices` rows with 0 DQ failures. SQL checks returned 0 unresolved silver rows, 0 future `knowledge_date` rows, and no duplicate quarantine or `(security_sk, date)` keys.
+- *Artifacts:* `fabric/notebooks/nb_00_entity_resolution.py`, `nb_01_form4_to_silver.py`, `nb_02_prices_to_silver.py`; silver Delta tables (§5.2 BB-4); replay-safe quarantine tables.
+- *Contract:* in: bronze NDJSON → out: `silver.*` conformed tables + `dim_security` (SCD2) + quarantine tables.
+- *Depends:* E3. *DoD:* golden ER set (incl. a ticker-change + merger) maps correctly over time; seeded bad rows quarantine, not pass; notebook replay does not duplicate silver rows or quarantine rows; PIT sanity checks pass.
+
+**E5 Gold star schema** — *dimensions + facts with PIT columns.*
+- *Design:* the §5.3 DDL — conformed dims (`dim_security/date/entity/source`) + fact tables, **each carrying `event_date` + `knowledge_date`**; idempotent `MERGE` loads on natural keys.
+- *Artifacts:* `fabric/warehouse/{01_dims.sql,02_facts.sql,03_fx.sql}`; `fabric/notebooks/nb_silver_to_gold`.
+- *Contract:* in: `silver.*` + `dim_security` → out: gold `dim_*` / `fact_*` (market, insider, institutional, ownership, news_sentiment, contract, macro/risk-free, fx).
+- *Depends:* E4. *DoD:* MERGE convergence on replay; FK integrity to `dim_security`; PIT columns populated.
+
+**E8 Remaining connectors** — *complete every planned feed.*
+- *Design:* `sec_13f` / `sec_13dg` / `sec_8k` / `sec_s1`, Finnhub `news`, **Alpha Vantage** (`OVERVIEW`+`BALANCE_SHEET`+`CASH_FLOW`+`NEWS_SENTIMENT`+`CURRENCY_EXCHANGE_RATE`+`TREASURY_YIELD`), `contracts` (USASpending), `etf_holdings` (TRS). AV mapping is pure/tested (§8.6.3). US-only retires FRED + SNB/ECB (ADR-040/042); macro = risk-free only.
+- *Artifacts:* the per-source `connectors/*`, `connectors/alpha_vantage/mapping.py`, `nb_av_to_gold`, `nb_news_to_gold`, `nb_etf_to_theme`.
+- *Contract:* in: provider REST → out: `fact_fundamentals`, `fact_company_news`, `fact_fx_rate`, `fact_macro` (risk-free), `fact_institutional_holding`, `fact_ownership_event`, `fact_contract_award`, `fact_theme_membership` (`is_ground_truth=1`).
+- *Depends:* E3, E4, E5. *DoD:* every leg-source view (below) is fed from real gold, not imputed; `mapping.py` unit tests pass.
+
+### Phase 1 — Serving & core analytics
+
+**E7 Vector serving** — *PIT-safe hybrid retrieval + the LLM-sensor runtime.*
+- *Design:* `idx-news-filings` (§5.2 BB-7) hybrid (BM25+vector) with `knowledge_date` filter; Azure OpenAI embeddings + the **article-level sentiment** scorer (versioned). This runtime is also the host for the §8.6.7 narrative-intensity **sensor** (E21).
+- *Artifacts:* `search/index_schema.json`, `search/indexing_job`, `engine/sentiment.py`.
+- *Contract:* in: news/filing text chunks (gold) → out: queryable index + `fact_news_sentiment` + the cache substrate for E21.
+- *Depends:* E5, E8. *DoD:* PIT retrieval returns 0 docs with `knowledge_date > @asof`; sentiment is reproducible (prompt/model version logged).
+
+**E6 Metric layer + Opportunity Score** — *the deterministic scoring core.*
+- *Design:* E6 has two internal stages. **E6a** builds §8.6 metric views (risk, risk-adjusted, momentum, smart-money, news), `metric_weights`, thesis graph inputs, and non-brake leg-source views after E5/E8. **E6b** publishes the final six-leg **Opportunity Score** only after E14 supplies the valuation-brake leg. The reproducible recipe is **winsorize → z → sign-align → blend → 0–100**; until E14 is wired, any score is provisional/incomplete.
+- *Artifacts:* `fabric/warehouse/metrics/*.sql` (incl. `12b_opportunity_legs.sql`, `13_opportunity_score.sql`), `08_thesis.sql`, `nb_news_to_graph`, `engine/thesis.py`, `v_security_daily_features`.
+- *Contract:* E6a in: gold facts + thesis inputs → out: base metric views and non-brake leg-source views. E6b in: gold facts + thesis graph + E14 valuation-brake leg → out: final `opportunity_score`, six leg contributions, `v_security_daily_features`.
+- *Depends:* E6a depends E5 and E8; E6b depends E14. *DoD:* recipe deterministic given universe+weights; `v_security_daily_features` column set stable (contract test).
+
+**E20 Fundamental anchor** — *the measured fair-value baseline (design §8.6.8).*
+- *Design:* EV/S primary anchor (+EV/EBITDA, P/FCF where defined), robust within-sector Huber regression of the log-multiple, peer-percentile fallback, negatives excluded; output `fundamental_anchor_z` (+ = premium). PIT on **as-reported vintages**.
+- *Artifacts:* `engine/fundamental_anchor.py`, `nb_fundamental_anchor`, `14_fundamental_anchor.sql` (`fact_fundamental_anchor` + `v_fundamental_anchor`).
+- *Contract:* in: `v_fundamentals_latest` + `fact_market_daily` → out: `fact_fundamental_anchor` (the **valuation residual** consumed by E14 brake + E22 premium).
+- *Depends:* E5, E8. *DoD:* §8.6.8 tests (PIT, golden regression, negatives-excluded, percentile fallback, sign test).
+
+**E21 Narrative-intensity sensor** — *text → reproducible features (design §8.6.7).*
+- *Design:* LLM-as-sensor scalars (sentiment level/velocity, theme concentration, forward-promise ratio, hype density, mgmt-reality gap) + deterministic market signals (revision dispersion, options skew, news-volume z, insider divergence); temp-0, pinned model/prompt, idempotent cache `(doc_hash, model_version, prompt_version)`, time-filtered retrieval, groundedness pass; composite `narrative_intensity`.
+- *Artifacts:* `engine/narrative_features.py`, prompt registry `prompts/narrative/*.txt`, `nb_narrative_intensity`, `15_narrative_features.sql` (`fact_narrative_features`, `fact_narrative_intensity`).
+- *Contract:* in: time-filtered corpus (E7) + gold market facts → out: `fact_narrative_intensity` + cited evidence refs.
+- *Depends:* E7, E8. *DoD:* QS-17 (no text look-ahead); groundedness rejects unsupported features; cache re-derives identically.
+
+**E22 Narrative-Premium / divergence engine** — *the headline read (design §8.6.6).*
+- *Design:* attribute the valuation residual (E20) to `narrative_intensity` (E21) → `narrative_premium`; classify `divergence_state`; place on the 2D map (symmetric: overextension + neglect); assemble the **evidence pack**; append to the **decision log** (BB-10b).
+- *Artifacts:* `engine/narrative_premium.py`, `nb_narrative_premium`, `16_narrative_premium.sql` (`fact_narrative_premium`, `v_narrative_premium`), `decision_log` (WORM).
+- *Contract:* in: `fact_fundamental_anchor` + `fact_narrative_intensity` → out: `narrative_premium`, `divergence_state`, map coords, evidence pack; feeds the valuation brake (E14) and the Discussion-tab map (E9).
+- *Depends:* E20, E21. *DoD:* reproducible from `decision_id` (QS-15); premium reconciles to anchor residual + attribution; map renders.
+
+**E14 Valuation-brake integration** — *wire the measured anchor into the Opportunity Score.*
+- *Design:* the brake leg of the Opportunity Score (§8.6.4) now **consumes E20's anchor residual** rather than ad-hoc multiples, and may use E22's premium context for attribution/explanation — a *negative* contribution that demotes high-premium names; graceful degradation when `anchor_method='unanchorable'`.
+- *Artifacts:* update `12b_opportunity_legs.sql` (valuation leg ← `v_fundamental_anchor`), `engine/thesis.py` (leg wiring).
+- *Contract:* in: `v_fundamental_anchor`, `v_narrative_premium`, and E6a base leg inputs → out: the valuation-brake leg consumed by E6b.
+- *Depends:* E20, E22, and E6a. *DoD:* a high-premium name is demoted vs an equally-linked low-premium peer; leg contribution shown in `v_security_score_attribution`.
+
+### Phase 2 — Portfolio, recommender, agent
+
+**E12 Portfolio management** — *cash + stocks from a transaction log.*
+- *Design:* §5.5 — `dim_account`, `fact_portfolio_transaction` (source of truth), derived positions/cash/valuation, `app_config` (CHF + policy), serving views, **universe-onboard hook**, manual-entry API, the `recommendation` rebalancer skeleton.
+- *Artifacts:* `fabric/warehouse/{portfolio_dims.sql,portfolio_facts.sql,portfolio_views.sql}`, `nb_portfolio_derive`, `api/transactions/`.
+- *Contract:* in: manual transactions (E11) → out: `v_portfolio_summary/positions/with_features/exposures`, `v_rebalance_inputs`, onboarded securities into `dim_security`+universe.
+- *Depends:* E5, E11. *DoD:* total_value = cash + Σ positions; a new holding onboards and starts ingesting; derived snapshot materialized.
+
+**E15 Cost- & tax-aware recommender** — *advisory actions, net of frictions.*
+- *Design:* reconcile holdings vs Opportunity-Score ranking + `v_rebalance_inputs`; emit `BUY/ADD/TRIM/SELL/HOLD` with target weights, sized to the user's risk band (§8.24); apply the **friction/cost model** + Swiss stamp-duty/withholding + professional-dealer caution (§8.16); suppress if edge < cost.
+- *Artifacts:* `recommender/policy.py`, `recommender/costs.py`, `recommender/risk_profile.py`, `recommendation` table.
+- *Contract:* in: `v_security_daily_features` + `v_rebalance_inputs` + band policy → out: `recommendation` rows (rationale + evidence + sizing).
+- *Depends:* E6, E12, E20 (premium context). *DoD:* QS-13 (suppressed near break-even); sizing respects cap + cash buffer; never exceeds available cash.
+
+**E16 Agent + guardrails** — *grounded, auditable financial output.*
+- *Design:* Azure AI Foundry agent reading `v_security_daily_features` + AI Search (PIT); **no free-form arithmetic / invented tickers**; bounded to the `recommendation` schema; tunable advisor prompt wrapped by **immutable safety rules** (§8.19); inputs logged → decision log (BB-10b); the **completeness gate** (§8.18) gates output.
+- *Artifacts:* `agent/foundry_config`, `agent/tools/*`, `agent/guardrails.py`, `engine/completeness_gate.py`.
+- *Contract:* in: feature views + evidence index → out: grounded answers + `recommendation` (within policy); every figure cited.
+- *Depends:* E6, E7, E12, E15. *DoD:* QS-11 (0 ungrounded numbers/tickers; reproducible); gate withholds on a source-failure day.
+
+### Phase 3 — Validation (the real ship gate)
+
+**E13 Thesis validation** — *does the shortlist beat the theme?*
+- *Design:* §8.15 — theme-relative `beat_the_theme` (Sharpe + CR vs the thematic ETF), catalyst event studies, retrieval `HR@k/P@k` vs TRS ground truth, **horizon term-structure** at 21/63/126d (primary 63d). No factor-IC SHIP gate.
+- *Artifacts:* `backtest/thesis_validation.py` (canonical), `engine.py` (diagnostic), `warehouse_panel.sql`, `04_validation.sql` (`validation_result`).
+- *Contract:* in: PIT forward returns + picks + TRS → out: `validation_result` (`adds_value`, term-structure signature).
+- *Depends:* E6, E8 (TRS). *DoD:* QS-9 (`excess_vs_theme` positive after costs + positive catalyst hit-rate) before leg weights ship.
+
+**E23 Validation upgrade — narrative-premium novelty** — *prove the factor is new, or demote it.*
+- *Design:* **orthogonalize** `narrative_premium` vs value/momentum/quality/size/low-vol; test the **residual** information against **multiple targets** (forward return, realized vol, max drawdown) with **calibration curves**; champion/challenger across regimes. If it survives → ranking factor; else → decision-support **visualization only** (ADR-046/047).
+- *Artifacts:* `backtest/orthogonalization.py`, `backtest/calibration.py`, extend `validation_result` (`factor_residual_info`, `ships_as`).
+- *Contract:* in: `fact_narrative_premium` + factor exposures (E6) + PIT forward outcomes → out: novelty verdict + `ships_as ∈ {factor, visualization}`.
+- *Depends:* E20–E22, E6, E13. *DoD:* QS-16 (premium ranks as a factor only if residual is significant); regime champion/challenger logged.
+
+### Phase 4 — App surface
+
+**E19 Identity, registration & isolation** — *multi-user, structurally cross-user-proof.*
+- *Design:* §8.22 — federated-only (Entra External ID, Microsoft/Google/GitHub); `app_user` keyed `(idp, subject)`; **registration on first authenticated call**; `owner_user_sk` on every per-user row; **single enforcement point** in the API (no un-scoped data method).
+- *Artifacts:* `fabric/warehouse/05_identity.sql`, `api/_shared/auth.py`, `api/_shared/owner_repo.py`, owner-scoped views.
+- *Contract:* in: validated Entra principal → out: resolved `owner_user_sk` applied to every read/write.
+- *Depends:* E5, E1. *DoD:* QS-14 (A can't read/edit B; cross-user write affects 0 rows); QS-8 (401/403 without token).
+
+**E11 Web API** — *the only thing the browser talks to.*
+- *Design:* Azure Functions REST app (separate from ingestion); reads Warehouse serving views + AI Search (evidence) + Cosmos; **all SQL parameterized**; serves the §5.2 BB-8 endpoint set; **every query owner-scoped** (E19).
+- *Artifacts:* `api/{me,onboarding,portfolio,recommendations,transactions,chat,stock,evidence}/`.
+- *Contract:* in: SPA REST calls (authenticated) → out: portfolio/candidates/recommendations/evidence/chat JSON, owner-scoped.
+- *Depends:* E6, E7, E12, E16, E19. *DoD:* QS-7 (P95 < 1.5s/2s); QS-8/QS-14 enforced; no string-interpolated SQL.
+
+**E9 Web app (SPA)** — *clarity-first frontend for a non-expert.*
+- *Design:* §5.6 React SPA on Static Web Apps; pages: candidates, **Narrative-Premium / story-vs-substance map** (§8.6.6), portfolio + suggestions, evidence drill-down, source-health, chat; Entra-gated; portfolio write-back; every number carries meaning (E17).
+- *Artifacts:* `web/src/pages/*`, `web/staticwebapp.config.json`.
+- *Contract:* in: web API JSON → out: rendered UI; user edits/accepts/dismisses → API.
+- *Depends:* E11, E19, E17. *DoD:* the map + candidate list + portfolio render from real serving data; suggestions never auto-execute.
+
+**E17 Explainability & UX** — *every number means something.*
+- *Design:* §8.21 `metric_metadata` (display name, plain description, unit, direction, tier); `v_security_score_attribution` (six-leg + narrative-premium decomposition); plain rationale + **confidence** (coverage × agreement); Home hierarchy + monthly-outlook range; onboarding; risk-appetite control.
+- *Artifacts:* `fabric/warehouse/metric_metadata.sql`, `v_security_score_attribution`, `api/metadata/`, SPA components.
+- *Contract:* in: scores + metadata → out: explained numbers, "why this score", evidence affordances.
+- *Depends:* E6, E20, E22, E11. *DoD:* QS-12 (100% of displayed metrics have metadata); attribution shown under every score.
+
+**E18 Conversational agent & notifications** — *primary chat + reach.*
+- *Design:* §5.6 grounded chat (suggested questions, "explain this number"); English-only product copy for the MVP; optional morning-summary email.
+- *Artifacts:* `web/src/chat/*`, `api/notify/`.
+- *Contract:* in: user questions / schedule → out: grounded cited answers / morning email.
+- *Depends:* E16, E11, E9. *DoD:* chat answers grounded (QS-11); morning email links into the app.
+
+### Phase 5 — Hardening & bank seam
+
+**E10 Hardening** — *cross-cutting reliability + cost guard.*
+- *Design:* alerts (build not done by 06:00, source error-rate, capacity left running), **auto-pause** watchdog, the PIT/idempotency/ER/DQ/contract **test suite**, backfill/replay pipeline, cost-budget guard, and GitHub Actions CI/CD automation once the manual E1-E4 path is stable.
+- *Artifacts:* `tests/*`, `fabric/pipelines/backfill`, Monitor alert rules, `scheduler/watchdog`, `.github/workflows/*`.
+- *Contract:* in: runtime telemetry + validated manual deployment procedure → out: alerts, enforced pause, automated test gates, optional CI/CD deployment automation.
+- *Depends:* all of Phase 0–4. *DoD:* QS-2/QS-4/QS-5; backfill sets `knowledge_date` to original availability (PIT preserved).
+
+**E24 Bank-embed compliance seam (Phase-2)** — *engine the bank embeds.*
+- *Design:* §8.27 — instrument-level **advice-boundary** contract (no client-suitability call), AI Act Art. 50 transparency, DORA third-party artifacts (ICT-risk, BC/exit, audit, change-control §8.26), MiFID II rationale-trail hooks, immutable decision log.
+- *Artifacts:* `compliance/{advice_boundary_contract,dora_pack,ai_act_transparency}.md`, decision-log export API.
+- *Contract:* in: a bank tenant → out: embeddable engine + the regulator-facing pack.
+- *Depends:* E16, E22 (decision log). *DoD:* a sample decision is fully reconstructable + exportable; advice-boundary contract reviewed.
 
 ---
 
@@ -1154,10 +1444,81 @@ This document was reviewed through three lenses; each finding maps to a concrete
 **Solution architect** — *right, reliable, cost-balanced:*
 - **No acting on partial data** → §8.18 completeness gate, ADR-024, QS-10, R-13.
 - **Agent grounding/guardrails** (no invented numbers/tickers; reproducible) → §8.19, ADR-025, QS-11, R-12.
-- **Resilience, multi-tenant isolation, DR, network hardening, and advanced book-level risk (covariance/factor/stress):** considered but **intentionally out of MVP scope** (§1.5) — to be specified when hardening Auspex for bank integration.
+- **Resilience, per-bank tenant isolation, DR, network hardening, and advanced book-level risk (covariance/factor/stress):** considered but **intentionally out of MVP scope** (§1.5) — to be specified when hardening Auspex for bank integration.
 
 **User (non-expert)** — *easy to use, verify, talk to, and update:*
 - **Every number has plain meaning** → §8.21 metric metadata, QG-6, ADR-027, QS-12, R-14, E17.
 - **Verifiable suggestions** (plain why + confidence + one-click evidence) → §5.6, §8.21.
 - **Conversational agent as primary UI**, grounded → §5.6, ADR-026, E18.
-- **Simple portfolio entry + risk-appetite slider; clear home; i18n; morning summary** → §5.6, ADR-029, E17/E18.
+- **Simple portfolio entry + risk-appetite slider; clear English-only home; morning summary** → §5.6, ADR-029, E17/E18.
+
+**Differentiation & bank-readiness** — *the new point of view, made validatable and sellable:*
+- **Story vs substance as a measured number** (the edge isn't better fundamentals, it's the Narrative Premium) → §8.6.6–8.6.7, ADR-046, E20–E22, BB-12/13/14.
+- **The LLM as a sensor, not the scorer** (keeps the edge and the reproducibility) → TC-7, §8.25, ADR-045, QS-15.
+- **Prove the factor is new, or demote it** (orthogonalization; validate against risk not just return) → §8.15, ADR-047, QS-16, R-17/18.
+- **No hidden look-ahead in the text sensor; everything re-derivable** → §8.6.7, §8.26, QS-17, R-19/20, QG-8.
+- **A clean seam to sell to banks** (advice boundary, AI Act/MiFID II/DORA, decision log) → §8.27, ADR-049, E24.
+
+---
+
+## Appendix D — End-to-end flow & coherence review
+
+This appendix reviews the full epic set for coherence: it (D.1) corrects the build order, (D.2) traces the entire application flow naming the producer and consumer epic of every artifact, (D.3) records the coherence findings and how they were resolved, (D.4) verifies the cross-cutting invariants hold along the whole path, and (D.5) states the honest open items.
+
+### D.1 Corrected build/dependency order
+The original backlog ordering had three real defects (D.3): the SPA was sequenced before the API and identity it depends on; the valuation brake and the fundamental anchor were unconnected though they now compute the same residual; and the narrative epics were appended after validation though the validation epic consumes them. The corrected **DAG** (now reflected in Appendix B):
+
+```
+E1 → E2 → E3 → E4 → E5 → E8            (platform & ingestion)
+E5,E8 → E7                              (vector serving + sensor host)
+E5,E8 → E20                             (fundamental anchor)
+E7,E8 → E21 → (E20,E21) → E22           (narrative intensity → premium)
+E5,E8 → E6a ; (E6a,E20,E22) → E14 → E6b (metric base → brake integration → final score)
+E5 → E19 → E11                          (identity → API)
+E6b,E12 → E15 ; E6b,E7,E12,E15 → E16    (recommender, agent)
+E5,E11 → E12                            (portfolio)
+E6b,E8 → E13 ; (E20-22,E6b,E13) → E23   (validation: theme-relative, then novelty)
+E11,E19,E17 → E9 ; E16,E11,E9 → E18     (app surface)
+all → E10 ; (E16,E22) → E24             (hardening, bank seam)
+```
+`E6a` and `E6b` are internal stages of the canonical E6 epic, not new epic IDs. The single most important ordering fact: **E20 (anchor) and E21 (sensor) precede E22 (premium); E14 integrates the measured brake; E6b publishes the final Opportunity Score; and E23 (novelty) can only run once E20–E22 and E6b exist.** The premium's valuation residual is computed **once** in E20 and consumed in three places (E14 brake, E22 premium, E17 attribution); there is no second definition.
+
+### D.2 End-to-end flow (one daily build, layer by layer)
+1. **Resume & ingest (E1/E2/E3/E8).** The Durable Functions Capacity Scheduler resumes F2 and triggers the pipeline; each connector pulls since its watermark and lands bronze (idempotent `batch_id`); watermarks advance only on success.
+2. **Conform (E4).** Bronze → silver: parse, validate, dedup, **resolve `dim_security`** (SCD2); unresolved/bad rows quarantine.
+3. **Load gold (E5/E8).** Silver → gold dims + facts, every fact stamped `event_date`/`knowledge_date`; FX normalizes money to USD at event date; risk-free lands `fact_macro`.
+4. **Index + sense (E7/E21).** New text chunks embed into `idx-news-filings` (PIT-filterable); the **narrative sensor** reads the *time-filtered* corpus (only `knowledge_date ≤ asof`) at temp-0, cached by `(doc_hash, model_version, prompt_version)`, and writes `fact_narrative_intensity` with cited evidence.
+5. **Anchor (E20).** The robust within-sector fair-multiple model writes `fact_fundamental_anchor` (`fundamental_anchor_z`, the valuation residual) on as-reported vintages.
+6. **Premium (E22).** Residual (E20) × intensity (E21) → `narrative_premium`, `divergence_state`, the 2D-map coords, the **evidence pack**, appended to the **decision log**.
+7. **Score (E6/E14).** The metric layer + thesis graph + the six legs (the valuation-brake leg now = E20's residual) blend into `opportunity_score`; `v_security_daily_features` is the agent/API contract.
+8. **Portfolio & recommend (E12/E15).** Holdings derive from the transaction log; the recommender reconciles them against the score + rebalance inputs, sizes to the risk band, applies costs/Swiss frictions, and writes `recommendation`.
+9. **Agent (E16).** The grounded agent answers and emits recommendations within policy; the **completeness gate** withholds output if a source failed; every figure is cited and logged.
+10. **Serve & explain (E11/E19/E17/E9/E18).** The owner-scoped API serves candidates, the **story-vs-substance map**, portfolio, recommendations and evidence; the SPA renders them with per-number meaning and the score/premium decomposition; chat and the morning email reach the user.
+11. **Validate & guard (E13/E23/E10).** Off the daily path, validation tests *beat-the-theme* and the *premium's novelty (orthogonalization)*; hardening guards cost, freshness and PIT, and backfill preserves `knowledge_date`.
+12. **Suspend.** The scheduler pauses F2 (cost guard; alert on failure).
+
+### D.3 Coherence findings & resolutions
+| # | Finding | Resolution |
+|---|---------|-----------|
+| F1 | Backlog ordered the **SPA (E9) before the API (E11) and identity (E19)** it depends on. | Reordered (D.1): E19 → E11 → E17 → E9 → E18. |
+| F2 | **E9 and E11 both claimed the web API** (conflation). | Split cleanly: **E11 = web API (backend)**, **E9 = SPA (frontend)**; E9 depends on E11. |
+| F3 | **E14 "valuation brake" and E20 "fundamental anchor" were unrelated** though both reason about price-vs-fundamentals. | E14 reframed as the **integration** that wires E20's measured anchor residual into the Opportunity Score's brake leg; E14 now depends on E20. |
+| F4 | The **Opportunity Score (E6) valuation-brake leg depended on nothing concrete**. | Wired to `v_fundamental_anchor`; E6's full score now depends on E20 (coupled cluster E20 → E14 → E6-final). |
+| F5 | **E20–E22 were appended after validation (E13)** though E23 consumes them and the score uses them. | Resequenced into Phase 1 (analytics), before the recommender, agent and validation. |
+| F6 | The **valuation residual risked two definitions** (a standalone brake and the anchor). | Single source: computed once in **E20**, consumed by E14, E22, E17 — no duplicate. |
+| F7 | **Validation was one epic (E13)** but the narrative premium needs its own novelty gate. | Added **E23** (orthogonalization + multi-target + calibration) as the second half of the validation suite; `ships_as ∈ {factor, visualization}` (ADR-047). |
+| F8 | **FX source said "ECB/SNB"** while US-only retired those connectors. | Fixed `fact_fx_rate` source to Alpha Vantage `CURRENCY_EXCHANGE_RATE`; `fact_macro` now = risk-free only (ADR-040/042). |
+| F9 | The **decision log (BB-10b)** had no clear writers. | Both **E22** (each premium) and **E16** (each recommendation) append under a `decision_id`; **E24** exports it. |
+| F10 | The **narrative sensor (E21) depended on the corpus** but E7 was sequenced loosely. | E7 is an explicit dependency of E21 (host runtime + time-filtered index). |
+
+### D.4 Cross-cutting invariants (verified along the whole path)
+- **PIT everywhere.** Every fact carries `event_date`/`knowledge_date`; gold views filter `knowledge_date ≤ @asof`; AI Search filters the same; the **narrative sensor reads only as-of text**; the anchor uses **as-reported vintages**; backfill preserves original availability. (QG-1, QS-1, QS-17, R-3/R-20.)
+- **Determinism / LLM-as-sensor.** The score, anchor and premium are reproducible code; the LLM only extracts cited features/edges (E21, thesis graph) and narrates grounded evidence (E16) — never the score (TC-7, ADR-045).
+- **Reproducibility.** Versioned weights/model/prompts + input-snapshot hash + the decision log make any `decision_id` re-derivable (QG-8, QS-15, §8.26).
+- **Isolation.** `owner_user_sk` on every per-user row, a single enforcement point in the API, no un-scoped data method (E19, QS-14).
+- **Evidence.** Every score/premium/recommendation carries an evidence pack and ≥1 cited source (QG-5/QG-6, §8.25).
+
+### D.5 Open items (honest)
+- **The novelty result gates the product's identity.** If E23's orthogonalization shows `narrative_premium` collapses into value+momentum, E22 **ships as the visualization only**, not a ranking factor — still useful, but a different pitch. Run a *prototype* premium through E23 **early**, before fully building E20–E22, to learn this cheaply (sequencing nuance, since E23 formally depends on E20–E22).
+- **Consensus-forward leakage in the anchor.** Forward estimates are partly narrative; the anchor flags `uses_forward` so the premium can be recomputed on realized-only inputs for validation, avoiding a circularity where narrative leaks into the "fundamental" baseline.
+- **Thesis-graph hallucination remains a live risk** mitigated, not eliminated, by the TRS retrieval gate (HR@k/P@k); the narrative sensor's groundedness pass is the analogous control for features.

@@ -1,11 +1,9 @@
 name: Deploy Function Apps
 
+# Disabled until E10. The supported E1-E4 deployment path is the manual/local
+# package upload procedure in doc/operations.md.
+
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'connectors/**'
-      - 'api/**'
   workflow_dispatch:
     inputs:
       environment:
@@ -22,9 +20,7 @@ permissions:
 jobs:
   deploy-dev:
     name: Deploy Functions to dev
-    if: >
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    if: ${{ false }} # Disabled until E10 CI/CD automation is enabled.
     runs-on: ubuntu-latest
     environment: dev
 
@@ -32,14 +28,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
-      - name: Install Azure Functions Core Tools
+      - name: Future E10 deployment method
         run: |
-          npm install -g azure-functions-core-tools@4 --unsafe-perm true
+          echo "Disabled until E10. Do not use Azure Functions Core Tools publish in this subscription."
+          echo "Future method: build a package, upload it to the Function storage account with OIDC bearer auth, generate a user-delegation SAS, and set WEBSITE_RUN_FROM_PACKAGE via ARM REST."
 
       - name: Azure Login (OIDC)
         uses: azure/login@v2
@@ -48,21 +45,12 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Publish ingestion Function App (dev)
-        working-directory: connectors
-        run: |
-          func azure functionapp publish auspex-dev-func --python
-
-      - name: Publish web API Function App (dev)
-        working-directory: api
-        run: |
-          func azure functionapp publish auspex-dev-wapi --python
+      - name: Deployment disabled until E10
+        run: echo "Use doc/operations.md for the current manual/local Function App deployment path."
 
   deploy-prod:
     name: Deploy Functions to prod
-    if: >
-      github.event_name == 'workflow_dispatch' &&
-      github.event.inputs.environment == 'prod'
+    if: ${{ false }} # Disabled until E10 CI/CD automation is enabled.
     runs-on: ubuntu-latest
     environment: prod
 
@@ -70,14 +58,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
-      - name: Install Azure Functions Core Tools
+      - name: Future E10 deployment method
         run: |
-          npm install -g azure-functions-core-tools@4 --unsafe-perm true
+          echo "Disabled until E10. Do not use Azure Functions Core Tools publish in this subscription."
+          echo "Future method: build a package, upload it to the Function storage account with OIDC bearer auth, generate a user-delegation SAS, and set WEBSITE_RUN_FROM_PACKAGE via ARM REST."
 
       - name: Azure Login (OIDC)
         uses: azure/login@v2
@@ -86,12 +75,5 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Publish ingestion Function App (prod)
-        working-directory: connectors
-        run: |
-          func azure functionapp publish auspex-prod-func --python
-
-      - name: Publish web API Function App (prod)
-        working-directory: api
-        run: |
-          func azure functionapp publish auspex-prod-wapi --python
+      - name: Deployment disabled until E10
+        run: echo "Use doc/operations.md for the current manual/local Function App deployment path."

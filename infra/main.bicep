@@ -15,7 +15,7 @@
 //   3.  Ingestion Function App + Web API Function App (in parallel, after monitor + network-vnet)
 //   4.  Key Vault — uses principal IDs for RBAC; stores App Insights connection string as secret
 //   5.  Cosmos DB — uses principal IDs for data-plane RBAC
-//   6.  Fabric Capacity — uses ingest func principal ID for Contributor RBAC (manual step)
+//   6.  Fabric Capacity — Bicep-managed; uses ingest func principal ID for Contributor RBAC
 //   7.  AI Search — uses web API func principal ID for Search Index Data Reader RBAC
 //   8.  Azure OpenAI — no cross-dependencies
 //   9.  Static Web App — no cross-dependencies
@@ -35,10 +35,8 @@ param env string
 @description('Primary region for all resources that support Switzerland North')
 param location string = 'switzerlandnorth'
 
-// fabricAdminUpn removed — Fabric capacity must be provisioned manually once
-// Microsoft Fabric is enabled for the tenant (admin.microsoft.com → Settings →
-// Org settings → Microsoft Fabric). See infra/modules/fabric.bicep for the
-// Bicep definition to use when ready.
+@description('UPN of the Fabric capacity administrator')
+param fabricAdminUpn string
 
 @description('Log Analytics retention in days (30 for dev, 90 for prod)')
 param logRetentionDays int = 30
@@ -188,12 +186,21 @@ module cosmos 'modules/cosmos.bicep' = {
 }
 
 // ---------------------------------------------------------------------------
-// Step 5: Fabric Capacity (data RG) — MANUAL STEP
-// Fabric capacity must be provisioned manually via the Azure portal once
-// Microsoft Fabric is enabled for the tenant. The Bicep module is in
-// infra/modules/fabric.bicep and can be re-added to this file when ready.
-// The auspex-{env}-data resource group is created above and will hold it.
+// Step 5: Fabric Capacity (data RG)
+// Bicep owns the Azure Fabric capacity. Fabric workspace/lakehouse/items remain
+// portal/Fabric Git managed because they are not ARM/Bicep resources.
 // ---------------------------------------------------------------------------
+
+module fabric 'modules/fabric.bicep' = {
+  name: 'fabric'
+  scope: rgData
+  params: {
+    env: env
+    location: location
+    fabricAdminUpn: fabricAdminUpn
+    ingestFuncPrincipalId: ingestFunc.outputs.principalId
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Step 6: AI Search (ai RG)
@@ -306,6 +313,7 @@ output cosmosEndpoint string = cosmos.outputs.endpoint
 output appInsightsConnectionString string = monitor.outputs.appInsightsConnectionString
 output ingestFuncName string = ingestFunc.outputs.functionAppName
 output webApiFuncName string = webApiFunc.outputs.functionAppName
+output fabricCapacityName string = fabric.outputs.capacityName
 output searchEndpoint string = aiSearch.outputs.searchEndpoint
 output openAiEndpoint string = openAi.outputs.openAiEndpoint
 output swaHostname string = staticWebApp.outputs.defaultHostname

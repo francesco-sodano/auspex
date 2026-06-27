@@ -27,12 +27,6 @@ param cosmosEndpoint string
 @description('Fabric capacity name (used in the scheduler; ingestion only)')
 param fabricCapacityName string = ''
 
-@description('Fabric workspace GUID for OneLake bronze writes (ingestion only)')
-param onelakeWorkspaceId string = ''
-
-@description('Fabric Lakehouse name for bronze layer (ingestion only)')
-param onelakeLakehouseName string = 'auspex_bronze'
-
 @description('Subnet resource ID for VNet integration')
 param vnetIntegrationSubnetId string
 
@@ -259,14 +253,6 @@ var ingestionExtraSettings = isIngestion ? [
   {
     name: 'FABRIC_CAPACITY_NAME'
     value: fabricCapacityName
-  }
-  {
-    name: 'ONELAKE_WORKSPACE_ID'
-    value: onelakeWorkspaceId
-  }
-  {
-    name: 'ONELAKE_LAKEHOUSE_NAME'
-    value: onelakeLakehouseName
   }
 ] : []
 

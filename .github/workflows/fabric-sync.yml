@@ -1,5 +1,8 @@
 name: Fabric Git Sync
 
+# Disabled until E10. Use the manual Fabric portal Git sync procedure in
+# doc/operations.md for E1-E4.
+
 # Manual trigger only — Fabric Git integration sync cannot be done
 # via a simple CLI command in CI; it requires the Fabric REST API
 # with a workspace-scoped token.
@@ -34,6 +37,7 @@ permissions:
 jobs:
   fabric-sync:
     name: Fabric Git sync (${{ github.event.inputs.environment }})
+    if: ${{ false }} # Disabled until E10 CI/CD automation is enabled.
     runs-on: ubuntu-latest
 
     steps:

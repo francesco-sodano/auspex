@@ -1,10 +1,9 @@
 name: Deploy Static Web App
 
+# Disabled until E10. The supported E1-E4 deployment path is manual/local;
+# web deployment automation is a future hardening item.
+
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'web/**'
   workflow_dispatch:
     inputs:
       environment:
@@ -21,9 +20,7 @@ permissions:
 jobs:
   deploy-dev:
     name: Build and deploy SWA to dev
-    if: >
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    if: ${{ false }} # Disabled until E10 CI/CD automation is enabled.
     runs-on: ubuntu-latest
     environment: dev
 
@@ -60,9 +57,7 @@ jobs:
 
   deploy-prod:
     name: Build and deploy SWA to prod
-    if: >
-      github.event_name == 'workflow_dispatch' &&
-      github.event.inputs.environment == 'prod'
+    if: ${{ false }} # Disabled until E10 CI/CD automation is enabled.
     runs-on: ubuntu-latest
     environment: prod
 

@@ -1,10 +1,9 @@
 name: Deploy Infrastructure
 
+# Disabled until E10. The supported E1-E4 deployment path is the manual/local
+# procedure in doc/operations.md.
+
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'infra/**'
   workflow_dispatch:
     inputs:
       environment:
@@ -26,10 +25,7 @@ jobs:
 
   deploy-dev:
     name: Deploy to dev
-    # Run on push (auto) OR when manually triggered with env=dev
-    if: >
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    if: ${{ false }} # Disabled until E10 CI/CD automation is enabled.
     runs-on: ubuntu-latest
     environment: dev
 
@@ -58,9 +54,7 @@ jobs:
 
   deploy-prod:
     name: Deploy to prod
-    if: >
-      github.event_name == 'workflow_dispatch' &&
-      github.event.inputs.environment == 'prod'
+    if: ${{ false }} # Disabled until E10 CI/CD automation is enabled.
     runs-on: ubuntu-latest
     environment: prod   # prod environment has required reviewers configured in GitHub
 
