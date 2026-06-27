@@ -667,6 +667,114 @@ Conclusion: E5 is operationally validated for the currently implemented E4 sourc
 
 ---
 
+## E6 — Metric Layer + Feature Contract
+
+Current status: E6a is implemented for the currently available E5 facts. The notebook computes PIT-safe price/risk context from `fact_market_daily`, Form 4 smart-money metrics from `fact_insider_txn`, seeds `metric_weights`, and publishes the stable `v_security_daily_features` contract. In the Lakehouse, the `v_*` serving projections are materialized as Delta tables so the Fabric SQL endpoint can query them. The Warehouse SQL files define the promoted Warehouse objects as true SQL views. The final six-leg `opportunity_score` remains gated by design until E8 data sources and the E14 valuation brake are complete; rows are marked with `score_status = 'INCOMPLETE_E6A_WAITING_E8_E14'`.
+
+Artifacts:
+
+```text
+fabric/notebooks/nb_04_metrics.py
+fabric/warehouse/metrics/04_base_metrics.sql
+fabric/warehouse/metrics/12b_opportunity_legs.sql
+fabric/warehouse/metrics/13_opportunity_score.sql
+tests/test_e6_metric_contract.py
+```
+
+Run order:
+
+1. Complete and validate E5 (`nb_03_silver_to_gold`).
+2. Run `nb_04_metrics` attached to the same Lakehouse.
+3. Rerun `nb_04_metrics` once on the same E5 data to verify replay convergence.
+4. Run the SQL checks below in the Lakehouse SQL endpoint or Warehouse mirror.
+
+Expected notebook behavior:
+
+| Output | Expected |
+|---|---|
+| `metric_weights` | 6 active `e6a_v1` weights, sum = 1.000000 |
+| `security_daily_features` | one row per `(security_sk, as_of)` snapshot that is PIT-valid for known market data |
+| `v_market_momentum` | materialized as a Lakehouse Delta table |
+| `v_market_risk` | materialized as a Lakehouse Delta table |
+| `v_risk_adjusted` | materialized as a Lakehouse Delta table |
+| `v_smart_money` | materialized as a Lakehouse Delta table |
+| `v_opportunity_legs` | materialized as a Lakehouse Delta table with NULL E8/E14 legs |
+| `v_opportunity_score` | materialized as a Lakehouse Delta table with NULL `opportunity_score` during E6a |
+| `v_security_daily_features` | materialized as a Lakehouse Delta table; stable API/agent feature contract |
+
+Validation SQL:
+
+```sql
+-- E6 feature grain must be replay-safe.
+SELECT security_sk, date_sk, COUNT(*) AS duplicate_count
+FROM security_daily_features
+GROUP BY security_sk, date_sk
+HAVING COUNT(*) > 1;
+
+-- E6 must produce usable rows. Historical backfills may collapse many price
+-- event dates into the first date Auspex knew them, so do not expect this count
+-- to equal fact_market_daily row count.
+SELECT COUNT(*) AS feature_rows
+FROM security_daily_features;
+
+-- PIT sanity: no feature row can expose knowledge after its as-of date.
+SELECT COUNT(*) AS future_knowledge_rows
+FROM security_daily_features
+WHERE as_of IS NULL OR max_knowledge_date IS NULL OR max_knowledge_date > as_of;
+
+-- Score range sanity for the provisional composite metric.
+SELECT COUNT(*) AS invalid_composite_scores
+FROM security_daily_features
+WHERE composite_growth_score < 0 OR composite_growth_score > 100;
+
+-- E6a gate sanity: final Opportunity Score must not be published before E8/E14.
+SELECT COUNT(*) AS prematurely_published_scores
+FROM security_daily_features
+WHERE opportunity_score IS NOT NULL
+   OR score_status <> 'INCOMPLETE_E6A_WAITING_E8_E14';
+
+-- Weight sanity: active composite weights sum to one.
+SELECT ROUND(SUM(weight), 6) AS active_weight_sum
+FROM metric_weights
+WHERE metric_group = 'composite_growth_score'
+  AND is_active = true
+  AND version = 'e6a_v1';
+
+-- Contract smoke: the serving view should expose only PIT-valid rows.
+SELECT COUNT(*) AS serving_rows
+FROM v_security_daily_features;
+```
+
+Expected results:
+
+| Check | Expected |
+|---|---|
+| duplicate feature grain | no rows |
+| feature rows | greater than 0 |
+| future knowledge rows | 0 |
+| invalid composite scores | 0 |
+| prematurely published scores | 0 |
+| active weight sum | 1.000000 |
+| serving rows | equals `security_daily_features` rows when all PIT checks pass |
+
+Replay check: rerun `nb_04_metrics` on the same E5 data and rerun the duplicate-grain and PIT checks. Row counts should converge and duplicate checks should still return no rows.
+
+Validated dev run (2026-06-27):
+
+| Check | Result |
+|---|---:|
+| `security_daily_features` | 801 rows |
+| `v_security_daily_features` | 801 rows |
+| missing/future PIT rows | 0 rows |
+| duplicate feature grain | 0 rows |
+| invalid composite/opportunity scores | 0 rows |
+| active `e6a_v1` weight sum | 1.000000 |
+| Lakehouse SQL endpoint `v_security_daily_features` query | returns 801 rows |
+
+Conclusion: E6a is operationally validated for the current E5 fact set. The final six-leg `opportunity_score` remains intentionally unpublished until E8/E14 provide the missing source and valuation-brake legs.
+
+---
+
 ## Future CI/CD — GitHub Actions (OIDC, E10)
 
 GitHub Actions are **not used for the current E1-E4 deployment path**. The supported deployment path is the manual/local procedure above. The workflows in `.github/workflows/` are future E10 automation and should remain disabled until the manual deployment and smoke checks are stable.
