@@ -3,7 +3,7 @@ import types
 import unittest
 import os
 from pathlib import Path
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import patch
 
 CONNECTORS_ROOT = Path(__file__).resolve().parents[1] / "connectors"
@@ -66,7 +66,12 @@ from shared.base_connector import BaseConnector
 from shared.bronze_writer import BronzeWriter
 from shared.envelope import deterministic_batch_id
 from shared.models import Batch, RunContext, Watermark
+from alpha_vantage.connector import AlphaVantageConnector
+from contracts.connector import ContractsConnector
+from etf_holdings.connector import EtfHoldingsConnector
+from news.connector import NewsConnector
 from prices_eod.connector import PricesEodConnector
+from sec_13f.connector import Sec13FConnector
 
 
 class FakeControlPlane:
@@ -157,6 +162,12 @@ def sample_batch():
 
 
 class BaseConnectorTests(unittest.TestCase):
+    def test_deterministic_batch_id_is_safe_for_cosmos_and_onelake(self):
+        batch_id = deterministic_batch_id("sec_8k", "2026-06-01-to-2026-06-28-forms-8-K,8-K/A")
+
+        self.assertEqual(batch_id, "sec_8k-2026-06-01-to-2026-06-28-forms-8-K-8-K-A")
+        self.assertNotIn("/", batch_id)
+
     def test_success_writes_bronze_marks_dedup_and_advances_watermark(self):
         cp = FakeControlPlane()
         bw = FakeBronzeWriter()
@@ -266,6 +277,138 @@ class PricesEodConnectorTests(unittest.TestCase):
         self.assertIn("offset-2-limit-2", second.window)
         self.assertEqual({record["symbol"] for record in first.records}, {"AAPL", "MSFT"})
         self.assertEqual({record["symbol"] for record in second.records}, {"NVDA"})
+
+
+class E8ConnectorTests(unittest.TestCase):
+    def test_alpha_vantage_fetches_symbol_macro_fx_and_etf_records(self):
+        os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
+        os.environ["AV_RPM"] = "100000"
+
+        def fake_http_get(url, params=None, **kwargs):
+            function_name = params["function"]
+            payloads = {
+                "OVERVIEW": {"Symbol": params.get("symbol"), "PERatio": "20"},
+                "BALANCE_SHEET": {"quarterlyReports": []},
+                "CASH_FLOW": {"quarterlyReports": []},
+                "NEWS_SENTIMENT": {"feed": []},
+                "INSTITUTIONAL_HOLDINGS": {"data": []},
+                "ETF_PROFILE": {"holdings": []},
+                "TREASURY_YIELD": {"data": [{"date": date.today().isoformat(), "value": "4.25"}]},
+                "CURRENCY_EXCHANGE_RATE": {"Realtime Currency Exchange Rate": {
+                    "1. From_Currency Code": "USD",
+                    "3. To_Currency Code": "CHF",
+                    "5. Exchange Rate": "0.81",
+                }},
+            }
+            return FakeHttpResponse(payloads[function_name])
+
+        with patch("alpha_vantage.connector.http_get", side_effect=fake_http_get):
+            batch = AlphaVantageConnector(
+                FakeControlPlane(),
+                FakeUniverseBronzeWriter([]),
+                symbols=["AAPL"],
+                etf_symbols=["QQQ"],
+                since_date=date.today().isoformat(),
+            ).fetch(None)
+
+        self.assertEqual(len(batch.records), 8)
+        self.assertEqual({record["function"] for record in batch.records}, {
+            "OVERVIEW", "BALANCE_SHEET", "CASH_FLOW", "NEWS_SENTIMENT", "INSTITUTIONAL_HOLDINGS",
+            "ETF_PROFILE", "TREASURY_YIELD", "CURRENCY_EXCHANGE_RATE",
+        })
+        self.assertIn("symbols-1-of-1", batch.window)
+
+    def test_sec_13f_uses_efts_forms_and_user_agent(self):
+        os.environ["EDGAR_USER_AGENT"] = "Auspex test@example.com"
+
+        def fake_http_get(url, params=None, headers=None, **kwargs):
+            self.assertEqual(params["forms"], "13F-HR,13F-HR/A")
+            self.assertEqual(headers["User-Agent"], "Auspex test@example.com")
+            return FakeHttpResponse({"hits": {"hits": [{"_source": {"adsh": "0001", "file_date": date.today().isoformat()}}]}})
+
+        with patch("shared.sec_efts_connector.http_get", side_effect=fake_http_get):
+            batch = Sec13FConnector(
+                FakeControlPlane(),
+                FakeBronzeWriter(),
+                source_config={"rate_limit": {"requests_per_minute": 100000}},
+                since_date=date.today().isoformat(),
+            ).fetch(None)
+
+        self.assertEqual(batch.records[0]["matched_forms"], "13F-HR,13F-HR/A")
+
+    def test_contracts_connector_uses_search_terms(self):
+        captured_payloads = []
+
+        def fake_http_post(url, json=None, **kwargs):
+            captured_payloads.append(json)
+            return FakeHttpResponse({
+                "results": [{"Award ID": "A1", "Recipient Name": "MICROSOFT", "Award Amount": 1000}],
+                "page_metadata": {"hasNext": False},
+            })
+
+        with patch("contracts.connector.http_post", side_effect=fake_http_post):
+            batch = ContractsConnector(
+                FakeControlPlane(),
+                FakeBronzeWriter(),
+                search_terms=[{"symbol": "MSFT", "text": "MICROSOFT"}],
+                since_date=date.today().isoformat(),
+            ).fetch(None)
+
+        self.assertEqual(batch.records[0]["symbol"], "MSFT")
+        self.assertEqual(captured_payloads[0]["filters"]["keywords"], ["MICROSOFT"])
+
+    def test_news_connector_fetches_company_news_for_universe(self):
+        os.environ["FINNHUB_API_KEY"] = "test-key"
+
+        def fake_http_get(url, params=None, **kwargs):
+            self.assertEqual(params["symbol"], "AAPL")
+            return FakeHttpResponse([{"id": 1, "headline": "Apple headline", "datetime": 1782518400}])
+
+        with patch("news.connector.http_get", side_effect=fake_http_get):
+            batch = NewsConnector(
+                FakeControlPlane(),
+                FakeUniverseBronzeWriter(["AAPL"]),
+                since_date=date.today().isoformat(),
+                source_config={"rate_limit": {"requests_per_minute": 100000}},
+            ).fetch(None)
+
+        self.assertEqual(batch.records[0]["symbol"], "AAPL")
+
+    def test_news_connector_clips_since_date_to_free_tier_lookback(self):
+        os.environ["FINNHUB_API_KEY"] = "test-key"
+        os.environ.pop("FINNHUB_MAX_LOOKBACK_DAYS", None)
+        captured_params = []
+        expected_from = (date.today() - timedelta(days=365)).isoformat()
+
+        def fake_http_get(url, params=None, **kwargs):
+            captured_params.append(params)
+            return FakeHttpResponse([])
+
+        with patch("news.connector.http_get", side_effect=fake_http_get):
+            batch = NewsConnector(
+                FakeControlPlane(),
+                FakeUniverseBronzeWriter(["AAPL"]),
+                since_date=(date.today() - timedelta(days=400)).isoformat(),
+                source_config={"rate_limit": {"requests_per_minute": 100000}},
+            ).fetch(None)
+
+        self.assertEqual(captured_params[0]["from"], expected_from)
+        self.assertIn(f"{expected_from}-to-", batch.window)
+
+    def test_etf_holdings_connector_fetches_alpha_vantage_profile(self):
+        os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
+        os.environ["AV_RPM"] = "100000"
+
+        def fake_http_get(url, params=None, **kwargs):
+            self.assertEqual(params["function"], "ETF_PROFILE")
+            self.assertEqual(params["symbol"], "QQQ")
+            return FakeHttpResponse({"holdings": [{"symbol": "MSFT", "weight": "8.5"}]})
+
+        with patch("etf_holdings.connector.http_get", side_effect=fake_http_get):
+            batch = EtfHoldingsConnector(FakeControlPlane(), FakeBronzeWriter(), etf_symbols=["QQQ"]).fetch(None)
+
+        self.assertEqual(batch.records[0]["function"], "ETF_PROFILE")
+        self.assertEqual(batch.records[0]["context"]["symbol"], "QQQ")
 
 
 if __name__ == "__main__":

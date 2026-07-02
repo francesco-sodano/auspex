@@ -3,10 +3,18 @@ import uuid
 
 import azure.functions as func
 
+from alpha_vantage.connector import AlphaVantageConnector
+from contracts.connector import ContractsConnector
+from etf_holdings.connector import EtfHoldingsConnector
+from news.connector import NewsConnector
 from prices_eod.connector import PricesEodConnector
 from prices_eod.blueprint import bp as prices_eod_bp
+from sec_13dg.connector import Sec13DgConnector
+from sec_13f.connector import Sec13FConnector
+from sec_8k.connector import Sec8KConnector
 from sec_form4.connector import SecForm4Connector
 from sec_form4.blueprint import bp as sec_form4_bp
+from sec_s1.connector import SecS1Connector
 from shared.clients import get_bronze_writer, get_control_plane
 from shared.models import RunContext
 
@@ -16,6 +24,10 @@ app.register_blueprint(prices_eod_bp)
 
 _CONNECTORS = {
 	"sec_form4": lambda cp, bw, body, source: SecForm4Connector(cp, bw, source_config=source),
+	"sec_13f": lambda cp, bw, body, source: Sec13FConnector(cp, bw, since_date=body.get("since_date") or None, source_config=source),
+	"sec_13dg": lambda cp, bw, body, source: Sec13DgConnector(cp, bw, since_date=body.get("since_date") or None, source_config=source),
+	"sec_8k": lambda cp, bw, body, source: Sec8KConnector(cp, bw, since_date=body.get("since_date") or None, source_config=source),
+	"sec_s1": lambda cp, bw, body, source: SecS1Connector(cp, bw, since_date=body.get("since_date") or None, source_config=source),
 	"prices_eod": lambda cp, bw, body, source: PricesEodConnector(
 		cp,
 		bw,
@@ -23,6 +35,36 @@ _CONNECTORS = {
 		since_date=body.get("since_date") or None,
 		symbol_offset=body.get("symbol_offset") or 0,
 		symbol_limit=body.get("symbol_limit") or None,
+		source_config=source,
+	),
+	"alpha_vantage": lambda cp, bw, body, source: AlphaVantageConnector(
+		cp,
+		bw,
+		symbols=body.get("symbols") or None,
+		etf_symbols=body.get("etf_symbols") or None,
+		since_date=body.get("since_date") or None,
+		symbol_offset=body.get("symbol_offset") or 0,
+		symbol_limit=body.get("symbol_limit") or None,
+		source_config=source,
+	),
+	"news": lambda cp, bw, body, source: NewsConnector(
+		cp,
+		bw,
+		symbols=body.get("symbols") or None,
+		since_date=body.get("since_date") or None,
+		source_config=source,
+	),
+	"contracts": lambda cp, bw, body, source: ContractsConnector(
+		cp,
+		bw,
+		search_terms=body.get("search_terms") or None,
+		since_date=body.get("since_date") or None,
+		source_config=source,
+	),
+	"etf_holdings": lambda cp, bw, body, source: EtfHoldingsConnector(
+		cp,
+		bw,
+		etf_symbols=body.get("etf_symbols") or None,
 		source_config=source,
 	),
 }

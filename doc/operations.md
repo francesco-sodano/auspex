@@ -775,6 +775,143 @@ Conclusion: E6a is operationally validated for the current E5 fact set. The fina
 
 ---
 
+## E8 — Remaining Connectors And Gold Feed Completion
+
+Current status: E8 code is implemented and ready for source-specific verification. All E8 source registry entries remain disabled by default until their credentials/config are present and each source has passed its smoke run.
+
+Required settings before running E8 connectors:
+
+| Setting | Required for | Notes |
+|---|---|---|
+| `ALPHAVANTAGE_API_KEY` | `alpha_vantage`, `etf_holdings` | Also used by `prices_eod`; set `AV_RPM` to the plan rate. |
+| `AV_RPM` | `alpha_vantage`, `etf_holdings` | Default/free tier is `5`; use chunks for symbol universes. |
+| `FINNHUB_API_KEY` | `news` | Required for Finnhub company-news. The connector is capped at Finnhub's 60 calls/minute limit, so each symbol call is paced at about 1 request/second. |
+| `FINNHUB_MAX_LOOKBACK_DAYS` | `news` | Default `365` for the free tier's 1-year company-news history. Older requested `since_date` values are clipped to this window. |
+| `EDGAR_USER_AGENT` | `sec_13f`, `sec_13dg`, `sec_8k`, `sec_s1` | SEC requires an identifiable contact user agent. |
+| `contracts.search_terms` | `contracts` | No API key, but search terms must be configured or passed in the run body. |
+
+Artifacts:
+
+```text
+connectors/alpha_vantage/connector.py
+connectors/alpha_vantage/mapping.py
+connectors/news/connector.py
+connectors/contracts/connector.py
+connectors/etf_holdings/connector.py
+connectors/sec_13f|sec_13dg|sec_8k|sec_s1/connector.py
+fabric/notebooks/nb_05_alpha_vantage_to_gold.py
+fabric/notebooks/nb_06_sec_filings_to_gold.py
+fabric/notebooks/nb_07_contracts_to_gold.py
+fabric/warehouse/04_e8_facts.sql
+tests/test_alpha_vantage_mapping.py
+tests/test_e8_contract.py
+```
+
+Connector smoke order:
+
+1. Seed/update the source registry from `connectors/shared/sources_seed.json`.
+2. Enable only the source being verified.
+3. Run small chunks first:
+
+If seeding or enabling sources from a local workstation, Cosmos DB public access may block the client IP. Temporarily open the Cosmos account in the Azure Portal under `auspex-dev-cosmos` -> **Networking** -> **Public access** -> **Selected networks**, add the current client IP, save, run the seed/enable commands, then restore public access to **Disabled** after smoke testing. Do not leave broad public access enabled.
+
+```http
+POST /api/run
+{
+  "source_id": "alpha_vantage",
+  "symbols": ["AAPL", "MSFT"],
+  "etf_symbols": ["QQQ", "SMH"],
+  "since_date": "2026-06-20"
+}
+```
+
+```http
+POST /api/run
+{
+  "source_id": "news",
+  "symbols": ["AAPL", "MSFT"],
+  "since_date": "2026-06-20"
+}
+```
+
+Finnhub calls `/company-news` once per symbol. Keep smoke batches to 60 symbols or fewer per minute; larger symbol lists run sequentially at the connector's 60 calls/minute cap.
+
+```http
+POST /api/run
+{
+  "source_id": "contracts",
+  "search_terms": [
+    { "symbol": "MSFT", "text": "MICROSOFT" },
+    { "symbol": "NVDA", "text": "NVIDIA" }
+  ],
+  "since_date": "2026-06-01"
+}
+```
+
+```http
+POST /api/run
+{ "source_id": "sec_13f", "since_date": "2026-06-01" }
+```
+
+Repeat similarly for `sec_13dg`, `sec_8k`, `sec_s1`, and `etf_holdings` if running ETF profile separately from `alpha_vantage`.
+
+Fabric notebook order after bronze lands:
+
+1. `nb_05_alpha_vantage_to_gold`
+2. `nb_06_sec_filings_to_gold`
+3. `nb_07_contracts_to_gold`
+4. Rerun `nb_04_metrics` so E8-backed feature columns flow into `v_security_daily_features`.
+
+Validation SQL:
+
+```sql
+SELECT 'fact_fundamentals' AS tbl, COUNT(*) AS rows FROM fact_fundamentals
+UNION ALL SELECT 'fact_company_news', COUNT(*) FROM fact_company_news
+UNION ALL SELECT 'fact_news_sentiment', COUNT(*) FROM fact_news_sentiment
+UNION ALL SELECT 'fact_macro', COUNT(*) FROM fact_macro
+UNION ALL SELECT 'fact_fx_rate', COUNT(*) FROM fact_fx_rate
+UNION ALL SELECT 'fact_institutional_holding', COUNT(*) FROM fact_institutional_holding
+UNION ALL SELECT 'fact_ownership_event', COUNT(*) FROM fact_ownership_event
+UNION ALL SELECT 'fact_contract_award', COUNT(*) FROM fact_contract_award
+UNION ALL SELECT 'fact_theme_membership', COUNT(*) FROM fact_theme_membership;
+```
+
+```sql
+SELECT 'fact_fundamentals' AS tbl, COUNT(*) AS missing_pit FROM fact_fundamentals WHERE event_date IS NULL OR knowledge_date IS NULL
+UNION ALL SELECT 'fact_company_news', COUNT(*) FROM fact_company_news WHERE event_date IS NULL OR knowledge_date IS NULL
+UNION ALL SELECT 'fact_news_sentiment', COUNT(*) FROM fact_news_sentiment WHERE event_date IS NULL OR knowledge_date IS NULL
+UNION ALL SELECT 'fact_macro', COUNT(*) FROM fact_macro WHERE event_date IS NULL OR knowledge_date IS NULL
+UNION ALL SELECT 'fact_fx_rate', COUNT(*) FROM fact_fx_rate WHERE event_date IS NULL OR knowledge_date IS NULL
+UNION ALL SELECT 'fact_institutional_holding', COUNT(*) FROM fact_institutional_holding WHERE event_date IS NULL OR knowledge_date IS NULL
+UNION ALL SELECT 'fact_ownership_event', COUNT(*) FROM fact_ownership_event WHERE event_date IS NULL OR knowledge_date IS NULL
+UNION ALL SELECT 'fact_contract_award', COUNT(*) FROM fact_contract_award WHERE event_date IS NULL OR knowledge_date IS NULL
+UNION ALL SELECT 'fact_theme_membership', COUNT(*) FROM fact_theme_membership WHERE event_date IS NULL OR knowledge_date IS NULL;
+```
+
+```sql
+SELECT COUNT(*) AS e8_feature_rows
+FROM v_security_daily_features
+WHERE pe_ratio IS NOT NULL
+   OR news_sentiment_ewma_14d IS NOT NULL
+   OR news_volume_z_30d IS NOT NULL
+   OR contract_award_usd_trailing_90d > 0
+   OR inst_net_flow_qoq IS NOT NULL
+   OR inst_new_initiations > 0
+   OR activist_13d_flag = true;
+```
+
+Expected results:
+
+| Check | Expected |
+|---|---|
+| Relevant fact rows for enabled/smoked sources | greater than 0 |
+| Missing PIT rows | 0 for every populated fact |
+| `e8_feature_rows` after rerunning `nb_04_metrics` | greater than 0 if the smoke symbols produced E8 facts |
+
+Current local environment check: `ALPHAVANTAGE_API_KEY`, `FINNHUB_API_KEY`, and `EDGAR_USER_AGENT` were not present locally. Set them locally or in the Function App before verification.
+
+---
+
 ## Future CI/CD — GitHub Actions (OIDC, E10)
 
 GitHub Actions are **not used for the current E1-E4 deployment path**. The supported deployment path is the manual/local procedure above. The workflows in `.github/workflows/` are future E10 automation and should remain disabled until the manual deployment and smoke checks are stable.

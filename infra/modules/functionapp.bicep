@@ -27,6 +27,18 @@ param cosmosEndpoint string
 @description('Fabric capacity name (used in the scheduler; ingestion only)')
 param fabricCapacityName string = ''
 
+@description('Fabric workspace GUID for OneLake bronze writes (ingestion only)')
+param onelakeWorkspaceId string = ''
+
+@description('Fabric Lakehouse name or item GUID for OneLake bronze writes (ingestion only)')
+param onelakeLakehouseName string = 'auspex_bronze'
+
+@description('Alpha Vantage request cap in requests per minute (ingestion only)')
+param alphaVantageRequestsPerMinute string = '5'
+
+@description('Finnhub company-news maximum lookback in days for the free tier (ingestion only)')
+param finnhubMaxLookbackDays string = '365'
+
 @description('Subnet resource ID for VNet integration')
 param vnetIntegrationSubnetId string
 
@@ -243,12 +255,28 @@ var ingestionExtraSettings = isIngestion ? [
     value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=ALPHAVANTAGE-API-KEY)'
   }
   {
+    name: 'AV_RPM'
+    value: alphaVantageRequestsPerMinute
+  }
+  {
     name: 'FMP_API_KEY'
     value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=FMP-API-KEY)'
   }
   {
     name: 'FINNHUB_API_KEY'
     value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=FINNHUB-API-KEY)'
+  }
+  {
+    name: 'FINNHUB_MAX_LOOKBACK_DAYS'
+    value: finnhubMaxLookbackDays
+  }
+  {
+    name: 'ONELAKE_WORKSPACE_ID'
+    value: onelakeWorkspaceId
+  }
+  {
+    name: 'ONELAKE_LAKEHOUSE_NAME'
+    value: onelakeLakehouseName
   }
   {
     name: 'FABRIC_CAPACITY_NAME'

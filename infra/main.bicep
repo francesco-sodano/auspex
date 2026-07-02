@@ -41,6 +41,12 @@ param fabricAdminUpn string
 @description('Log Analytics retention in days (30 for dev, 90 for prod)')
 param logRetentionDays int = 30
 
+@description('Fabric workspace GUID for OneLake bronze writes')
+param onelakeWorkspaceId string = ''
+
+@description('Fabric Lakehouse name or item GUID for OneLake bronze writes')
+param onelakeLakehouseName string = 'auspex_bronze'
+
 // ---------------------------------------------------------------------------
 // Deterministic resource names (no module output needed)
 // ---------------------------------------------------------------------------
@@ -126,6 +132,8 @@ module ingestFunc 'modules/functionapp.bicep' = {
     isIngestion: true
     cosmosEndpoint: cosmosEndpoint
     fabricCapacityName: fabricCapacityName
+    onelakeWorkspaceId: onelakeWorkspaceId
+    onelakeLakehouseName: onelakeLakehouseName
     vnetIntegrationSubnetId: networkVnet.outputs.ingestSubnetId
     logAnalyticsWorkspaceId: monitor.outputs.workspaceId
   }

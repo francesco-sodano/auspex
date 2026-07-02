@@ -1,5 +1,9 @@
 from datetime import datetime, timezone
+import re
 from typing import Optional
+
+
+_UNSAFE_BATCH_ID_CHARS = re.compile(r"[^A-Za-z0-9._=-]+")
 
 
 def _now_utc() -> str:
@@ -7,7 +11,8 @@ def _now_utc() -> str:
 
 
 def deterministic_batch_id(source_id: str, window: str) -> str:
-    return f"{source_id}-{window}"
+    safe_window = _UNSAFE_BATCH_ID_CHARS.sub("-", window).strip("-")
+    return f"{source_id}-{safe_window}"
 
 
 def make_envelope(

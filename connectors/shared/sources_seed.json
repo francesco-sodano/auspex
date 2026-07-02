@@ -26,7 +26,10 @@
     "auth_secret_ref": "EDGAR-USER-AGENT",
     "latency_class": "quarterly",
     "reliability_weight": 1.0,
-    "implementation_status": "planned",
+    "rate_limit": {
+      "requests_per_minute": 450
+    },
+    "implementation_status": "implemented",
     "enabled": false,
     "schema_version": 1
   },
@@ -40,7 +43,10 @@
     "auth_secret_ref": "EDGAR-USER-AGENT",
     "latency_class": "daily",
     "reliability_weight": 1.0,
-    "implementation_status": "planned",
+    "rate_limit": {
+      "requests_per_minute": 450
+    },
+    "implementation_status": "implemented",
     "enabled": false,
     "schema_version": 1
   },
@@ -54,7 +60,10 @@
     "auth_secret_ref": "EDGAR-USER-AGENT",
     "latency_class": "daily",
     "reliability_weight": 1.0,
-    "implementation_status": "planned",
+    "rate_limit": {
+      "requests_per_minute": 450
+    },
+    "implementation_status": "implemented",
     "enabled": false,
     "schema_version": 1
   },
@@ -68,7 +77,10 @@
     "auth_secret_ref": "EDGAR-USER-AGENT",
     "latency_class": "daily",
     "reliability_weight": 1.0,
-    "implementation_status": "planned",
+    "rate_limit": {
+      "requests_per_minute": 450
+    },
+    "implementation_status": "implemented",
     "enabled": false,
     "schema_version": 1
   },
@@ -113,7 +125,11 @@
     "auth_secret_ref": "ALPHAVANTAGE-API-KEY",
     "latency_class": "daily",
     "reliability_weight": 0.9,
-    "implementation_status": "planned",
+    "rate_limit": {
+      "requests_per_minute": 5
+    },
+    "etf_symbols": ["QQQ", "SMH", "XLK", "XLI", "XLE"],
+    "implementation_status": "implemented",
     "enabled": false,
     "schema_version": 1
   },
@@ -141,7 +157,11 @@
     "auth_secret_ref": "FINNHUB-API-KEY",
     "latency_class": "daily",
     "reliability_weight": 0.75,
-    "implementation_status": "planned",
+    "rate_limit": {
+      "requests_per_minute": 60
+    },
+    "max_lookback_days": 365,
+    "implementation_status": "implemented",
     "enabled": false,
     "schema_version": 1
   },
@@ -155,21 +175,26 @@
     "auth_secret_ref": null,
     "latency_class": "weekly",
     "reliability_weight": 0.95,
-    "implementation_status": "planned",
+    "search_terms": [],
+    "implementation_status": "implemented",
     "enabled": false,
     "schema_version": 1
   },
   {
     "id": "etf_holdings",
     "source_id": "etf_holdings",
-    "name": "FMP Thematic ETF Holdings (TRS ground truth)",
+    "name": "Alpha Vantage ETF Holdings (TRS ground truth)",
     "type": "etf",
     "schedule": "weekly",
-    "base_url": "https://financialmodelingprep.com/api/v3",
-    "auth_secret_ref": "FMP-API-KEY",
+    "base_url": "https://www.alphavantage.co/query?function=ETF_PROFILE",
+    "auth_secret_ref": "ALPHAVANTAGE-API-KEY",
     "latency_class": "weekly",
     "reliability_weight": 0.95,
-    "implementation_status": "planned",
+    "rate_limit": {
+      "requests_per_minute": 5
+    },
+    "etf_symbols": ["QQQ", "SMH", "XLK", "XLI", "XLE"],
+    "implementation_status": "implemented",
     "enabled": false,
     "schema_version": 1
   },

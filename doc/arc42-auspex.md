@@ -1310,9 +1310,10 @@ auspex/
 
 **E8 Remaining connectors** — *complete every planned feed.*
 - *Design:* `sec_13f` / `sec_13dg` / `sec_8k` / `sec_s1`, Finnhub `news`, **Alpha Vantage** (`OVERVIEW`+`BALANCE_SHEET`+`CASH_FLOW`+`NEWS_SENTIMENT`+`CURRENCY_EXCHANGE_RATE`+`TREASURY_YIELD`), `contracts` (USASpending), `etf_holdings` (TRS). AV mapping is pure/tested (§8.6.3). US-only retires FRED + SNB/ECB (ADR-040/042); macro = risk-free only.
-- *Artifacts:* the per-source `connectors/*`, `connectors/alpha_vantage/mapping.py`, `nb_av_to_gold`, `nb_news_to_gold`, `nb_etf_to_theme`.
+- *Current implementation:* E8 connectors are implemented but disabled by default in the source registry until secrets and per-source verification are complete. `alpha_vantage` pulls `OVERVIEW`, `BALANCE_SHEET`, `CASH_FLOW`, `NEWS_SENTIMENT`, `INSTITUTIONAL_HOLDINGS`, `CURRENCY_EXCHANGE_RATE`, `TREASURY_YIELD`, and optional ETF profiles. `news` pulls Finnhub company-news. `contracts` pulls USASpending search results. SEC connectors pull official `sec_13f`, `sec_13dg`, `sec_8k`, and `sec_s1` filing metadata through EFTS; gold loaders preserve SEC filing events and material events, while resolved institutional holding metrics are fed by Alpha Vantage `INSTITUTIONAL_HOLDINGS` until a CUSIP-capable SEC information-table parser is added.
+- *Artifacts:* the per-source `connectors/*`, `connectors/alpha_vantage/mapping.py`, `fabric/notebooks/{nb_05_alpha_vantage_to_gold.py,nb_06_sec_filings_to_gold.py,nb_07_contracts_to_gold.py}`, `fabric/warehouse/04_e8_facts.sql`.
 - *Contract:* in: provider REST → out: `fact_fundamentals`, `fact_company_news`, `fact_fx_rate`, `fact_macro` (risk-free), `fact_institutional_holding`, `fact_ownership_event`, `fact_contract_award`, `fact_theme_membership` (`is_ground_truth=1`).
-- *Depends:* E3, E4, E5. *DoD:* every leg-source view (below) is fed from real gold, not imputed; `mapping.py` unit tests pass.
+- *Depends:* E3, E4, E5. *DoD:* every E8-backed feature column in `v_security_daily_features` is fed from real gold and PIT-filtered; `mapping.py` unit tests pass; source-specific verification rows land with no missing PIT.
 
 ### Phase 1 — Serving & core analytics
 

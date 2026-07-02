@@ -17,7 +17,7 @@ from delta.tables import DeltaTable
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
-    BooleanType, DateType, DecimalType, DoubleType, IntegerType,
+    BooleanType, DateType, DecimalType, DoubleType, IntegerType, LongType,
     StringType, StructField, StructType, TimestampType,
 )
 
@@ -166,6 +166,14 @@ spark.sql("""
         news_sentiment_ewma_14d       DOUBLE,
         news_volume_z_30d             DOUBLE,
         contract_award_usd_trailing_90d DOUBLE,
+        pe_ratio                      DOUBLE,
+        peg_ratio                     DOUBLE,
+        ps_ratio                      DOUBLE,
+        ev_ebitda                     DOUBLE,
+        profit_margin                 DOUBLE,
+        rev_growth_yoy                DOUBLE,
+        fcf_yield                     DOUBLE,
+        net_debt_to_ebitda            DOUBLE,
         fundamental_anchor_z          DOUBLE,
         narrative_intensity           DOUBLE,
         narrative_premium             DOUBLE,
@@ -185,6 +193,14 @@ _ensure_columns("security_daily_features", {
     "score_status": "score_status STRING",
     "max_knowledge_date": "max_knowledge_date DATE",
     "stale_sources_json": "stale_sources_json STRING",
+    "pe_ratio": "pe_ratio DOUBLE",
+    "peg_ratio": "peg_ratio DOUBLE",
+    "ps_ratio": "ps_ratio DOUBLE",
+    "ev_ebitda": "ev_ebitda DOUBLE",
+    "profit_margin": "profit_margin DOUBLE",
+    "rev_growth_yoy": "rev_growth_yoy DOUBLE",
+    "fcf_yield": "fcf_yield DOUBLE",
+    "net_debt_to_ebitda": "net_debt_to_ebitda DOUBLE",
 })
 
 # COMMAND ----------
@@ -325,26 +341,192 @@ insider_30d = (
 
 # COMMAND ----------
 # --- Assemble raw feature rows ---
+def _empty_metric_df(columns: list[tuple[str, str]]):
+    schema = StructType([StructField(name, type_obj, True) for name, type_obj in columns])
+    return spark.createDataFrame([], schema)
+
+
+fact_fundamentals = spark.table("fact_fundamentals") if spark.catalog.tableExists("fact_fundamentals") else _empty_metric_df([
+    ("security_sk", LongType()), ("event_date", DateType()), ("knowledge_date", DateType()),
+    ("pe_ratio", DoubleType()), ("peg_ratio", DoubleType()), ("ps_ratio", DoubleType()),
+    ("ev_ebitda", DoubleType()), ("profit_margin", DoubleType()), ("rev_growth_yoy", DoubleType()),
+    ("fcf_yield", DoubleType()), ("net_debt_to_ebitda", DoubleType()),
+])
+fundamental_window = Window.partitionBy(F.col("d.security_sk"), F.col("d.date_sk")).orderBy(F.col("f.knowledge_date").desc(), F.col("f.event_date").desc())
+fundamentals_latest = (
+    asof_df.alias("d")
+    .join(
+        fact_fundamentals.alias("f"),
+        (F.col("d.security_sk") == F.col("f.security_sk"))
+        & (F.col("f.event_date") <= F.col("d.as_of"))
+        & (F.col("f.knowledge_date") <= F.col("d.as_of")),
+        "left",
+    )
+    .withColumn("fundamental_row_number", F.row_number().over(fundamental_window))
+    .filter(F.col("fundamental_row_number") == 1)
+    .select(
+        F.col("d.security_sk").alias("security_sk"), F.col("d.date_sk").alias("date_sk"),
+        F.col("f.pe_ratio").cast(DoubleType()).alias("pe_ratio"),
+        F.col("f.peg_ratio").cast(DoubleType()).alias("peg_ratio"),
+        F.col("f.ps_ratio").cast(DoubleType()).alias("ps_ratio"),
+        F.col("f.ev_ebitda").cast(DoubleType()).alias("ev_ebitda"),
+        F.col("f.profit_margin").cast(DoubleType()).alias("profit_margin"),
+        F.col("f.rev_growth_yoy").cast(DoubleType()).alias("rev_growth_yoy"),
+        F.col("f.fcf_yield").cast(DoubleType()).alias("fcf_yield"),
+        F.col("f.net_debt_to_ebitda").cast(DoubleType()).alias("net_debt_to_ebitda"),
+        F.col("f.knowledge_date").alias("fundamental_knowledge_date"),
+    )
+)
+
+fact_news_sentiment = spark.table("fact_news_sentiment") if spark.catalog.tableExists("fact_news_sentiment") else _empty_metric_df([
+    ("security_sk", LongType()), ("event_date", DateType()), ("knowledge_date", DateType()),
+    ("sentiment", DoubleType()), ("relevance", DoubleType()),
+])
+news_sentiment_30d = (
+    asof_df.alias("d")
+    .join(
+        fact_news_sentiment.alias("n"),
+        (F.col("d.security_sk") == F.col("n.security_sk"))
+        & (F.col("n.event_date") <= F.col("d.as_of"))
+        & (F.col("n.knowledge_date") <= F.col("d.as_of"))
+        & (F.col("n.event_date") >= F.date_sub(F.col("d.as_of"), 13)),
+        "left",
+    )
+    .groupBy(F.col("d.security_sk").alias("security_sk"), F.col("d.date_sk").alias("date_sk"))
+    .agg(
+        F.sum(F.col("n.sentiment").cast(DoubleType()) * F.coalesce(F.col("n.relevance").cast(DoubleType()), F.lit(1.0))).alias("sentiment_weighted_sum"),
+        F.sum(F.coalesce(F.col("n.relevance").cast(DoubleType()), F.lit(1.0))).alias("sentiment_weight_sum"),
+        F.max(F.col("n.knowledge_date")).alias("news_sentiment_knowledge_date"),
+    )
+    .withColumn("news_sentiment_ewma_14d", F.when(F.col("sentiment_weight_sum") > 0, F.col("sentiment_weighted_sum") / F.col("sentiment_weight_sum")))
+    .select("security_sk", "date_sk", "news_sentiment_ewma_14d", "news_sentiment_knowledge_date")
+)
+
+fact_company_news = spark.table("fact_company_news") if spark.catalog.tableExists("fact_company_news") else _empty_metric_df([
+    ("security_sk", LongType()), ("event_date", DateType()), ("knowledge_date", DateType()),
+])
+news_counts = (
+    asof_df.alias("d")
+    .join(
+        fact_company_news.alias("n"),
+        (F.col("d.security_sk") == F.col("n.security_sk"))
+        & (F.col("n.event_date") <= F.col("d.as_of"))
+        & (F.col("n.knowledge_date") <= F.col("d.as_of"))
+        & (F.col("n.event_date") >= F.date_sub(F.col("d.as_of"), 59)),
+        "left",
+    )
+    .groupBy(F.col("d.security_sk").alias("security_sk"), F.col("d.date_sk").alias("date_sk"))
+    .agg(
+        F.sum(F.when(F.col("n.event_date") >= F.date_sub(F.col("d.as_of"), 29), F.lit(1)).otherwise(F.lit(0))).alias("news_count_30d"),
+        F.sum(F.when((F.col("n.event_date") < F.date_sub(F.col("d.as_of"), 29)) & F.col("n.event_date").isNotNull(), F.lit(1)).otherwise(F.lit(0))).alias("news_count_prev_30d"),
+        F.max(F.col("n.knowledge_date")).alias("news_count_knowledge_date"),
+    )
+    .withColumn(
+        "news_volume_z_30d",
+        F.when(F.col("news_count_prev_30d") > 0, (F.col("news_count_30d") - F.col("news_count_prev_30d")) / F.sqrt(F.col("news_count_prev_30d")))
+        .when(F.col("news_count_30d") > 0, F.col("news_count_30d").cast(DoubleType())),
+    )
+    .select("security_sk", "date_sk", "news_volume_z_30d", "news_count_knowledge_date")
+)
+
+fact_contract_award = spark.table("fact_contract_award") if spark.catalog.tableExists("fact_contract_award") else _empty_metric_df([
+    ("security_sk", LongType()), ("event_date", DateType()), ("knowledge_date", DateType()), ("amount_usd", DoubleType()),
+])
+contracts_90d = (
+    asof_df.alias("d")
+    .join(
+        fact_contract_award.alias("c"),
+        (F.col("d.security_sk") == F.col("c.security_sk"))
+        & (F.col("c.event_date") <= F.col("d.as_of"))
+        & (F.col("c.knowledge_date") <= F.col("d.as_of"))
+        & (F.col("c.event_date") >= F.date_sub(F.col("d.as_of"), 89)),
+        "left",
+    )
+    .groupBy(F.col("d.security_sk").alias("security_sk"), F.col("d.date_sk").alias("date_sk"))
+    .agg(
+        F.sum(F.coalesce(F.col("c.amount_usd").cast(DoubleType()), F.lit(0.0))).alias("contract_award_usd_trailing_90d"),
+        F.max(F.col("c.knowledge_date")).alias("contract_knowledge_date"),
+    )
+)
+
+fact_institutional_holding = spark.table("fact_institutional_holding") if spark.catalog.tableExists("fact_institutional_holding") else _empty_metric_df([
+    ("security_sk", LongType()), ("entity_sk", LongType()), ("event_date", DateType()), ("knowledge_date", DateType()),
+    ("shares", DoubleType()), ("value_usd", DoubleType()), ("shares_delta_qoq", DoubleType()),
+])
+inst_delta_window = Window.partitionBy("security_sk", "entity_sk").orderBy("event_date")
+inst_with_delta = (
+    fact_institutional_holding
+    .filter(F.col("security_sk").isNotNull() & F.col("entity_sk").isNotNull())
+    .withColumn("prev_shares", F.lag(F.col("shares").cast(DoubleType())).over(inst_delta_window))
+    .withColumn("prev_value_usd", F.lag(F.col("value_usd").cast(DoubleType())).over(inst_delta_window))
+    .withColumn("shares_delta_calc", F.col("shares").cast(DoubleType()) - F.col("prev_shares"))
+    .withColumn("value_delta_calc", F.col("value_usd").cast(DoubleType()) - F.col("prev_value_usd"))
+)
+institutional_metrics = (
+    asof_df.alias("d")
+    .join(
+        inst_with_delta.alias("h"),
+        (F.col("d.security_sk") == F.col("h.security_sk"))
+        & (F.col("h.event_date") <= F.col("d.as_of"))
+        & (F.col("h.knowledge_date") <= F.col("d.as_of"))
+        & (F.col("h.event_date") >= F.date_sub(F.col("d.as_of"), 120)),
+        "left",
+    )
+    .groupBy(F.col("d.security_sk").alias("security_sk"), F.col("d.date_sk").alias("date_sk"))
+    .agg(
+        F.sum(F.coalesce(F.col("h.value_delta_calc"), F.col("h.shares_delta_qoq").cast(DoubleType()))).alias("inst_net_flow_qoq"),
+        F.countDistinct(F.when(F.col("h.prev_shares").isNull() & (F.col("h.shares").cast(DoubleType()) > 0), F.col("h.entity_sk"))).cast(IntegerType()).alias("inst_new_initiations"),
+        F.max(F.col("h.knowledge_date")).alias("institutional_knowledge_date"),
+    )
+)
+
+fact_ownership_event = spark.table("fact_ownership_event") if spark.catalog.tableExists("fact_ownership_event") else _empty_metric_df([
+    ("security_sk", LongType()), ("event_date", DateType()), ("knowledge_date", DateType()), ("is_activist", BooleanType()),
+])
+ownership_metrics = (
+    asof_df.alias("d")
+    .join(
+        fact_ownership_event.alias("o"),
+        (F.col("d.security_sk") == F.col("o.security_sk"))
+        & (F.col("o.event_date") <= F.col("d.as_of"))
+        & (F.col("o.knowledge_date") <= F.col("d.as_of"))
+        & (F.col("o.event_date") >= F.date_sub(F.col("d.as_of"), 365)),
+        "left",
+    )
+    .groupBy(F.col("d.security_sk").alias("security_sk"), F.col("d.date_sk").alias("date_sk"))
+    .agg(
+        F.max(F.coalesce(F.col("o.is_activist"), F.lit(False)).cast("int")).cast(BooleanType()).alias("activist_13d_flag"),
+        F.max(F.col("o.knowledge_date")).alias("ownership_knowledge_date"),
+    )
+)
+
 raw_features = (
     market_metrics
     .join(insider_90d, ["security_sk", "date_sk"], "left")
     .join(insider_30d, ["security_sk", "date_sk"], "left")
+    .join(fundamentals_latest, ["security_sk", "date_sk"], "left")
+    .join(news_sentiment_30d, ["security_sk", "date_sk"], "left")
+    .join(news_counts, ["security_sk", "date_sk"], "left")
+    .join(contracts_90d, ["security_sk", "date_sk"], "left")
+    .join(institutional_metrics, ["security_sk", "date_sk"], "left")
+    .join(ownership_metrics, ["security_sk", "date_sk"], "left")
     .withColumn("beta_252d", F.lit(None).cast(DoubleType()))
     .withColumn("info_ratio_252d", F.lit(None).cast(DoubleType()))
-    .withColumn("inst_net_flow_qoq", F.lit(None).cast(DoubleType()))
-    .withColumn("inst_new_initiations", F.lit(None).cast(IntegerType()))
-    .withColumn("activist_13d_flag", F.lit(False).cast(BooleanType()))
-    .withColumn("news_sentiment_ewma_14d", F.lit(None).cast(DoubleType()))
-    .withColumn("news_volume_z_30d", F.lit(None).cast(DoubleType()))
-    .withColumn("contract_award_usd_trailing_90d", F.lit(None).cast(DoubleType()))
     .withColumn("fundamental_anchor_z", F.lit(None).cast(DoubleType()))
     .withColumn("narrative_intensity", F.lit(None).cast(DoubleType()))
     .withColumn("narrative_premium", F.lit(None).cast(DoubleType()))
     .withColumn("divergence_state", F.lit(None).cast(StringType()))
     .withColumn("insider_cluster_buy_30d", F.coalesce(F.col("insider_cluster_buy_30d"), F.lit(0)).cast(IntegerType()))
+    .withColumn("inst_new_initiations", F.coalesce(F.col("inst_new_initiations"), F.lit(0)).cast(IntegerType()))
+    .withColumn("activist_13d_flag", F.coalesce(F.col("activist_13d_flag"), F.lit(False)).cast(BooleanType()))
+    .withColumn("contract_award_usd_trailing_90d", F.coalesce(F.col("contract_award_usd_trailing_90d"), F.lit(0.0)).cast(DoubleType()))
     .withColumn(
         "max_knowledge_date",
-        F.greatest(F.col("market_knowledge_date"), F.col("insider_knowledge_date_90d"), F.col("insider_knowledge_date_30d")),
+        F.greatest(
+            F.col("market_knowledge_date"), F.col("insider_knowledge_date_90d"), F.col("insider_knowledge_date_30d"),
+            F.col("fundamental_knowledge_date"), F.col("news_sentiment_knowledge_date"), F.col("news_count_knowledge_date"),
+            F.col("contract_knowledge_date"), F.col("institutional_knowledge_date"), F.col("ownership_knowledge_date"),
+        ),
     )
 )
 
@@ -428,7 +610,7 @@ features_df = (
             F.col("inst_net_flow_qoq").isNull().alias("institutional"),
             F.col("news_sentiment_ewma_14d").isNull().alias("news"),
             F.col("contract_award_usd_trailing_90d").isNull().alias("contracts"),
-            F.col("fundamental_anchor_z").isNull().alias("fundamentals"),
+            F.col("pe_ratio").isNull().alias("fundamentals"),
             F.col("narrative_intensity").isNull().alias("narrative"),
             F.lit(True).alias("valuation_brake"),
         )),
@@ -441,6 +623,8 @@ features_df = (
         "sortino_252d", "calmar_252d", "info_ratio_252d", "insider_net_buy_ratio_90d",
         "insider_cluster_buy_30d", "inst_net_flow_qoq", "inst_new_initiations", "activist_13d_flag",
         "news_sentiment_ewma_14d", "news_volume_z_30d", "contract_award_usd_trailing_90d",
+        "pe_ratio", "peg_ratio", "ps_ratio", "ev_ebitda", "profit_margin", "rev_growth_yoy",
+        "fcf_yield", "net_debt_to_ebitda",
         "fundamental_anchor_z", "narrative_intensity", "narrative_premium", "divergence_state",
         "composite_growth_score", "opportunity_score", "score_status", "max_knowledge_date", "stale_sources_json",
     )
@@ -507,6 +691,7 @@ _replace_delta_projection("v_security_daily_features", """
            ann_return_252d, sharpe_252d, sortino_252d, calmar_252d, info_ratio_252d,
            insider_net_buy_ratio_90d, insider_cluster_buy_30d, inst_net_flow_qoq, inst_new_initiations,
            activist_13d_flag, news_sentiment_ewma_14d, news_volume_z_30d, contract_award_usd_trailing_90d,
+           pe_ratio, peg_ratio, ps_ratio, ev_ebitda, profit_margin, rev_growth_yoy, fcf_yield, net_debt_to_ebitda,
            fundamental_anchor_z, narrative_intensity, narrative_premium, divergence_state,
            composite_growth_score, opportunity_score, score_status, max_knowledge_date, stale_sources_json
     FROM security_daily_features

@@ -1,5 +1,6 @@
 # Claude Code
 .claude/settings.local.json
+.claude/worktrees/
 
 # Python
 __pycache__/
@@ -20,6 +21,7 @@ dist/
 # Azure Functions
 local.settings.json
 .python_packages/
+function-deploy.zip
 
 # Fabric / Jupyter
 .ipynb_checkpoints/
