@@ -20,7 +20,6 @@
 # META   }
 # META }
 
-
 # CELL ********************
 
 # Fabric Notebook: nb_05_alpha_vantage_to_gold

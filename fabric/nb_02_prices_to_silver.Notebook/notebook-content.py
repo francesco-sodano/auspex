@@ -20,7 +20,6 @@
 # META   }
 # META }
 
-
 # CELL ********************
 
 # Fabric Notebook: nb_02_prices_to_silver
