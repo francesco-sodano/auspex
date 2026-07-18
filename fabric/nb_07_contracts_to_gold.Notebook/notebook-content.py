@@ -20,7 +20,6 @@
 # META   }
 # META }
 
-
 # CELL ********************
 
 # Fabric Notebook: nb_07_contracts_to_gold
