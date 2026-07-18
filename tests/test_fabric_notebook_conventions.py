@@ -21,6 +21,30 @@ def _notebook_code(name: str) -> str:
 
 
 class FabricNotebookConventionTests(unittest.TestCase):
+    def test_parameter_cells_execute_without_prior_imports(self):
+        for name in [
+            "nb_00_bronze_health.py",
+            "nb_00_entity_resolution.py",
+            "nb_01_form4_to_silver.py",
+            "nb_02_prices_to_silver.py",
+            "nb_05_alpha_vantage_to_gold.py",
+            "nb_06_sec_filings_to_gold.py",
+            "nb_07_contracts_to_gold.py",
+        ]:
+            with self.subTest(notebook=name):
+                code = _read(name)
+                start = code.index("# --- Parameters: mark this cell as the Fabric parameter cell ---")
+                end = code.index("# COMMAND ----------", start)
+                exec(code[start:end], {})
+
+        triage = json.loads(_read("nb_01a_form4_quarantine_triage.ipynb"))
+        parameter_cell = next(
+            cell for cell in triage["cells"]
+            if cell.get("cell_type") == "code"
+            and "mark this cell as the Fabric parameter cell" in "\n".join(cell.get("source", []))
+        )
+        exec("\n".join(parameter_cell["source"]), {})
+
     def test_date_window_notebooks_use_native_parameter_and_normalization_cells(self):
         for name in [
             "nb_00_bronze_health.py",
