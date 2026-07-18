@@ -20,11 +20,21 @@
 # META   }
 # META }
 
+
 # CELL ********************
 
 # Fabric Notebook: nb_07_contracts_to_gold
 # Reads USASpending E8 bronze records and writes fact_contract_award.
 # Attaches to: auspex_bronze (default lakehouse)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
 
 from datetime import date, timedelta
 from delta.tables import DeltaTable
@@ -38,18 +48,29 @@ from pyspark.sql.types import DecimalType, IntegerType, LongType
 # META   "language_group": "synapse_pyspark"
 # META }
 
+# PARAMETERS CELL ********************
+
+# --- Parameters: mark this cell as the Fabric parameter cell ---
+_today = date.today().isoformat()
+from_date = (date.today() - timedelta(days=30)).isoformat()
+to_date = _today
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
 # CELL ********************
 
-def _widget(name, default):
-    try:
-        return mssparkutils.widgets.get(name)
-    except Exception:
-        return default
+# --- Normalize and validate injected parameter values ---
+from_date = str(from_date)
+to_date = str(to_date)
+if date.fromisoformat(from_date) > date.fromisoformat(to_date):
+    raise ValueError("from_date must be on or before to_date")
 
-
-_today = date.today().isoformat()
-from_date = _widget("from_date", (date.today() - timedelta(days=30)).isoformat())
-to_date = _widget("to_date", _today)
+print(f"Window: {from_date} to {to_date}")
 
 # METADATA ********************
 
@@ -61,6 +82,11 @@ to_date = _widget("to_date", _today)
 # CELL ********************
 
 _MAX_BIGINT = 9223372036854775807
+
+
+def _require_table(table_name: str) -> None:
+    if not spark.catalog.tableExists(table_name):
+        raise RuntimeError(f"Required upstream table is missing: {table_name}")
 
 
 def _date_paths(source: str):
@@ -93,15 +119,21 @@ def _date_sk(col_name: str):
 
 
 def _merge_all(table_name: str, source_df, condition: str) -> None:
+    target = DeltaTable.forName(spark, table_name)
     (
-        DeltaTable.forName(spark, table_name)
+        target
         .alias("t")
         .merge(source_df.alias("s"), condition)
         .whenMatchedUpdateAll()
         .whenNotMatchedInsertAll()
         .execute()
     )
-    print(f"Merged {source_df.count()} rows into {table_name}")
+    metrics = target.history(1).select("operationMetrics").first().operationMetrics or {}
+    print(f"Merged source_rows={metrics.get('numSourceRows', 'unknown')} into {table_name}")
+
+
+for required in ["dim_security", "dim_source", "fact_contract_award"]:
+    _require_table(required)
 
 # METADATA ********************
 
@@ -123,26 +155,19 @@ raw = spark.read.json(paths).select(
     F.col("record.search_text").alias("search_text"),
     F.to_json("record.award").alias("award_json"),
 )
-print(f"Contracts bronze rows: {raw.count()}")
+print(f"Contracts bronze files: {len(paths)}")
 
 security_lookup = (
     spark.table("dim_security")
     .filter(F.col("is_current") == True)
     .select("security_sk", F.upper("ticker").alias("symbol"))
 )
-source_sk = spark.table("dim_source").filter(F.col("source_id") == "contracts").select("source_sk").limit(1).collect()
-if not source_sk:
-    source_seed = spark.createDataFrame([(6, "contracts", "contract", "weekly", None, "public_official")], "source_sk INT, source_id STRING, source_type STRING, latency_class STRING, reliability_weight DECIMAL(3,2), source_class STRING")
-    (
-        DeltaTable.forName(spark, "dim_source")
-        .alias("t")
-        .merge(source_seed.alias("s"), "t.source_sk = s.source_sk")
-        .whenMatchedUpdateAll()
-        .whenNotMatchedInsertAll()
-        .execute()
-    )
-    source_sk = spark.table("dim_source").filter(F.col("source_id") == "contracts").select("source_sk").limit(1).collect()
-contracts_source_sk = source_sk[0].source_sk
+source_seed = spark.createDataFrame(
+    [(6, "contracts", "contract", "weekly", None, "public_official")],
+    "source_sk INT, source_id STRING, source_type STRING, latency_class STRING, reliability_weight DECIMAL(3,2), source_class STRING",
+)
+_merge_all("dim_source", source_seed, "t.source_sk = s.source_sk")
+contracts_source_sk = 6
 
 contract_df = (
     raw
@@ -169,7 +194,7 @@ contract_df = (
     .filter(F.col("award_sk").isNotNull() & F.col("event_date").isNotNull() & F.col("knowledge_date").isNotNull())
     .dropDuplicates(["award_sk"])
 )
-if contract_df.count():
+if not contract_df.isEmpty():
     _merge_all("fact_contract_award", contract_df, "t.award_sk = s.award_sk")
 
 # METADATA ********************
@@ -182,7 +207,7 @@ if contract_df.count():
 # CELL ********************
 
 missing_pit = spark.table("fact_contract_award").filter(F.col("event_date").isNull() | F.col("knowledge_date").isNull()).count()
-print(f"E8 contracts validation: fact_contract_award={spark.table('fact_contract_award').count()}, missing_pit={missing_pit}")
+print(f"E8 contracts validation: missing_pit={missing_pit}")
 if missing_pit:
     raise RuntimeError(f"E8 contracts validation failed: missing_pit={missing_pit}")
 

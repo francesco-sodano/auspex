@@ -23,21 +23,6 @@
 # META   }
 # META }
 
-# PARAMETERS CELL ********************
-
-from_date = "2023-08-04"
-to_date = "2026-07-14"
-edgar_user_agent = "Auspex/1.0 auspex@auspex.ai"
-edgar_requests_per_minute = 540
-max_workers = 10
-retry_quarantine_reasons = ""
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -47,6 +32,15 @@ retry_quarantine_reasons = ""
 #
 # For each new accession_no it fetches the full Form 4 XML from SEC EDGAR because
 # the EFTS search hit only carries filing metadata, not transaction rows.
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
 
 import re
 import time
@@ -64,6 +58,24 @@ from pyspark.sql.types import (
     StringType, StructField, StructType, TimestampType,
 )
 
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# PARAMETERS CELL ********************
+
+# --- Parameters: mark this cell as the Fabric parameter cell ---
+_today = date.today().isoformat()
+from_date = (date.today() - timedelta(days=7)).isoformat()
+to_date = _today
+edgar_user_agent = "Auspex/1.0 auspex@auspex.ai"
+edgar_requests_per_minute = 450
+max_workers = 5
+write_batch_size = 500
+retry_quarantine_reasons = ""
 
 # METADATA ********************
 
@@ -74,21 +86,24 @@ from pyspark.sql.types import (
 
 # CELL ********************
 
-# --- Parameters ---
-def _widget(name, default):
-    try:
-        return mssparkutils.widgets.get(name)
-    except Exception:
-        return default
+# --- Normalize and validate injected parameter values ---
+from_date = str(from_date)
+to_date = str(to_date)
+edgar_user_agent = str(edgar_user_agent)
+edgar_requests_per_minute = int(edgar_requests_per_minute)
+max_workers = int(max_workers)
+write_batch_size = int(write_batch_size)
+retry_quarantine_reasons = str(retry_quarantine_reasons)
 
+if date.fromisoformat(from_date) > date.fromisoformat(to_date):
+    raise ValueError("from_date must be on or before to_date")
+if not edgar_user_agent.strip():
+    raise ValueError("edgar_user_agent cannot be empty")
 
-_today = date.today().isoformat()
-from_date = _widget("from_date", (date.today() - timedelta(days=7)).isoformat())
-to_date = _widget("to_date", _today)
-EDGAR_USER_AGENT = _widget("edgar_user_agent", "Auspex/1.0 auspex@auspex.ai")
-EDGAR_REQUESTS_PER_MINUTE = int(_widget("edgar_requests_per_minute", "450"))
-_MAX_WORKERS = max(1, int(_widget("max_workers", "5")))
-_WRITE_BATCH_SIZE = max(1, int(_widget("write_batch_size", "500")))
+EDGAR_USER_AGENT = edgar_user_agent
+EDGAR_REQUESTS_PER_MINUTE = edgar_requests_per_minute
+_MAX_WORKERS = max(1, max_workers)
+_WRITE_BATCH_SIZE = max(1, write_batch_size)
 _TERMINAL_QUARANTINE_REASONS = {
     "NO_NONDERIVATIVE_TXNS",
     "NO_OWNERSHIP_XML",
@@ -98,7 +113,7 @@ _TERMINAL_QUARANTINE_REASONS = {
 }
 _RETRY_QUARANTINE_REASONS = {
     reason.strip().upper()
-    for reason in _widget("retry_quarantine_reasons", "").split(",")
+    for reason in retry_quarantine_reasons.split(",")
     if reason.strip()
 }
 _UNKNOWN_RETRY_REASONS = _RETRY_QUARANTINE_REASONS.difference(_TERMINAL_QUARANTINE_REASONS)
@@ -112,6 +127,10 @@ _MIN_VALID_DATE = date(1900, 1, 1)
 
 if EDGAR_REQUESTS_PER_MINUTE <= 0:
     raise ValueError("edgar_requests_per_minute must be positive")
+if max_workers <= 0:
+    raise ValueError("max_workers must be positive")
+if write_batch_size <= 0:
+    raise ValueError("write_batch_size must be positive")
 
 print(
     f"Window: {from_date} to {to_date} | "
@@ -198,8 +217,9 @@ def _merge_security_quarantine(rows: list[dict]) -> None:
         StructField("quarantined_at", TimestampType()),
     ])
     q_df = spark.createDataFrame(rows, q_schema).dropDuplicates(["natural_key"])
+    target = DeltaTable.forName(spark, "silver_security_quarantine")
     (
-        DeltaTable.forName(spark, "silver_security_quarantine")
+        target
         .alias("t")
         .merge(q_df.alias("s"), "t.natural_key = s.natural_key")
         .whenMatchedUpdate(set={
@@ -215,8 +235,11 @@ def _merge_security_quarantine(rows: list[dict]) -> None:
         .whenNotMatchedInsertAll()
         .execute()
     )
-    print(f"Merged {q_df.count()} rows into silver_security_quarantine")
-
+    metrics = target.history(1).select("operationMetrics").first().operationMetrics or {}
+    print(
+        "Merged quarantine source_rows="
+        f"{metrics.get('numSourceRows', 'unknown')} into silver_security_quarantine"
+    )
 
 # METADATA ********************
 
@@ -248,6 +271,7 @@ bronze_df = (
     )
     .filter(F.col("accession_no").isNotNull())
     .dropDuplicates(["accession_no"])
+    .cache()
 )
 total_bronze = bronze_df.count()
 print(f"Bronze rows (unique accession_no): {total_bronze}")
@@ -313,17 +337,12 @@ if legacy_bad:
 # CELL ********************
 
 # --- Skip only already-resolved filings; reprocess legacy rows with missing security_sk ---
-done_set = {
-    r.accession_no
-    for r in (
-        spark.sql("""
-            SELECT accession_no
-            FROM silver_insider_txn
-            GROUP BY accession_no
-            HAVING SUM(CASE WHEN security_sk IS NULL OR event_date IS NULL OR knowledge_date IS NULL THEN 1 ELSE 0 END) = 0
-        """).collect()
-    )
-}
+resolved_accessions = spark.sql("""
+    SELECT accession_no
+    FROM silver_insider_txn
+    GROUP BY accession_no
+    HAVING SUM(CASE WHEN security_sk IS NULL OR event_date IS NULL OR knowledge_date IS NULL THEN 1 ELSE 0 END) = 0
+""")
 terminal_quarantine_df = spark.table("silver_security_quarantine").filter(
     F.col("source_id") == "sec_form4"
 )
@@ -334,21 +353,17 @@ if _ACTIVE_TERMINAL_REASONS:
 else:
     terminal_quarantine_df = terminal_quarantine_df.limit(0)
 
-terminal_quarantine_set = {
-    r.raw_identifier
-    for r in (
-        terminal_quarantine_df
-        .select("raw_identifier")
-        .distinct()
-        .collect()
-    )
-    if r.raw_identifier
-}
-done_set.update(terminal_quarantine_set)
-new_df = bronze_df.filter(~F.col("accession_no").isin(done_set))
+terminal_accessions = (
+    terminal_quarantine_df
+    .filter(F.col("raw_identifier").isNotNull())
+    .select(F.col("raw_identifier").alias("accession_no"))
+    .distinct()
+)
+completed_accessions = resolved_accessions.unionByName(terminal_accessions).distinct()
+new_df = bronze_df.join(completed_accessions, "accession_no", "left_anti")
 to_process = new_df.collect()
 print(
-    f"Already resolved or terminal-quarantined: {len(done_set)}, "
+    f"Already resolved or terminal-quarantined: {total_bronze - len(to_process)}, "
     f"new/retryable/legacy-unresolved to fetch: {len(to_process)}"
 )
 
@@ -368,13 +383,14 @@ dim_current = (
     .select("security_sk", "cik", "ticker")
 )
 
+dim_rows = dim_current.orderBy("ticker").collect()
 _security_by_cik_ticker = {
     (r.cik, r.ticker): r.security_sk
-    for r in dim_current.collect()
+    for r in dim_rows
     if r.cik and r.ticker
 }
 _security_by_cik = {}
-for r in dim_current.orderBy("ticker").collect():
+for r in dim_rows:
     if r.cik and r.cik not in _security_by_cik:
         _security_by_cik[r.cik] = {"security_sk": r.security_sk, "ticker": r.ticker}
 
@@ -617,16 +633,18 @@ def _append_silver_insider_txns(rows: list[dict]) -> int:
         .dropDuplicates(["accession_no", "line_no"])
         .select(*target_columns)
     )
-    existing_keys = spark.table("silver_insider_txn").select("accession_no", "line_no").distinct()
-    to_append = (
-        txn_df.alias("s")
-        .join(existing_keys.alias("t"), ["accession_no", "line_no"], "left_anti")
-        .coalesce(1)
+    target = DeltaTable.forName(spark, "silver_insider_txn")
+    (
+        target.alias("t")
+        .merge(
+            txn_df.alias("s"),
+            "t.accession_no = s.accession_no AND t.line_no = s.line_no",
+        )
+        .whenNotMatchedInsertAll()
+        .execute()
     )
-    row_count = to_append.count()
-    if row_count:
-        to_append.write.format("delta").mode("append").saveAsTable("silver_insider_txn")
-    return row_count
+    metrics = target.history(1).select("operationMetrics").first().operationMetrics or {}
+    return int(metrics.get("numTargetRowsInserted", 0))
 
 
 def _flush_batch(batch_name: str, txn_rows: list[dict], quarantine_rows: list[dict]) -> dict:
@@ -793,6 +811,7 @@ _universe = _json.dumps({
 })
 mssparkutils.fs.put("Files/config/prices_universe.json", _universe, True)
 print(f"Prices universe: {len(_tickers)} tickers -> Files/config/prices_universe.json")
+bronze_df.unpersist()
 
 # METADATA ********************
 

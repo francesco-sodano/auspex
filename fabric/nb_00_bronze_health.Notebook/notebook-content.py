@@ -20,17 +20,12 @@
 # META   }
 # META }
 
-# PARAMETERS CELL ********************
 
-# --- Parameters ---
-from_date = "2023-07-02"
-to_date = "2026-07-14"
+# CELL ********************
 
-sources_csv = "sec_form4"
-required_sources_csv = "sec_form4"
-
-expected_schema_version = 1
-max_future_minutes = 5
+# Fabric Notebook: nb_00_bronze_health
+# Read-only bronze health gate. Run before bronze-to-silver/gold notebooks.
+# Attaches to: auspex_bronze (default lakehouse)
 
 # METADATA ********************
 
@@ -41,15 +36,31 @@ max_future_minutes = 5
 
 # CELL ********************
 
-# Fabric Notebook: nb_00_bronze_health
-# Read-only bronze health gate. Run before bronze-to-silver/gold notebooks.
-# Attaches to: auspex_bronze (default lakehouse)
-
 from datetime import date, timedelta
 
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# PARAMETERS CELL ********************
+
+# --- Parameters: mark this cell as the Fabric parameter cell ---
+_today = date.today().isoformat()
+from_date = (date.today() - timedelta(days=7)).isoformat()
+to_date = _today
+sources_csv = (
+    "sec_form4,sec_13f,sec_13dg,sec_8k,sec_s1,prices_eod,"
+    "alpha_vantage,etf_holdings,news,contracts"
+)
+required_sources_csv = sources_csv
+expected_schema_version = 1
+max_future_minutes = 5
 
 # METADATA ********************
 
@@ -266,7 +277,6 @@ raw = (
     .withColumn("missing_natural_key", missing_natural_key)
     .cache()
 )
-
 
 # METADATA ********************
 
@@ -548,7 +558,7 @@ issue_samples = (
     )
     .limit(100)
 )
-if issue_samples.limit(1).count() > 0:
+if not issue_samples.isEmpty():
     display(issue_samples)
 
 conflicting_duplicate_samples = (
@@ -564,13 +574,18 @@ conflicting_duplicate_samples = (
     .orderBy(F.desc("payload_variants"), F.desc("row_count"))
     .limit(100)
 )
-if conflicting_duplicate_samples.limit(1).count() > 0:
+if not conflicting_duplicate_samples.isEmpty():
     display(conflicting_duplicate_samples)
 
 failed_sources = [
     row.source_id
     for row in health.filter(F.col("gate_status") == "FAIL").select("source_id").collect()
 ]
+health.unpersist()
+duplicate_key_groups.unpersist()
+raw.unpersist()
+window_files.unpersist()
+
 if failed_sources:
     raise RuntimeError(
         "BRONZE HEALTH FAILED for sources: "

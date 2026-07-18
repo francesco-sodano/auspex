@@ -23,16 +23,6 @@
 # META   }
 # META }
 
-# PARAMETERS CELL ********************
-
-edgar_user_agent = "Auspex/1.0 auspex@auspex.ai"
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
 
 # CELL ********************
 
@@ -43,6 +33,15 @@ edgar_user_agent = "Auspex/1.0 auspex@auspex.ai"
 # 1. Seeds security_master from SEC company_tickers.json (CIK/ticker/name)
 # 2. Maintains canonical dim_security with deterministic security_sk and SCD2-ready rows
 # 3. Initialises replay-safe quarantine / control tables
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
 
 import requests
 from datetime import datetime, timezone
@@ -57,12 +56,10 @@ from pyspark.sql.types import StructField, StructType, StringType
 # META   "language_group": "synapse_pyspark"
 # META }
 
-# CELL ********************
+# PARAMETERS CELL ********************
 
-try:
-    EDGAR_USER_AGENT = mssparkutils.widgets.get("edgar_user_agent")
-except Exception:
-    EDGAR_USER_AGENT = "Auspex/1.0 auspex@auspex.ai"
+# --- Parameters: mark this cell as the Fabric parameter cell ---
+edgar_user_agent = "Auspex/1.0 auspex@auspex.ai"
 
 # METADATA ********************
 
@@ -73,10 +70,12 @@ except Exception:
 
 # CELL ********************
 
-try:
-    EDGAR_USER_AGENT = dbutils.widgets.get("edgar_user_agent")
-except Exception:
-    EDGAR_USER_AGENT = "Auspex/1.0 auspex@auspex.ai"
+# --- Normalize and validate injected parameter values ---
+edgar_user_agent = str(edgar_user_agent).strip()
+if not edgar_user_agent:
+    raise ValueError("edgar_user_agent cannot be empty")
+
+EDGAR_USER_AGENT = edgar_user_agent
 
 # METADATA ********************
 
@@ -93,10 +92,6 @@ def _ensure_columns(table_name: str, column_specs: dict[str, str]) -> None:
     for column_name, ddl in column_specs.items():
         if column_name not in existing:
             spark.sql(f"ALTER TABLE {table_name} ADD COLUMNS ({ddl})")
-
-
-def _table_count(table_name: str) -> int:
-    return spark.table(table_name).count() if spark.catalog.tableExists(table_name) else 0
 
 # METADATA ********************
 
@@ -142,6 +137,7 @@ source_df = (
     spark.createDataFrame(rows, schema)
     .dropDuplicates(["cik", "ticker"])
     .withColumn("ingested_at", F.lit(now_ts.isoformat()).cast("timestamp"))
+    .cache()
 )
 
 # METADATA ********************
@@ -168,14 +164,17 @@ spark.sql("""
     DeltaTable.forName(spark, "security_master")
     .alias("t")
     .merge(source_df.alias("s"), "t.cik = s.cik AND t.ticker = s.ticker")
-    .whenMatchedUpdate(set={
-        "company_name": "s.company_name",
-        "ingested_at": "s.ingested_at",
-    })
+    .whenMatchedUpdate(
+        condition="NOT (t.company_name <=> s.company_name)",
+        set={
+            "company_name": "s.company_name",
+            "ingested_at": "s.ingested_at",
+        },
+    )
     .whenNotMatchedInsertAll()
     .execute()
 )
-print(f"security_master: {spark.table('security_master').count()} rows")
+print("security_master merge complete")
 
 # METADATA ********************
 
@@ -256,6 +255,7 @@ security_seed = (
         "mcap_band", "is_active", "valid_from", "valid_to", "is_current",
         "resolution_method", "source_id", "updated_at",
     )
+    .cache()
 )
 
 current_keys = (
@@ -264,9 +264,7 @@ current_keys = (
     .select("cik", "ticker")
 )
 retired_keys = current_keys.join(security_seed.select("cik", "ticker"), ["cik", "ticker"], "left_anti")
-retired_count = retired_keys.count()
-
-if retired_count:
+if not retired_keys.isEmpty():
     (
         DeltaTable.forName(spark, "dim_security")
         .alias("t")
@@ -282,7 +280,7 @@ if retired_count:
         })
         .execute()
     )
-    print(f"dim_security retired rows: {retired_count}")
+    print("dim_security retirement merge complete")
 
 (
     DeltaTable.forName(spark, "dim_security")
@@ -291,18 +289,26 @@ if retired_count:
         security_seed.alias("s"),
         "t.cik = s.cik AND t.ticker = s.ticker AND t.source_id = 'sec_company_tickers' AND t.is_current = true",
     )
-    .whenMatchedUpdate(set={
-        "company_name": "s.company_name",
-        "country": "s.country",
-        "currency": "s.currency",
-        "resolution_method": "s.resolution_method",
-        "source_id": "s.source_id",
-        "updated_at": "s.updated_at",
-    })
+    .whenMatchedUpdate(
+        condition="""
+            NOT (t.company_name <=> s.company_name)
+            OR NOT (t.country <=> s.country)
+            OR NOT (t.currency <=> s.currency)
+            OR NOT (t.resolution_method <=> s.resolution_method)
+        """,
+        set={
+            "company_name": "s.company_name",
+            "country": "s.country",
+            "currency": "s.currency",
+            "resolution_method": "s.resolution_method",
+            "source_id": "s.source_id",
+            "updated_at": "s.updated_at",
+        },
+    )
     .whenNotMatchedInsertAll()
     .execute()
 )
-print(f"dim_security current rows: {spark.table('dim_security').filter(F.col('is_current') == True).count()}")
+print("dim_security merge complete")
 
 # METADATA ********************
 
@@ -372,12 +378,9 @@ _ensure_columns("silver_parse_errors", {
 })
 
 # Downstream notebooks write quarantine rows with Delta MERGE on natural_key.
-print(
-    "Control tables ready: "
-    f"silver_security_quarantine={_table_count('silver_security_quarantine')}, "
-    f"silver_dq_quarantine={_table_count('silver_dq_quarantine')}, "
-    f"silver_parse_errors={_table_count('silver_parse_errors')}"
-)
+print("Control tables ready: silver_security_quarantine, silver_dq_quarantine, silver_parse_errors")
+security_seed.unpersist()
+source_df.unpersist()
 
 # METADATA ********************
 
