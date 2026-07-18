@@ -24,9 +24,8 @@ from pyspark.sql.types import (
 
 # COMMAND ----------
 # --- Parameters: mark this cell as the Fabric parameter cell ---
-_today = date.today().isoformat()
-from_date = (date.today() - timedelta(days=7)).isoformat()
-to_date = _today
+from_date = ""
+to_date = ""
 edgar_user_agent = "Auspex/1.0 auspex@auspex.ai"
 edgar_requests_per_minute = 450
 max_workers = 5
@@ -35,8 +34,9 @@ retry_quarantine_reasons = ""
 
 # COMMAND ----------
 # --- Normalize and validate injected parameter values ---
-from_date = str(from_date)
-to_date = str(to_date)
+_today = date.today().isoformat()
+from_date = str(from_date).strip() or (date.today() - timedelta(days=7)).isoformat()
+to_date = str(to_date).strip() or _today
 edgar_user_agent = str(edgar_user_agent)
 edgar_requests_per_minute = int(edgar_requests_per_minute)
 max_workers = int(max_workers)

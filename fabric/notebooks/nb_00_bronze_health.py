@@ -10,9 +10,8 @@ from pyspark.sql import functions as F
 
 # COMMAND ----------
 # --- Parameters: mark this cell as the Fabric parameter cell ---
-_today = date.today().isoformat()
-from_date = (date.today() - timedelta(days=7)).isoformat()
-to_date = _today
+from_date = ""
+to_date = ""
 sources_csv = (
     "sec_form4,sec_13f,sec_13dg,sec_8k,sec_s1,prices_eod,"
     "alpha_vantage,etf_holdings,news,contracts"
@@ -23,8 +22,9 @@ max_future_minutes = 5
 
 # COMMAND ----------
 # --- Normalize and validate injected parameter values ---
-from_date = str(from_date)
-to_date = str(to_date)
+_today = date.today().isoformat()
+from_date = str(from_date).strip() or (date.today() - timedelta(days=7)).isoformat()
+to_date = str(to_date).strip() or _today
 sources_csv = str(sources_csv)
 required_sources_csv = str(required_sources_csv)
 expected_schema_version = int(expected_schema_version)

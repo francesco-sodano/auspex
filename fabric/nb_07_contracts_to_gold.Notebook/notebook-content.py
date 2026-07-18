@@ -20,6 +20,7 @@
 # META   }
 # META }
 
+
 # CELL ********************
 
 # Fabric Notebook: nb_07_contracts_to_gold
@@ -50,9 +51,8 @@ from pyspark.sql.types import DecimalType, IntegerType, LongType
 # PARAMETERS CELL ********************
 
 # --- Parameters: mark this cell as the Fabric parameter cell ---
-_today = date.today().isoformat()
-from_date = (date.today() - timedelta(days=30)).isoformat()
-to_date = _today
+from_date = ""
+to_date = ""
 
 # METADATA ********************
 
@@ -64,8 +64,9 @@ to_date = _today
 # CELL ********************
 
 # --- Normalize and validate injected parameter values ---
-from_date = str(from_date)
-to_date = str(to_date)
+_today = date.today().isoformat()
+from_date = str(from_date).strip() or (date.today() - timedelta(days=30)).isoformat()
+to_date = str(to_date).strip() or _today
 if date.fromisoformat(from_date) > date.fromisoformat(to_date):
     raise ValueError("from_date must be on or before to_date")
 
