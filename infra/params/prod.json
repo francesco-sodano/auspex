@@ -8,7 +8,10 @@
     "location": {
       "value": "switzerlandnorth"
     },
-"logRetentionDays": {
+    "fabricAdminUpn": {
+      "value": "frsodano@microsoft.com"
+    },
+    "logRetentionDays": {
       "value": 90
     }
   }

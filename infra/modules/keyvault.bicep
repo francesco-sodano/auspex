@@ -25,6 +25,9 @@ param webApiFuncPrincipalId string
 @description('Application Insights connection string (stored as a secret for KV reference use)')
 param appInsightsConnectionString string
 
+@description('Log Analytics workspace resource ID for diagnostic settings')
+param logAnalyticsWorkspaceId string
+
 var kvName = 'auspex-${env}-kv'
 
 // Key Vault Secrets User role definition ID (built-in)
@@ -43,10 +46,14 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     enableSoftDelete: true
     softDeleteRetentionInDays: 90
     enablePurgeProtection: true
-    publicNetworkAccess: 'Enabled'
+    // Function Apps reach Key Vault via private endpoint + private DNS zone.
+    // AzureServices bypass retained for ARM operations (e.g., Bicep secret writes
+    // during deployment from a Microsoft-hosted runner — a trusted service).
+    publicNetworkAccess: 'Disabled'
     networkAcls: {
       bypass: 'AzureServices'
-      defaultAction: 'Allow'
+      defaultAction: 'Deny'
+      virtualNetworkRules: []
     }
   }
 }
@@ -58,6 +65,26 @@ resource appInsightsSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   name: 'APPLICATIONINSIGHTS-CONNECTION-STRING'
   properties: {
     value: appInsightsConnectionString
+  }
+}
+
+resource kvDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: 'diag-${kvName}'
+  scope: keyVault
+  properties: {
+    workspaceId: logAnalyticsWorkspaceId
+    logs: [
+      {
+        category: 'AuditEvent'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
   }
 }
 

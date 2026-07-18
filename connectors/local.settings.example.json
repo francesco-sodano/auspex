@@ -8,7 +8,9 @@
     "ONELAKE_LAKEHOUSE_NAME": "auspex_bronze",
     "EDGAR_USER_AGENT": "Auspex/1.0 your@email.com",
     "ALPHAVANTAGE_API_KEY": "<key>",
+    "AV_RPM": "5",
     "FMP_API_KEY": "<key>",
-    "FINNHUB_API_KEY": "<key>"
+    "FINNHUB_API_KEY": "<key>",
+    "FINNHUB_MAX_LOOKBACK_DAYS": "365"
   }
 }

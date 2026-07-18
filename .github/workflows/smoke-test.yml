@@ -1,5 +1,8 @@
 name: Smoke Test
 
+# Disabled until E10. The current E1-E4 smoke checks are manual and documented
+# in doc/operations.md.
+
 # Triggers after deploy-infra completes, or manually.
 # Runs a no-op pipeline invocation against the Fabric capacity scheduler
 # endpoint and asserts that it completes within 5 minutes.
@@ -9,9 +12,6 @@ name: Smoke Test
 # and returns immediately if the infra is wired correctly.
 
 on:
-  workflow_run:
-    workflows: ['Deploy Infrastructure']
-    types: [completed]
   workflow_dispatch:
     inputs:
       environment:
@@ -28,10 +28,7 @@ permissions:
 jobs:
   smoke-test-dev:
     name: Smoke test (dev)
-    # Run after infra deploy completes on dev, or on manual trigger for dev
-    if: >
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    if: ${{ false }} # Disabled until E10 CI/CD automation is enabled.
     runs-on: ubuntu-latest
     environment: dev
     timeout-minutes: 10
@@ -98,9 +95,7 @@ jobs:
 
   smoke-test-prod:
     name: Smoke test (prod)
-    if: >
-      github.event_name == 'workflow_dispatch' &&
-      github.event.inputs.environment == 'prod'
+    if: ${{ false }} # Disabled until E10 CI/CD automation is enabled.
     runs-on: ubuntu-latest
     environment: prod
     timeout-minutes: 10

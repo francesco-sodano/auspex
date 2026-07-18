@@ -9,6 +9,10 @@
     "auth_secret_ref": "EDGAR-USER-AGENT",
     "latency_class": "daily",
     "reliability_weight": 1.0,
+    "rate_limit": {
+      "requests_per_minute": 450
+    },
+    "implementation_status": "implemented",
     "enabled": true,
     "schema_version": 1
   },
@@ -22,7 +26,11 @@
     "auth_secret_ref": "EDGAR-USER-AGENT",
     "latency_class": "quarterly",
     "reliability_weight": 1.0,
-    "enabled": true,
+    "rate_limit": {
+      "requests_per_minute": 450
+    },
+    "implementation_status": "implemented",
+    "enabled": false,
     "schema_version": 1
   },
   {
@@ -35,7 +43,11 @@
     "auth_secret_ref": "EDGAR-USER-AGENT",
     "latency_class": "daily",
     "reliability_weight": 1.0,
-    "enabled": true,
+    "rate_limit": {
+      "requests_per_minute": 450
+    },
+    "implementation_status": "implemented",
+    "enabled": false,
     "schema_version": 1
   },
   {
@@ -48,7 +60,11 @@
     "auth_secret_ref": "EDGAR-USER-AGENT",
     "latency_class": "daily",
     "reliability_weight": 1.0,
-    "enabled": true,
+    "rate_limit": {
+      "requests_per_minute": 450
+    },
+    "implementation_status": "implemented",
+    "enabled": false,
     "schema_version": 1
   },
   {
@@ -61,19 +77,27 @@
     "auth_secret_ref": "EDGAR-USER-AGENT",
     "latency_class": "daily",
     "reliability_weight": 1.0,
-    "enabled": true,
+    "rate_limit": {
+      "requests_per_minute": 450
+    },
+    "implementation_status": "implemented",
+    "enabled": false,
     "schema_version": 1
   },
   {
     "id": "prices_eod",
     "source_id": "prices_eod",
-    "name": "Finnhub EOD Prices",
+    "name": "Alpha Vantage EOD Prices",
     "type": "price",
     "schedule": "daily",
-    "base_url": "https://finnhub.io/api/v1",
-    "auth_secret_ref": "FINNHUB-API-KEY",
+    "base_url": "https://www.alphavantage.co/query",
+    "auth_secret_ref": "ALPHAVANTAGE-API-KEY",
     "latency_class": "daily",
     "reliability_weight": 0.85,
+    "rate_limit": {
+      "requests_per_minute": 5
+    },
+    "implementation_status": "implemented",
     "enabled": true,
     "schema_version": 1
   },
@@ -87,6 +111,7 @@
     "auth_secret_ref": null,
     "latency_class": "daily",
     "reliability_weight": 0.4,
+    "implementation_status": "fallback_disabled",
     "enabled": false,
     "schema_version": 1
   },
@@ -100,7 +125,12 @@
     "auth_secret_ref": "ALPHAVANTAGE-API-KEY",
     "latency_class": "daily",
     "reliability_weight": 0.9,
-    "enabled": true,
+    "rate_limit": {
+      "requests_per_minute": 5
+    },
+    "etf_symbols": ["QQQ", "SMH", "XLK", "XLI", "XLE"],
+    "implementation_status": "implemented",
+    "enabled": false,
     "schema_version": 1
   },
   {
@@ -113,7 +143,8 @@
     "auth_secret_ref": "FMP-API-KEY",
     "latency_class": "daily",
     "reliability_weight": 0.8,
-    "enabled": true,
+    "implementation_status": "planned",
+    "enabled": false,
     "schema_version": 1
   },
   {
@@ -126,7 +157,12 @@
     "auth_secret_ref": "FINNHUB-API-KEY",
     "latency_class": "daily",
     "reliability_weight": 0.75,
-    "enabled": true,
+    "rate_limit": {
+      "requests_per_minute": 60
+    },
+    "max_lookback_days": 365,
+    "implementation_status": "implemented",
+    "enabled": false,
     "schema_version": 1
   },
   {
@@ -139,20 +175,27 @@
     "auth_secret_ref": null,
     "latency_class": "weekly",
     "reliability_weight": 0.95,
-    "enabled": true,
+    "search_terms": [],
+    "implementation_status": "implemented",
+    "enabled": false,
     "schema_version": 1
   },
   {
     "id": "etf_holdings",
     "source_id": "etf_holdings",
-    "name": "FMP Thematic ETF Holdings (TRS ground truth)",
+    "name": "Alpha Vantage ETF Holdings (TRS ground truth)",
     "type": "etf",
     "schedule": "weekly",
-    "base_url": "https://financialmodelingprep.com/api/v3",
-    "auth_secret_ref": "FMP-API-KEY",
+    "base_url": "https://www.alphavantage.co/query?function=ETF_PROFILE",
+    "auth_secret_ref": "ALPHAVANTAGE-API-KEY",
     "latency_class": "weekly",
     "reliability_weight": 0.95,
-    "enabled": true,
+    "rate_limit": {
+      "requests_per_minute": 5
+    },
+    "etf_symbols": ["QQQ", "SMH", "XLK", "XLI", "XLE"],
+    "implementation_status": "implemented",
+    "enabled": false,
     "schema_version": 1
   },
   {
@@ -165,7 +208,8 @@
     "auth_secret_ref": null,
     "latency_class": "on_change",
     "reliability_weight": 1.0,
-    "enabled": true,
+    "implementation_status": "planned",
+    "enabled": false,
     "schema_version": 1
   }
 ]

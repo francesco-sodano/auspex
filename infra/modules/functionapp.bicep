@@ -2,8 +2,9 @@
 // Used for both the ingestion Function App (auspex-{env}-func) and
 // the web API Function App (auspex-{env}-wapi).
 //
-// Flex Consumption requires functionAppConfig on site creation (ARM API requirement).
-// Storage uses system-assigned managed identity (no shared keys).
+// Storage uses managed identity (no shared key). Deployment packages are uploaded
+// to the 'deployments' blob container; the Function App reads them via its
+// system-assigned MI (SystemAssignedIdentity auth — no shared key required).
 
 @description('Function App resource name (e.g. auspex-prod-func)')
 param appName string
@@ -29,14 +30,26 @@ param fabricCapacityName string = ''
 @description('Fabric workspace GUID for OneLake bronze writes (ingestion only)')
 param onelakeWorkspaceId string = ''
 
-@description('Fabric Lakehouse name for bronze layer (ingestion only)')
+@description('Fabric Lakehouse name or item GUID for OneLake bronze writes (ingestion only)')
 param onelakeLakehouseName string = 'auspex_bronze'
 
+@description('Alpha Vantage request cap in requests per minute (ingestion only)')
+param alphaVantageRequestsPerMinute string = '5'
+
+@description('Finnhub company-news maximum lookback in days for the free tier (ingestion only)')
+param finnhubMaxLookbackDays string = '365'
+
+@description('Subnet resource ID for VNet integration')
+param vnetIntegrationSubnetId string
+
+@description('Log Analytics workspace resource ID for diagnostic settings')
+param logAnalyticsWorkspaceId string
+
 var storageAccountName = take(replace('${appName}st', '-', ''), 24)
-var deploymentContainerName = 'deploymentpackage'
+var deploymentContainerName = 'deployments'
 
 // ---------------------------------------------------------------------------
-// Storage account for the Functions host
+// Storage account for the Functions host (keyless — MI only)
 // ---------------------------------------------------------------------------
 
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
@@ -50,15 +63,135 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     minimumTlsVersion: 'TLS1_2'
     allowBlobPublicAccess: false
     supportsHttpsTrafficOnly: true
-    allowSharedKeyAccess: false  // keyless — MI only
+    // Shared key disabled — matches StorageAccount_DisableLocalAuth_Modify policy.
+    // Function App runtime uses MI via AzureWebJobsStorage__accountName + credential=managedidentity.
+    allowSharedKeyAccess: false
+    // Trusted service bypass allows the Functions runtime and Azure Monitor to reach storage.
+    // Private endpoint (created in network.bicep) handles data-plane access from within the VNet.
+    networkAcls: {
+      defaultAction: 'Deny'
+      bypass: 'AzureServices, Logging, Metrics'
+    }
   }
 }
 
-// Blob container for Flex Consumption deployment packages
-resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
+resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' existing = {
   parent: storageAccount
   name: 'default'
 }
+
+resource queueService 'Microsoft.Storage/storageAccounts/queueServices@2023-05-01' existing = {
+  parent: storageAccount
+  name: 'default'
+}
+
+resource tableService 'Microsoft.Storage/storageAccounts/tableServices@2023-05-01' existing = {
+  parent: storageAccount
+  name: 'default'
+}
+
+resource storageAccountDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: 'diag-${storageAccountName}'
+  scope: storageAccount
+  properties: {
+    workspaceId: logAnalyticsWorkspaceId
+    metrics: [
+      {
+        category: 'Transaction'
+        enabled: true
+      }
+    ]
+  }
+}
+
+resource blobDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: 'diag-${storageAccountName}-blob'
+  scope: blobService
+  properties: {
+    workspaceId: logAnalyticsWorkspaceId
+    logs: [
+      {
+        category: 'StorageRead'
+        enabled: true
+      }
+      {
+        category: 'StorageWrite'
+        enabled: true
+      }
+      {
+        category: 'StorageDelete'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'Transaction'
+        enabled: true
+      }
+    ]
+  }
+}
+
+resource queueDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: 'diag-${storageAccountName}-queue'
+  scope: queueService
+  properties: {
+    workspaceId: logAnalyticsWorkspaceId
+    logs: [
+      {
+        category: 'StorageRead'
+        enabled: true
+      }
+      {
+        category: 'StorageWrite'
+        enabled: true
+      }
+      {
+        category: 'StorageDelete'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'Transaction'
+        enabled: true
+      }
+    ]
+  }
+}
+
+resource tableDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: 'diag-${storageAccountName}-table'
+  scope: tableService
+  properties: {
+    workspaceId: logAnalyticsWorkspaceId
+    logs: [
+      {
+        category: 'StorageRead'
+        enabled: true
+      }
+      {
+        category: 'StorageWrite'
+        enabled: true
+      }
+      {
+        category: 'StorageDelete'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'Transaction'
+        enabled: true
+      }
+    ]
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Deployment blob container — Flex Consumption reads the code package from here.
+// SystemAssignedIdentity auth means no shared key needed for deployment.
+// ---------------------------------------------------------------------------
 
 resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   parent: blobService
@@ -91,6 +224,10 @@ resource hostingPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
 
 var baseAppSettings = [
   {
+    name: 'FUNCTIONS_EXTENSION_VERSION'
+    value: '~4'
+  }
+  {
     name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
     value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=${appInsightsKvSecretName})'
   }
@@ -103,16 +240,8 @@ var baseAppSettings = [
     value: storageAccountName
   }
   {
-    name: 'AzureWebJobsStorage__blobServiceUri'
-    value: storageAccount.properties.primaryEndpoints.blob
-  }
-  {
-    name: 'AzureWebJobsStorage__queueServiceUri'
-    value: storageAccount.properties.primaryEndpoints.queue
-  }
-  {
-    name: 'AzureWebJobsStorage__tableServiceUri'
-    value: storageAccount.properties.primaryEndpoints.table
+    name: 'AzureWebJobsStorage__credential'
+    value: 'managedidentity'
   }
 ]
 
@@ -126,6 +255,10 @@ var ingestionExtraSettings = isIngestion ? [
     value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=ALPHAVANTAGE-API-KEY)'
   }
   {
+    name: 'AV_RPM'
+    value: alphaVantageRequestsPerMinute
+  }
+  {
     name: 'FMP_API_KEY'
     value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=FMP-API-KEY)'
   }
@@ -134,8 +267,8 @@ var ingestionExtraSettings = isIngestion ? [
     value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=FINNHUB-API-KEY)'
   }
   {
-    name: 'FABRIC_CAPACITY_NAME'
-    value: fabricCapacityName
+    name: 'FINNHUB_MAX_LOOKBACK_DAYS'
+    value: finnhubMaxLookbackDays
   }
   {
     name: 'ONELAKE_WORKSPACE_ID'
@@ -145,13 +278,16 @@ var ingestionExtraSettings = isIngestion ? [
     name: 'ONELAKE_LAKEHOUSE_NAME'
     value: onelakeLakehouseName
   }
+  {
+    name: 'FABRIC_CAPACITY_NAME'
+    value: fabricCapacityName
+  }
 ] : []
 
 var appSettings = concat(baseAppSettings, ingestionExtraSettings)
 
 // ---------------------------------------------------------------------------
-// Function App (Flex Consumption)
-// functionAppConfig is mandatory for Flex Consumption site creation.
+// Function App (Flex Consumption, Linux, Python 3.12)
 // ---------------------------------------------------------------------------
 
 resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
@@ -163,11 +299,30 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   }
   properties: {
     serverFarmId: hostingPlan.id
+    siteConfig: {
+      appSettings: appSettings
+      http20Enabled: true
+      minTlsVersion: '1.2'
+      ftpsState: 'Disabled'
+      cors: {
+        allowedOrigins: ['https://portal.azure.com']
+        supportCredentials: false
+      }
+    }
+    httpsOnly: true
+    publicNetworkAccess: 'Enabled'
+    // VNet integration — all outbound traffic routes through the VNet,
+    // enabling the Function App to reach private endpoints for Cosmos DB and Key Vault.
+    virtualNetworkSubnetId: vnetIntegrationSubnetId
+    vnetRouteAllEnabled: true
+    // Flex Consumption: runtime + deployment config.
+    // deploymentContainer.name reference creates implicit dependency so the
+    // container exists before the Function App configures it.
     functionAppConfig: {
       deployment: {
         storage: {
           type: 'blobContainer'
-          value: '${storageAccount.properties.primaryEndpoints.blob}${deploymentContainerName}'
+          value: '${storageAccount.properties.primaryEndpoints.blob}${deploymentContainer.name}'
           authentication: {
             type: 'SystemAssignedIdentity'
           }
@@ -179,19 +334,35 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
       }
       runtime: {
         name: 'python'
-        version: '3.11'
+        version: '3.12'
       }
     }
-    siteConfig: {
-      appSettings: appSettings
-      http20Enabled: true
-      minTlsVersion: '1.2'
-      ftpsState: 'Disabled'
-    }
-    httpsOnly: true
-    publicNetworkAccess: 'Enabled'
   }
-  dependsOn: [deploymentContainer]
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic settings — stream FunctionAppLogs to Log Analytics
+// Fixes FunctionApps_DiagnosticSetting_Audit compliance finding.
+// ---------------------------------------------------------------------------
+
+resource diagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: 'diag-${appName}'
+  scope: functionApp
+  properties: {
+    workspaceId: logAnalyticsWorkspaceId
+    logs: [
+      {
+        category: 'FunctionAppLogs'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -247,3 +418,6 @@ output functionAppId string = functionApp.id
 
 @description('Storage account name for the Functions host')
 output storageAccountName string = storageAccount.name
+
+@description('Storage account resource ID (used by network module for private endpoint)')
+output storageAccountId string = storageAccount.id

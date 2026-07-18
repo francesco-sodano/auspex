@@ -15,12 +15,14 @@ class Batch:
     records: list
     new_wm: Watermark
     window: str  # deterministic string used in batch_id
+    partition_date: Optional[str] = None  # YYYY-MM-DD used for deterministic bronze path
 
 
 @dataclass
 class RunContext:
     run_id: str
     source_id: str
+    mode: str = "run"
 
 
 @dataclass

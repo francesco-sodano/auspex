@@ -16,6 +16,9 @@ param env string
 @description('Azure region (switzerlandnorth preferred)')
 param location string
 
+@description('Log Analytics workspace resource ID for diagnostic settings')
+param logAnalyticsWorkspaceId string
+
 var openAiName = 'auspex-${env}-openai'
 
 resource openAiAccount 'Microsoft.CognitiveServices/accounts@2024-04-01-preview' = {
@@ -31,9 +34,40 @@ resource openAiAccount 'Microsoft.CognitiveServices/accounts@2024-04-01-preview'
   properties: {
     customSubDomainName: openAiName
     publicNetworkAccess: 'Enabled'
-    // Disable local (API key) auth — managed identity only.
-    // Comment out disableLocalAuth if you need key-based access during initial setup.
-    disableLocalAuth: false
+    // Managed identity only — matches CognitiveServices_LocalAuth_Modify policy effect.
+    // publicNetworkAccess remains Enabled; private endpoint hardening is deferred to E10.
+    disableLocalAuth: true
+    // AzureServices bypass required for Fabric Spark and Azure Monitor — tighten with private endpoint in E10.
+    networkAcls: {
+      defaultAction: 'Deny'
+      bypass: 'AzureServices'
+      ipRules: []
+      virtualNetworkRules: []
+    }
+  }
+}
+
+resource openAiDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: 'diag-${openAiName}'
+  scope: openAiAccount
+  properties: {
+    workspaceId: logAnalyticsWorkspaceId
+    logs: [
+      {
+        category: 'RequestResponse'
+        enabled: true
+      }
+      {
+        category: 'Audit'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
   }
 }
 

@@ -1,5 +1,6 @@
 """SEC EDGAR Form 4 connector — insider transaction filings."""
 import os
+import time
 from datetime import date, timedelta
 from typing import Optional
 
@@ -10,15 +11,17 @@ from shared.retry import http_get
 _EFTS_URL = "https://efts.sec.gov/LATEST/search-index"
 _PAGE_SIZE = 100
 _DEFAULT_LOOKBACK_DAYS = 7
+_DEFAULT_REQUESTS_PER_MINUTE = 450
 
 
 class SecForm4Connector(BaseConnector):
     source_id = "sec_form4"
     schema_version = 1
 
-    def __init__(self, cp, bw) -> None:
-        super().__init__(cp, bw)
+    def __init__(self, cp, bw, source_config: Optional[dict] = None) -> None:
+        super().__init__(cp, bw, source_config=source_config)
         self._user_agent = os.environ["EDGAR_USER_AGENT"]
+        self._min_interval_s = 60 / self._requests_per_minute(_DEFAULT_REQUESTS_PER_MINUTE)
 
     def fetch(self, since: Optional[Watermark]) -> Batch:
         start_date = (
@@ -33,6 +36,7 @@ class SecForm4Connector(BaseConnector):
         offset = 0
 
         while True:
+            started_at = time.monotonic()
             resp = http_get(
                 _EFTS_URL,
                 params={
@@ -44,6 +48,9 @@ class SecForm4Connector(BaseConnector):
                 },
                 headers=headers,
             )
+            elapsed = time.monotonic() - started_at
+            if elapsed < self._min_interval_s:
+                time.sleep(self._min_interval_s - elapsed)
             hits = resp.json()["hits"]["hits"]
             records.extend(h["_source"] for h in hits)
             if len(hits) < _PAGE_SIZE:
@@ -55,4 +62,9 @@ class SecForm4Connector(BaseConnector):
             last_event_ts=end_date,
             last_cursor=end_date,
         )
-        return Batch(records=records, new_wm=new_wm, window=f"{start_date}-to-{end_date}")
+        return Batch(
+            records=records,
+            new_wm=new_wm,
+            window=f"{start_date}-to-{end_date}",
+            partition_date=end_date,
+        )
