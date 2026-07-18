@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta, timezone
 from delta.tables import DeltaTable
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
-    BooleanType, DateType, DecimalType, IntegerType, LongType,
+    ArrayType, BooleanType, DateType, DecimalType, IntegerType, LongType,
     StringType, StructField, StructType, TimestampType,
 )
 
@@ -189,18 +189,22 @@ print(f"Date folders with data: {len(paths)}")
 if not paths:
     raise RuntimeError("No bronze files found in window - check connector ran and lakehouse is attached")
 
+raw_lines = spark.read.text(paths).select(F.col("value").alias("raw_json"))
 bronze_df = (
-    spark.read.json(paths)
+    raw_lines
     .select(
-        F.col("record.adsh").alias("accession_no"),
-        F.col("record.file_date").alias("file_date"),
-        F.col("record.period_ending").alias("period_of_report"),
-        F.col("record.display_names").cast(StringType()).alias("issuer_name_raw"),
-        F.col("record.ciks").alias("cik_candidates"),
-        F.col("record.filing_url").alias("filing_url"),
-        F.col("batch_id"),
-        F.col("source_id"),
-        F.to_timestamp("ingest_ts").alias("ingest_ts"),
+        F.get_json_object("raw_json", "$.record.adsh").alias("accession_no"),
+        F.get_json_object("raw_json", "$.record.file_date").alias("file_date"),
+        F.get_json_object("raw_json", "$.record.period_ending").alias("period_of_report"),
+        F.get_json_object("raw_json", "$.record.display_names").alias("issuer_name_raw"),
+        F.from_json(
+            F.get_json_object("raw_json", "$.record.ciks"),
+            ArrayType(StringType()),
+        ).alias("cik_candidates"),
+        F.get_json_object("raw_json", "$.record.filing_url").alias("filing_url"),
+        F.get_json_object("raw_json", "$.batch_id").alias("batch_id"),
+        F.get_json_object("raw_json", "$.source_id").alias("source_id"),
+        F.to_timestamp(F.get_json_object("raw_json", "$.ingest_ts")).alias("ingest_ts"),
     )
     .filter(F.col("accession_no").isNotNull())
     .dropDuplicates(["accession_no"])

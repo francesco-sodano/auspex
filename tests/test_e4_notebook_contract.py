@@ -74,13 +74,23 @@ class E4NotebookContractTests(unittest.TestCase):
         self.assertIn("PIT_MISSING", nb)
         self.assertIn("retry_quarantine_reasons", nb)
         self.assertIn("_ACTIVE_TERMINAL_REASONS", nb)
-        self.assertIn('F.col("record.ciks").alias("cik_candidates")', nb)
+        self.assertIn('F.get_json_object("raw_json", "$.record.ciks")', nb)
         self.assertIn("_archive_cik_candidates", nb)
         self.assertIn('/index.json', nb)
         self.assertIn("NO_OWNERSHIP_XML", nb)
         self.assertIn("Removed {legacy_bad} legacy silver_insider_txn", nb)
         self.assertIn("DeltaTable.forName(spark, \"silver_security_quarantine\")", nb)
         self.assertIn("natural_key", nb)
+
+
+    def test_form4_bronze_reader_tolerates_optional_nested_fields(self):
+        nb = _read("nb_01_form4_to_silver.py")
+
+        self.assertIn("spark.read.text(paths)", nb)
+        self.assertNotIn("spark.read.json(paths)", nb)
+        self.assertIn('F.get_json_object("raw_json", "$.record.filing_url")', nb)
+        self.assertIn('F.get_json_object("raw_json", "$.record.ciks")', nb)
+        self.assertIn("ArrayType(StringType())", nb)
 
 
     def test_form4_quarantine_triage_preserves_audit_rows_and_classifies_actions(self):

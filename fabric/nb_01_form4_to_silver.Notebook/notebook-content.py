@@ -25,6 +25,7 @@
 
 # CELL ********************
 
+
 # Fabric Notebook: nb_01_form4_to_silver
 # Reads bronze sec_form4 NDJSON and writes entity-resolved silver_insider_txn.
 # Attaches to: auspex_bronze (default lakehouse)
@@ -41,6 +42,7 @@
 
 # CELL ********************
 
+
 import re
 import time
 import threading
@@ -53,7 +55,7 @@ from datetime import date, datetime, timedelta, timezone
 from delta.tables import DeltaTable
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
-    BooleanType, DateType, DecimalType, IntegerType, LongType,
+    ArrayType, BooleanType, DateType, DecimalType, IntegerType, LongType,
     StringType, StructField, StructType, TimestampType,
 )
 
@@ -65,6 +67,7 @@ from pyspark.sql.types import (
 # META }
 
 # PARAMETERS CELL ********************
+
 
 # --- Parameters: mark this cell as the Fabric parameter cell ---
 from_date = ""
@@ -83,6 +86,7 @@ retry_quarantine_reasons = ""
 # META }
 
 # CELL ********************
+
 
 # --- Normalize and validate injected parameter values ---
 _today = date.today().isoformat()
@@ -148,6 +152,7 @@ print(
 # META }
 
 # CELL ********************
+
 
 # --- Helpers ---
 def _ensure_columns(table_name: str, column_specs: dict[str, str]) -> None:
@@ -249,24 +254,29 @@ def _merge_security_quarantine(rows: list[dict]) -> None:
 
 # CELL ********************
 
+
 # --- Bronze file paths for the window ---
 paths = _existing_paths(_date_paths(from_date, to_date))
 print(f"Date folders with data: {len(paths)}")
 if not paths:
     raise RuntimeError("No bronze files found in window - check connector ran and lakehouse is attached")
 
+raw_lines = spark.read.text(paths).select(F.col("value").alias("raw_json"))
 bronze_df = (
-    spark.read.json(paths)
+    raw_lines
     .select(
-        F.col("record.adsh").alias("accession_no"),
-        F.col("record.file_date").alias("file_date"),
-        F.col("record.period_ending").alias("period_of_report"),
-        F.col("record.display_names").cast(StringType()).alias("issuer_name_raw"),
-        F.col("record.ciks").alias("cik_candidates"),
-        F.col("record.filing_url").alias("filing_url"),
-        F.col("batch_id"),
-        F.col("source_id"),
-        F.to_timestamp("ingest_ts").alias("ingest_ts"),
+        F.get_json_object("raw_json", "$.record.adsh").alias("accession_no"),
+        F.get_json_object("raw_json", "$.record.file_date").alias("file_date"),
+        F.get_json_object("raw_json", "$.record.period_ending").alias("period_of_report"),
+        F.get_json_object("raw_json", "$.record.display_names").alias("issuer_name_raw"),
+        F.from_json(
+            F.get_json_object("raw_json", "$.record.ciks"),
+            ArrayType(StringType()),
+        ).alias("cik_candidates"),
+        F.get_json_object("raw_json", "$.record.filing_url").alias("filing_url"),
+        F.get_json_object("raw_json", "$.batch_id").alias("batch_id"),
+        F.get_json_object("raw_json", "$.source_id").alias("source_id"),
+        F.to_timestamp(F.get_json_object("raw_json", "$.ingest_ts")).alias("ingest_ts"),
     )
     .filter(F.col("accession_no").isNotNull())
     .dropDuplicates(["accession_no"])
@@ -283,6 +293,7 @@ print(f"Bronze rows (unique accession_no): {total_bronze}")
 # META }
 
 # CELL ********************
+
 
 # --- Create/upgrade silver_insider_txn ---
 spark.sql("""
@@ -335,6 +346,7 @@ if legacy_bad:
 
 # CELL ********************
 
+
 # --- Skip only already-resolved filings; reprocess legacy rows with missing security_sk ---
 resolved_accessions = spark.sql("""
     SELECT accession_no
@@ -375,6 +387,7 @@ print(
 
 # CELL ********************
 
+
 # --- Load dim_security maps for exact/current resolution ---
 dim_current = (
     spark.table("dim_security")
@@ -401,6 +414,7 @@ for r in dim_rows:
 # META }
 
 # CELL ********************
+
 
 # --- EDGAR Form 4 XML helpers ---
 _req_lock = threading.Lock()
@@ -572,6 +586,7 @@ def _parse_form4_xml(xml_text: str, meta: dict) -> list[dict]:
 # META }
 
 # CELL ********************
+
 
 # --- Fetch + parse each new filing (parallel, rate-limited) ---
 def _quarantine_row(meta: dict, reason: str, details: str | None = None, line_no: int | None = None) -> dict:
@@ -790,6 +805,7 @@ print(
 # META }
 
 # CELL ********************
+
 
 # --- Update prices symbol universe from resolved silver insider rows ---
 import json as _json
