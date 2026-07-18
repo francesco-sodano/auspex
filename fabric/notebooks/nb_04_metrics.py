@@ -40,15 +40,17 @@ def _ensure_columns(table_name: str, column_specs: dict[str, str]) -> None:
 
 
 def _merge_all(table_name: str, source_df, condition: str) -> None:
+    target = DeltaTable.forName(spark, table_name)
     (
-        DeltaTable.forName(spark, table_name)
+        target
         .alias("t")
         .merge(source_df.alias("s"), condition)
         .whenMatchedUpdateAll()
         .whenNotMatchedInsertAll()
         .execute()
     )
-    print(f"Merged {source_df.count()} rows into {table_name}")
+    metrics = target.history(1).select("operationMetrics").first().operationMetrics or {}
+    print(f"Merged source_rows={metrics.get('numSourceRows', 'unknown')} into {table_name}")
 
 
 def _replace_delta_projection(table_name: str, select_sql: str) -> None:
@@ -59,7 +61,7 @@ def _replace_delta_projection(table_name: str, select_sql: str) -> None:
             pass
 
     spark.sql(f"CREATE TABLE {table_name} USING DELTA AS {select_sql}")
-    print(f"Materialized {table_name}: {spark.table(table_name).count()} rows")
+    print(f"Materialized {table_name}")
 
 
 for required in ["dim_security", "dim_date", "fact_market_daily", "fact_insider_txn"]:

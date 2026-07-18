@@ -23,28 +23,70 @@ from pyspark.sql.types import (
 )
 
 # COMMAND ----------
-# --- Parameters ---
-def _widget(name, default):
-    try:
-        return mssparkutils.widgets.get(name)
-    except Exception:
-        return default
-
-
+# --- Parameters: mark this cell as the Fabric parameter cell ---
 _today = date.today().isoformat()
-from_date = _widget("from_date", (date.today() - timedelta(days=7)).isoformat())
-to_date = _widget("to_date", _today)
-EDGAR_USER_AGENT = _widget("edgar_user_agent", "Auspex/1.0 auspex@auspex.ai")
-EDGAR_REQUESTS_PER_MINUTE = int(_widget("edgar_requests_per_minute", "450"))
-_MAX_WORKERS = max(1, int(_widget("max_workers", "5")))
+from_date = (date.today() - timedelta(days=7)).isoformat()
+to_date = _today
+edgar_user_agent = "Auspex/1.0 auspex@auspex.ai"
+edgar_requests_per_minute = 450
+max_workers = 5
+write_batch_size = 500
+retry_quarantine_reasons = ""
+
+# COMMAND ----------
+# --- Normalize and validate injected parameter values ---
+from_date = str(from_date)
+to_date = str(to_date)
+edgar_user_agent = str(edgar_user_agent)
+edgar_requests_per_minute = int(edgar_requests_per_minute)
+max_workers = int(max_workers)
+write_batch_size = int(write_batch_size)
+retry_quarantine_reasons = str(retry_quarantine_reasons)
+
+if date.fromisoformat(from_date) > date.fromisoformat(to_date):
+    raise ValueError("from_date must be on or before to_date")
+if not edgar_user_agent.strip():
+    raise ValueError("edgar_user_agent cannot be empty")
+
+EDGAR_USER_AGENT = edgar_user_agent
+EDGAR_REQUESTS_PER_MINUTE = edgar_requests_per_minute
+_MAX_WORKERS = max(1, max_workers)
+_WRITE_BATCH_SIZE = max(1, write_batch_size)
+_TERMINAL_QUARANTINE_REASONS = {
+    "NO_NONDERIVATIVE_TXNS",
+    "NO_OWNERSHIP_XML",
+    "INVALID_DATE",
+    "SECURITY_UNRESOLVED",
+    "PIT_MISSING",
+}
+_RETRY_QUARANTINE_REASONS = {
+    reason.strip().upper()
+    for reason in retry_quarantine_reasons.split(",")
+    if reason.strip()
+}
+_UNKNOWN_RETRY_REASONS = _RETRY_QUARANTINE_REASONS.difference(_TERMINAL_QUARANTINE_REASONS)
+if _UNKNOWN_RETRY_REASONS:
+    raise ValueError(
+        "retry_quarantine_reasons contains non-terminal reasons: "
+        + ", ".join(sorted(_UNKNOWN_RETRY_REASONS))
+    )
+_ACTIVE_TERMINAL_REASONS = _TERMINAL_QUARANTINE_REASONS.difference(_RETRY_QUARANTINE_REASONS)
+_MIN_VALID_DATE = date(1900, 1, 1)
 
 if EDGAR_REQUESTS_PER_MINUTE <= 0:
     raise ValueError("edgar_requests_per_minute must be positive")
+if max_workers <= 0:
+    raise ValueError("max_workers must be positive")
+if write_batch_size <= 0:
+    raise ValueError("write_batch_size must be positive")
 
 print(
     f"Window: {from_date} to {to_date} | "
     f"EDGAR cap: {EDGAR_REQUESTS_PER_MINUTE} req/min aggregate | "
-    f"workers: {_MAX_WORKERS}"
+    f"workers: {_MAX_WORKERS} | "
+    f"write batch: {_WRITE_BATCH_SIZE} rows | "
+    f"terminal quarantine skip: {sorted(_ACTIVE_TERMINAL_REASONS)} | "
+    f"forced retry: {sorted(_RETRY_QUARANTINE_REASONS)}"
 )
 
 # COMMAND ----------
@@ -91,6 +133,13 @@ def _coerce_date(value):
     return _to_date(value)
 
 
+def _safe_delta_date(value):
+    parsed = _coerce_date(value)
+    if parsed is None or parsed < _MIN_VALID_DATE:
+        return None
+    return parsed
+
+
 def _merge_security_quarantine(rows: list[dict]) -> None:
     if not rows:
         return
@@ -108,8 +157,9 @@ def _merge_security_quarantine(rows: list[dict]) -> None:
         StructField("quarantined_at", TimestampType()),
     ])
     q_df = spark.createDataFrame(rows, q_schema).dropDuplicates(["natural_key"])
+    target = DeltaTable.forName(spark, "silver_security_quarantine")
     (
-        DeltaTable.forName(spark, "silver_security_quarantine")
+        target
         .alias("t")
         .merge(q_df.alias("s"), "t.natural_key = s.natural_key")
         .whenMatchedUpdate(set={
@@ -125,7 +175,11 @@ def _merge_security_quarantine(rows: list[dict]) -> None:
         .whenNotMatchedInsertAll()
         .execute()
     )
-    print(f"Merged {q_df.count()} rows into silver_security_quarantine")
+    metrics = target.history(1).select("operationMetrics").first().operationMetrics or {}
+    print(
+        "Merged quarantine source_rows="
+        f"{metrics.get('numSourceRows', 'unknown')} into silver_security_quarantine"
+    )
 
 
 # COMMAND ----------
@@ -142,12 +196,15 @@ bronze_df = (
         F.col("record.file_date").alias("file_date"),
         F.col("record.period_ending").alias("period_of_report"),
         F.col("record.display_names").cast(StringType()).alias("issuer_name_raw"),
+        F.col("record.ciks").alias("cik_candidates"),
+        F.col("record.filing_url").alias("filing_url"),
         F.col("batch_id"),
         F.col("source_id"),
         F.to_timestamp("ingest_ts").alias("ingest_ts"),
     )
     .filter(F.col("accession_no").isNotNull())
     .dropDuplicates(["accession_no"])
+    .cache()
 )
 total_bronze = bronze_df.count()
 print(f"Bronze rows (unique accession_no): {total_bronze}")
@@ -197,33 +254,33 @@ if legacy_bad:
 
 # COMMAND ----------
 # --- Skip only already-resolved filings; reprocess legacy rows with missing security_sk ---
-done_set = {
-    r.accession_no
-    for r in (
-        spark.sql("""
-            SELECT accession_no
-            FROM silver_insider_txn
-            GROUP BY accession_no
-            HAVING SUM(CASE WHEN security_sk IS NULL OR event_date IS NULL OR knowledge_date IS NULL THEN 1 ELSE 0 END) = 0
-        """).collect()
+resolved_accessions = spark.sql("""
+    SELECT accession_no
+    FROM silver_insider_txn
+    GROUP BY accession_no
+    HAVING SUM(CASE WHEN security_sk IS NULL OR event_date IS NULL OR knowledge_date IS NULL THEN 1 ELSE 0 END) = 0
+""")
+terminal_quarantine_df = spark.table("silver_security_quarantine").filter(
+    F.col("source_id") == "sec_form4"
+)
+if _ACTIVE_TERMINAL_REASONS:
+    terminal_quarantine_df = terminal_quarantine_df.filter(
+        F.col("reason").isin(*sorted(_ACTIVE_TERMINAL_REASONS))
     )
-}
-terminal_quarantine_set = {
-    r.raw_identifier
-    for r in (
-        spark.table("silver_security_quarantine")
-        .filter((F.col("source_id") == "sec_form4") & (F.col("reason") == "NO_NONDERIVATIVE_TXNS"))
-        .select("raw_identifier")
-        .distinct()
-        .collect()
-    )
-    if r.raw_identifier
-}
-done_set.update(terminal_quarantine_set)
-new_df = bronze_df.filter(~F.col("accession_no").isin(done_set))
+else:
+    terminal_quarantine_df = terminal_quarantine_df.limit(0)
+
+terminal_accessions = (
+    terminal_quarantine_df
+    .filter(F.col("raw_identifier").isNotNull())
+    .select(F.col("raw_identifier").alias("accession_no"))
+    .distinct()
+)
+completed_accessions = resolved_accessions.unionByName(terminal_accessions).distinct()
+new_df = bronze_df.join(completed_accessions, "accession_no", "left_anti")
 to_process = new_df.collect()
 print(
-    f"Already resolved or terminal-quarantined: {len(done_set)}, "
+    f"Already resolved or terminal-quarantined: {total_bronze - len(to_process)}, "
     f"new/retryable/legacy-unresolved to fetch: {len(to_process)}"
 )
 
@@ -235,13 +292,14 @@ dim_current = (
     .select("security_sk", "cik", "ticker")
 )
 
+dim_rows = dim_current.orderBy("ticker").collect()
 _security_by_cik_ticker = {
     (r.cik, r.ticker): r.security_sk
-    for r in dim_current.collect()
+    for r in dim_rows
     if r.cik and r.ticker
 }
 _security_by_cik = {}
-for r in dim_current.orderBy("ticker").collect():
+for r in dim_rows:
     if r.cik and r.cik not in _security_by_cik:
         _security_by_cik[r.cik] = {"security_sk": r.security_sk, "ticker": r.ticker}
 
@@ -266,40 +324,71 @@ def _edgar_get(url: str, timeout: int = 15) -> requests.Response:
     return requests.get(url, headers={"User-Agent": EDGAR_USER_AGENT}, timeout=timeout)
 
 
-def _cik_from_accno(accno: str) -> str:
-    return str(int(accno.split("-")[0]))
+def _archive_cik_candidates(meta: dict) -> list[str]:
+    candidates = []
+
+    filing_url = meta.get("filing_url") or ""
+    filing_url_match = re.search(r"/Archives/edgar/data/(\d+)/", filing_url, re.IGNORECASE)
+    if filing_url_match:
+        candidates.append(filing_url_match.group(1))
+
+    for raw_cik in meta.get("cik_candidates") or []:
+        digits = re.sub(r"\D", "", str(raw_cik))
+        if digits:
+            candidates.append(digits)
+
+    candidates.append(meta["accession_no"].split("-")[0])
+    return list(dict.fromkeys(str(int(cik)) for cik in candidates if cik))
 
 
-def _fetch_form4_xml(cik: str, accno: str) -> str | None:
+def _fetch_form4_xml(meta: dict) -> tuple[str | None, str | None, str]:
+    accno = meta["accession_no"]
     accno_nodash = accno.replace("-", "")
-    base = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accno_nodash}"
+    attempts = []
+    archive_found = False
+    transient_failure = False
 
-    for fname in ("4.xml", "form4.xml"):
+    for cik in _archive_cik_candidates(meta):
+        base = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accno_nodash}"
         try:
-            r = _edgar_get(f"{base}/{fname}")
-            if r.status_code == 200 and "<ownershipDocument" in r.text:
-                return r.text
-        except Exception:
-            pass
+            index_response = _edgar_get(f"{base}/index.json", timeout=20)
+            attempts.append(f"cik={cik}:index={index_response.status_code}")
+            if index_response.status_code != 200:
+                if index_response.status_code in (403, 429) or index_response.status_code >= 500:
+                    transient_failure = True
+                continue
 
-    try:
-        idx = _edgar_get(f"{base}/{accno}-index.htm", timeout=10)
-        if idx.status_code == 200:
-            seen = set()
-            for full_path in re.findall(r'href="(/Archives/edgar/data/[^"]+\.xml)"', idx.text, re.IGNORECASE):
-                if full_path in seen:
-                    continue
-                seen.add(full_path)
+            archive_found = True
+            items = index_response.json().get("directory", {}).get("item", [])
+            xml_names = list(dict.fromkeys(
+                item.get("name")
+                for item in items
+                if item.get("name") and item["name"].lower().endswith(".xml")
+            ))
+            for xml_name in xml_names:
                 try:
-                    r2 = _edgar_get(f"https://www.sec.gov{full_path}")
-                    if r2.status_code == 200 and "<ownershipDocument" in r2.text:
-                        return r2.text
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                    xml_response = _edgar_get(f"{base}/{xml_name}", timeout=20)
+                    attempts.append(f"cik={cik}:{xml_name}={xml_response.status_code}")
+                    if xml_response.status_code in (403, 429) or xml_response.status_code >= 500:
+                        transient_failure = True
+                    if xml_response.status_code == 200 and re.search(
+                        r"<ownershipDocument(?:\s|>)",
+                        xml_response.text,
+                        re.IGNORECASE,
+                    ):
+                        return xml_response.text, None, "; ".join(attempts)
+                except Exception as exc:
+                    transient_failure = True
+                    attempts.append(f"cik={cik}:{xml_name}=error:{type(exc).__name__}")
+        except Exception as exc:
+            transient_failure = True
+            attempts.append(f"cik={cik}:index=error:{type(exc).__name__}")
 
-    return None
+    if transient_failure:
+        return None, "XML_FETCH_FAILED", "; ".join(attempts)
+    if archive_found:
+        return None, "NO_OWNERSHIP_XML", "; ".join(attempts)
+    return None, "XML_FETCH_FAILED", "; ".join(attempts)
 
 
 def _txt(el, path: str, default=None) -> str | None:
@@ -388,20 +477,136 @@ def _quarantine_row(meta: dict, reason: str, details: str | None = None, line_no
         "raw_identifier": meta["accession_no"],
         "reason": reason,
         "details": details,
-        "event_date": _coerce_date(meta.get("event_date") or meta.get("period_of_report")),
-        "knowledge_date": _coerce_date(meta.get("knowledge_date") or meta.get("file_date")),
+        "event_date": _safe_delta_date(meta.get("event_date") or meta.get("period_of_report")),
+        "knowledge_date": _safe_delta_date(meta.get("knowledge_date") or meta.get("file_date")),
         "batch_id": meta.get("batch_id"),
         "quarantined_at": datetime.now(timezone.utc),
+    }
+
+
+txn_schema = StructType([
+    StructField("accession_no", StringType()),
+    StructField("line_no", IntegerType()),
+    StructField("security_sk", LongType()),
+    StructField("issuer_cik", StringType()),
+    StructField("issuer_ticker", StringType()),
+    StructField("issuer_name", StringType()),
+    StructField("reporter_cik", StringType()),
+    StructField("reporter_name", StringType()),
+    StructField("is_director", BooleanType()),
+    StructField("is_officer", BooleanType()),
+    StructField("is_ten_pct", BooleanType()),
+    StructField("officer_title", StringType()),
+    StructField("txn_code", StringType()),
+    StructField("is_buy", BooleanType()),
+    StructField("shares", DecimalType(20, 4)),
+    StructField("price", DecimalType(18, 6)),
+    StructField("value_usd", DecimalType(20, 2)),
+    StructField("shares_after", DecimalType(20, 4)),
+    StructField("event_date", DateType()),
+    StructField("knowledge_date", DateType()),
+    StructField("source_id", StringType()),
+    StructField("batch_id", StringType()),
+    StructField("ingest_ts", TimestampType()),
+])
+
+
+def _is_valid_delta_date(value) -> bool:
+    parsed = _coerce_date(value)
+    return parsed is not None and parsed >= _MIN_VALID_DATE
+
+
+def _append_silver_insider_txns(rows: list[dict]) -> int:
+    if not rows:
+        return 0
+
+    target_columns = spark.table("silver_insider_txn").columns
+    txn_df = (
+        spark.createDataFrame(rows, txn_schema)
+        .dropDuplicates(["accession_no", "line_no"])
+        .select(*target_columns)
+    )
+    target = DeltaTable.forName(spark, "silver_insider_txn")
+    (
+        target.alias("t")
+        .merge(
+            txn_df.alias("s"),
+            "t.accession_no = s.accession_no AND t.line_no = s.line_no",
+        )
+        .whenNotMatchedInsertAll()
+        .execute()
+    )
+    metrics = target.history(1).select("operationMetrics").first().operationMetrics or {}
+    return int(metrics.get("numTargetRowsInserted", 0))
+
+
+def _flush_batch(batch_name: str, txn_rows: list[dict], quarantine_rows: list[dict]) -> dict:
+    resolved = [row for row in txn_rows if row.get("security_sk") is not None]
+    unresolved = [row for row in txn_rows if row.get("security_sk") is None]
+    batch_quarantine = list(quarantine_rows)
+
+    for row in unresolved:
+        batch_quarantine.append(_quarantine_row(
+            row,
+            "SECURITY_UNRESOLVED",
+            details=f"issuer_cik={row.get('issuer_cik')}; issuer_ticker={row.get('issuer_ticker')}",
+            line_no=row.get("line_no"),
+        ))
+
+    pit_missing = [row for row in resolved if row.get("event_date") is None or row.get("knowledge_date") is None]
+    for row in pit_missing:
+        batch_quarantine.append(_quarantine_row(
+            row,
+            "PIT_MISSING",
+            details=f"event_date={row.get('event_date')}; knowledge_date={row.get('knowledge_date')}",
+            line_no=row.get("line_no"),
+        ))
+
+    pit_ready = [row for row in resolved if row.get("event_date") is not None and row.get("knowledge_date") is not None]
+    invalid_date = [
+        row for row in pit_ready
+        if not _is_valid_delta_date(row.get("event_date")) or not _is_valid_delta_date(row.get("knowledge_date"))
+    ]
+    for row in invalid_date:
+        batch_quarantine.append(_quarantine_row(
+            row,
+            "INVALID_DATE",
+            details=(
+                f"line_no={row.get('line_no')}; issuer_ticker={row.get('issuer_ticker')}; "
+                f"event_date={row.get('event_date')}; knowledge_date={row.get('knowledge_date')}"
+            ),
+            line_no=row.get("line_no"),
+        ))
+
+    valid_rows = [
+        row for row in pit_ready
+        if _is_valid_delta_date(row.get("event_date")) and _is_valid_delta_date(row.get("knowledge_date"))
+    ]
+
+    _merge_security_quarantine(batch_quarantine)
+    appended = _append_silver_insider_txns(valid_rows)
+    print(
+        f"{batch_name}: txns={len(txn_rows)} | resolved={len(valid_rows)} | "
+        f"unresolved={len(unresolved)} | pit_missing={len(pit_missing)} | "
+        f"invalid_date={len(invalid_date)} | quarantine={len(batch_quarantine)} | appended={appended}"
+    )
+    return {
+        "txns": len(txn_rows),
+        "resolved": len(valid_rows),
+        "unresolved": len(unresolved),
+        "pit_missing": len(pit_missing),
+        "invalid_date": len(invalid_date),
+        "quarantine": len(batch_quarantine),
+        "appended": appended,
     }
 
 
 def _process_row(row):
     meta = row.asDict()
     try:
-        cik = _cik_from_accno(row.accession_no)
-        xml_text = _fetch_form4_xml(cik, row.accession_no)
+        xml_text, fetch_reason, fetch_details = _fetch_form4_xml(meta)
         if xml_text is None:
-            return "quarantine", [_quarantine_row(meta, "XML_FETCH_FAILED")]
+            return "quarantine", [_quarantine_row(meta, fetch_reason, details=fetch_details)]
         txns = _parse_form4_xml(xml_text, meta)
         if not txns:
             return "quarantine", [_quarantine_row(meta, "NO_NONDERIVATIVE_TXNS")]
@@ -410,8 +615,18 @@ def _process_row(row):
         return "quarantine", [_quarantine_row(meta, "FORM4_PROCESSING_FAILED", details=str(exc))]
 
 
-all_txns = []
-quarantine = []
+batch_txns = []
+batch_quarantine = []
+batch_number = 0
+totals = {
+    "txns": 0,
+    "resolved": 0,
+    "unresolved": 0,
+    "pit_missing": 0,
+    "invalid_date": 0,
+    "quarantine": 0,
+    "appended": 0,
+}
 
 with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as ex:
     futures = {ex.submit(_process_row, row): row.accession_no for row in to_process}
@@ -434,82 +649,32 @@ with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as ex:
                 "quarantined_at": datetime.now(timezone.utc),
             }]
         if kind == "quarantine":
-            quarantine.extend(payload)
+            batch_quarantine.extend(payload)
         else:
-            all_txns.extend(payload)
+            batch_txns.extend(payload)
         done += 1
+        if len(batch_txns) + len(batch_quarantine) >= _WRITE_BATCH_SIZE:
+            batch_number += 1
+            summary = _flush_batch(f"Batch {batch_number}", batch_txns, batch_quarantine)
+            for key, value in summary.items():
+                totals[key] += value
+            batch_txns = []
+            batch_quarantine = []
         if done % 500 == 0:
             print(f"  {done}/{len(futures)} filings processed")
 
-resolved_txns = [row for row in all_txns if row.get("security_sk") is not None]
-unresolved_txns = [row for row in all_txns if row.get("security_sk") is None]
-for row in unresolved_txns:
-    quarantine.append(_quarantine_row(
-        row,
-        "SECURITY_UNRESOLVED",
-        details=f"issuer_cik={row.get('issuer_cik')}; issuer_ticker={row.get('issuer_ticker')}",
-        line_no=row.get("line_no"),
-    ))
-
-pit_missing_txns = [row for row in resolved_txns if row.get("event_date") is None or row.get("knowledge_date") is None]
-for row in pit_missing_txns:
-    quarantine.append(_quarantine_row(
-        row,
-        "PIT_MISSING",
-        details=f"event_date={row.get('event_date')}; knowledge_date={row.get('knowledge_date')}",
-        line_no=row.get("line_no"),
-    ))
-resolved_txns = [row for row in resolved_txns if row.get("event_date") is not None and row.get("knowledge_date") is not None]
+if batch_txns or batch_quarantine:
+    batch_number += 1
+    summary = _flush_batch(f"Batch {batch_number}", batch_txns, batch_quarantine)
+    for key, value in summary.items():
+        totals[key] += value
 
 print(
-    f"Transactions parsed: {len(all_txns)} | "
-    f"resolved: {len(resolved_txns)} | unresolved: {len(unresolved_txns)} | pit_missing: {len(pit_missing_txns)} | "
-    f"quarantine rows: {len(quarantine)}"
+    f"Transactions parsed: {totals['txns']} | "
+    f"resolved: {totals['resolved']} | unresolved: {totals['unresolved']} | "
+    f"pit_missing: {totals['pit_missing']} | invalid_date: {totals['invalid_date']} | "
+    f"quarantine rows: {totals['quarantine']} | appended: {totals['appended']}"
 )
-
-# COMMAND ----------
-# --- Write resolved rows to silver_insider_txn via Delta MERGE ---
-if resolved_txns:
-    txn_schema = StructType([
-        StructField("accession_no", StringType()),
-        StructField("line_no", IntegerType()),
-        StructField("security_sk", LongType()),
-        StructField("issuer_cik", StringType()),
-        StructField("issuer_ticker", StringType()),
-        StructField("issuer_name", StringType()),
-        StructField("reporter_cik", StringType()),
-        StructField("reporter_name", StringType()),
-        StructField("is_director", BooleanType()),
-        StructField("is_officer", BooleanType()),
-        StructField("is_ten_pct", BooleanType()),
-        StructField("officer_title", StringType()),
-        StructField("txn_code", StringType()),
-        StructField("is_buy", BooleanType()),
-        StructField("shares", DecimalType(20, 4)),
-        StructField("price", DecimalType(18, 6)),
-        StructField("value_usd", DecimalType(20, 2)),
-        StructField("shares_after", DecimalType(20, 4)),
-        StructField("event_date", DateType()),
-        StructField("knowledge_date", DateType()),
-        StructField("source_id", StringType()),
-        StructField("batch_id", StringType()),
-        StructField("ingest_ts", TimestampType()),
-    ])
-    txn_df = spark.createDataFrame(resolved_txns, txn_schema)
-
-    (
-        DeltaTable.forName(spark, "silver_insider_txn")
-        .alias("t")
-        .merge(txn_df.alias("s"), "t.accession_no = s.accession_no AND t.line_no = s.line_no")
-        .whenMatchedUpdateAll()
-        .whenNotMatchedInsertAll()
-        .execute()
-    )
-    print(f"Merged {len(resolved_txns)} rows into silver_insider_txn")
-
-# COMMAND ----------
-# --- Write replay-safe quarantine rows ---
-_merge_security_quarantine(quarantine)
 
 # COMMAND ----------
 # --- Update prices symbol universe from resolved silver insider rows ---
@@ -531,3 +696,4 @@ _universe = _json.dumps({
 })
 mssparkutils.fs.put("Files/config/prices_universe.json", _universe, True)
 print(f"Prices universe: {len(_tickers)} tickers -> Files/config/prices_universe.json")
+bronze_df.unpersist()

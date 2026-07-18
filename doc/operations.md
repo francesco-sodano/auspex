@@ -315,7 +315,7 @@ Use this checklist before considering E1-E4 ready for further automation:
 
 Current status: this guide validates the E4 reference path for the implemented sources (`sec_form4`, `prices_eod`): `security_master`, canonical `dim_security`, `silver_insider_txn`, `silver_prices`, PIT sanity, and replay-safe quarantine. Exact CIK/ticker resolution is implemented now; ISIN/fuzzy fallback is reserved for later sources that provide those identifiers.
 
-Three PySpark notebooks transform raw bronze NDJSON into cleaned, deduplicated silver Delta tables.  
+Four PySpark notebooks validate raw bronze NDJSON and transform it into cleaned, deduplicated silver Delta tables.
 They all use the `auspex_bronze` lakehouse as their default (reads `Files/bronze/…`, writes Delta tables to `Tables/`).
 
 ---
@@ -326,8 +326,10 @@ Fabric notebooks are created in the portal and code is pasted cell by cell. The 
 
 **Open the source file** in VS Code or any editor:
 ```
+fabric/notebooks/nb_00_bronze_health.py
 fabric/notebooks/nb_00_entity_resolution.py
 fabric/notebooks/nb_01_form4_to_silver.py
+fabric/notebooks/nb_01a_form4_quarantine_triage.ipynb
 fabric/notebooks/nb_02_prices_to_silver.py
 ```
 
@@ -362,37 +364,68 @@ The `.py` files use `# COMMAND ----------` as a cell separator. Each block of co
 
 ### 16. Add notebook parameters
 
-Each notebook reads optional pipeline parameters via `mssparkutils.widgets.get()` with a fallback default. You can set them directly in the notebook for a manual run, or leave the defaults.
+Parameterized notebooks use one native Fabric contract:
 
-The notebooks read parameters via `mssparkutils.widgets.get()` with hardcoded fallback defaults, so **no configuration is required for a manual run** — just run them as-is.
+1. Cell 2 contains direct defaults and is marked as the **Parameters** cell.
+2. Cell 3 normalizes types and validates injected values.
+3. Manual runs edit Cell 2 directly; Fabric pipelines pass Base parameters with exactly matching names.
+4. Do not add a separate parameter cell above the imports because the defaults cell would overwrite it.
 
-If you want to change the date window, user-agent, or EDGAR throttle for a manual run, edit the values directly in the first cell of the notebook (the `_widget(...)` fallback values):
+No notebook uses `mssparkutils.widgets`. `nb_03_silver_to_gold` and `nb_04_metrics` intentionally remain full-history and parameterless: incrementalizing them requires return lookback, correction handling, 252-trading-day metric warm-up, and cross-sectional score recomputation.
 
-**`nb_00_entity_resolution`** — edit the fallback in the first cell:
+**`nb_00_bronze_health`** — Cell 2 contains the native Fabric parameter defaults. Toggle Cell 2 as the parameter cell, then set the historical window and expected sources directly:
 ```python
-EDGAR_USER_AGENT = _widget("edgar_user_agent", "Auspex/1.0 auspex@auspex.ai")
+from_date = "2023-07-02"
+to_date = "2026-07-14"
+sources_csv = "sec_form4,sec_13f,sec_13dg,sec_8k,sec_s1,prices_eod,alpha_vantage,etf_holdings,news,contracts"
+required_sources_csv = sources_csv
+expected_schema_version = 1
+max_future_minutes = 5
+```
+
+Do not add a separate parameter cell above the notebook: the defaults cell would execute later and overwrite it. Fabric Data Factory injects overrides immediately after the toggled defaults cell, before Cell 3 normalizes the values.
+
+The health gate is read-only. It fails on malformed envelopes, unsupported schema versions, source/path or batch/file mismatches, missing source-specific natural keys, conflicting payloads for the same batch/natural key, invalid ingestion timestamps, zero-byte files, or a required source with no records. Identical duplicate rows remain visible as `exact_duplicate_rows` but do not fail the gate because downstream natural-key deduplication converges safely. Date-folder gaps are reported as `CHECK_RUN_LOG`, `CHECK_LEADING_GAP`, or `CHECK_TRAILING_GAP`, not failed automatically, because a successful connector run with zero records intentionally creates no bronze file; reconcile those dates against the Cosmos `runs` container or the historical-backfill manifest.
+
+**`nb_00_entity_resolution`** — Cell 2:
+```python
+edgar_user_agent = "Auspex/1.0 auspex@auspex.ai"
 ```
 
 `nb_00` fetches SEC `company_tickers.json`, seeds `security_master`, maintains `dim_security`, and creates/upgrades the replay-safe quarantine tables.
 
-**`nb_01_form4_to_silver`** — edit the fallbacks in the first cell:
+**`nb_01_form4_to_silver`** — Cell 2 contains the native Fabric parameter defaults:
 ```python
-from_date        = _widget("from_date", "2026-06-10")   # change as needed
-to_date          = _widget("to_date",   "2026-06-17")
-EDGAR_USER_AGENT = _widget("edgar_user_agent", "Auspex/1.0 auspex@auspex.ai")
-EDGAR_REQUESTS_PER_MINUTE = int(_widget("edgar_requests_per_minute", "450"))
-_MAX_WORKERS = max(1, int(_widget("max_workers", "5")))
+from_date = "2026-06-10"
+to_date = "2026-06-17"
+edgar_user_agent = "Auspex/1.0 auspex@auspex.ai"
+edgar_requests_per_minute = 450
+max_workers = 5
+write_batch_size = 500
+retry_quarantine_reasons = ""
 ```
+
+Toggle Cell 2 as the Fabric parameter cell, matching `nb_00_bronze_health`. Do not add a separate parameter cell above the imports, because Cell 2 would overwrite it during a manual run. Cell 3 normalizes and validates values after Fabric injects pipeline overrides. For a manual run, edit the values directly in Cell 2.
 
 `EDGAR_REQUESTS_PER_MINUTE` is the aggregate request cap for the whole notebook process. It is not multiplied by `_MAX_WORKERS`; workers only overlap network wait time. EDGAR's fair-use ceiling is 10 requests/second (600/minute); the default 450/minute keeps a 25% buffer. This is separate from Alpha Vantage's `AV_RPM` limit.
 
-**`nb_02_prices_to_silver`** — edit the fallbacks in the first cell:
+Leave `retry_quarantine_reasons` empty for normal runs. Notebook 01 skips `NO_NONDERIVATIVE_TXNS`, `INVALID_DATE`, `SECURITY_UNRESOLVED`, and `PIT_MISSING` by default so repeated runs do not repeatedly fetch known terminal/review filings. After repairing entity resolution or date parsing, set it only to the remediated reason, for example `SECURITY_UNRESOLVED`, run the affected filing window, and reset it to empty.
+
+**`nb_01a_form4_quarantine_triage`** — default gate parameters:
 ```python
-from_date = _widget("from_date", "2026-06-10")
-to_date   = _widget("to_date",   "2026-06-17")
+max_retry_rows = 0
+sample_limit = 100
 ```
 
-> **Pipeline integration (later):** when the Fabric Data Factory pipeline calls these notebooks, it passes values via **Base parameters** in the Notebook activity. To allow the pipeline to override a variable, mark the first cell as a parameter cell: hover over it → click **`···`** (More commands) → **Toggle parameter cell**. A grey **Parameters** badge appears on the cell. The pipeline then injects its values at runtime, overriding the fallback defaults.
+This notebook creates the read-only view `v_sec_form4_quarantine_triage`; it does not delete or update quarantine evidence. Import the `.ipynb` into the Fabric workspace, attach `auspex_bronze`, and run it after Notebook 01.
+
+**`nb_02_prices_to_silver`** — Cell 2:
+```python
+from_date = "2026-06-10"
+to_date = "2026-06-17"
+```
+
+> **Pipeline integration (later):** when the Fabric Data Factory pipeline calls a notebook, it passes values via **Base parameters** in the Notebook activity. Mark the cell containing that notebook's parameter defaults as the parameter cell: hover over it → click **`···`** (More commands) → **Toggle parameter cell**. A grey **Parameters** badge appears. For `nb_00_bronze_health`, this is Cell 2, and the Base parameter names must exactly match `from_date`, `to_date`, `sources_csv`, `required_sources_csv`, `expected_schema_version`, and `max_future_minutes`.
 
 ---
 
@@ -403,10 +436,38 @@ Run the notebooks one at a time from the Fabric portal. Click **Run all** in the
 **Order is mandatory:**
 
 ```
-1. nb_00_entity_resolution   — seeds security_master; creates quarantine tables
-2. nb_01_form4_to_silver     — bronze sec_form4 → entity-resolved silver_insider_txn
-3. nb_02_prices_to_silver    — bronze prices_eod → entity-resolved silver_prices
+1. nb_00_bronze_health       — read-only structural and coverage gate for bronze
+2. nb_00_entity_resolution   — seeds security_master; creates quarantine tables
+3. nb_01_form4_to_silver     — bronze sec_form4 → entity-resolved silver_insider_txn
+4. nb_01a_form4_quarantine_triage — classify retained quarantine rows and gate retryable failures
+5. nb_02_prices_to_silver    — bronze prices_eod → entity-resolved silver_prices
 ```
+
+Quarantine disposition is explicit:
+
+| Status | Meaning | Action |
+|---|---|---|
+| `RESOLVED` | The accession, or exact transaction line, now exists in silver | Keep for audit; exclude from active-quarantine metrics |
+| `ACCEPTED` | Expected terminal exclusion such as an options-only filing, an archive with no ownership XML, or an invalid ancient source date | Keep; do not retry |
+| `RETRY` | Transient XML fetch, processing, or worker failure still has no silver output | Rerun Notebook 01 for the filing window; the gate requires this count to be 0 by default |
+| `REVIEW` | Entity resolution, PIT fields, or an unknown condition needs remediation | Fix the mapping/parser, then use `retry_quarantine_reasons` for that reason only |
+
+Never truncate or delete `silver_security_quarantine` to make the counts look clean. Repeated Notebook 01 runs already converge on `natural_key`; the triage view separates stale resolved evidence from active work.
+
+Notebook 01 resolves Form 4 archive paths from the bronze `record.ciks` candidates and `record.filing_url`, then enumerates XML files through SEC `index.json`. Do not derive the archive owner only from the accession prefix: filings submitted through filing agents can use a different prefix CIK. A reachable archive with no ownership-document XML is retained as terminal `NO_OWNERSHIP_XML`; HTTP 403/429/5xx and network failures remain retryable `XML_FETCH_FAILED`.
+
+#### Notebook optimization boundaries
+
+The consistency pass standardizes native parameters, validation, required-table guards, cache lifecycle, distributed filtering, and Delta operation metrics. The following changes require explicit data-contract design and are not safe mechanical refactors:
+
+- `nb_03`/`nb_04` incremental windows need a prior-price row, a 252-trading-day warm-up, correction handling, and full cross-sectional score recomputation.
+- `nb_04` institutional quarter-over-quarter deltas must choose PIT-eligible predecessor holdings before applying `lag()`.
+- `nb_05` must select deterministic statement snapshots before joining overview/balance/cash-flow data, and theme membership history needs snapshot date in its natural key.
+- `nb_06` must resolve or quarantine 13D/G and material-event securities before promoting them to gold; complete 13F holding extraction remains separate work.
+- `nb_07` needs a provider-award/security natural key, explicit handling for missing award dates, and quarantine for unresolved securities.
+- Legacy PIT-invalid silver/gold rows should be preserved in quarantine before deletion or repair.
+
+Treat these as correctness migrations with focused backfill tests, not as runtime tuning.
 
 `nb_01` is the slowest — each new Form 4 accession may require 2–3 EDGAR HTTP calls to discover and fetch the full filing XML (transaction amounts are not in the search index). With the default aggregate cap of 450 requests/minute and 5 workers, a 7-day backfill can take **30–60 minutes** depending on filing count, XML discovery path, and SEC response latency. Subsequent daily runs are much faster — already-processed accession numbers are skipped via `done_set`, so only that day's new filings are fetched.
 

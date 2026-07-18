@@ -9,21 +9,27 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import DateType, DecimalType, LongType, StringType, StructField, StructType, TimestampType
 
 # COMMAND ----------
-# --- Parameters ---
-def _widget(name, default):
-    try:
-        return mssparkutils.widgets.get(name)
-    except Exception:
-        return default
-
-
+# --- Parameters: mark this cell as the Fabric parameter cell ---
 _today = date.today().isoformat()
-from_date = _widget("from_date", (date.today() - timedelta(days=7)).isoformat())
-to_date = _widget("to_date", _today)
+from_date = (date.today() - timedelta(days=7)).isoformat()
+to_date = _today
+
+# COMMAND ----------
+# --- Normalize and validate injected parameter values ---
+from_date = str(from_date)
+to_date = str(to_date)
+if date.fromisoformat(from_date) > date.fromisoformat(to_date):
+    raise ValueError("from_date must be on or before to_date")
+
 print(f"Window: {from_date} to {to_date}")
 
 # COMMAND ----------
 # --- Helpers ---
+def _require_table(table_name: str) -> None:
+    if not spark.catalog.tableExists(table_name):
+        raise RuntimeError(f"Required upstream table is missing: {table_name}")
+
+
 def _ensure_columns(table_name: str, column_specs: dict[str, str]) -> None:
     existing = set(spark.table(table_name).columns)
     for column_name, ddl in column_specs.items():
@@ -53,12 +59,17 @@ def _existing_paths(paths):
     return result
 
 
+for required in ["dim_security", "silver_dq_quarantine", "silver_security_quarantine"]:
+    _require_table(required)
+
+
 def _merge_dq_quarantine(q_df) -> None:
-    if q_df.limit(1).count() == 0:
+    if q_df.isEmpty():
         return
     q_df = q_df.dropDuplicates(["natural_key"])
+    target = DeltaTable.forName(spark, "silver_dq_quarantine")
     (
-        DeltaTable.forName(spark, "silver_dq_quarantine")
+        target
         .alias("t")
         .merge(q_df.alias("s"), "t.natural_key = s.natural_key")
         .whenMatchedUpdate(set={
@@ -71,15 +82,17 @@ def _merge_dq_quarantine(q_df) -> None:
         .whenNotMatchedInsertAll()
         .execute()
     )
-    print(f"Merged {q_df.count()} rows into silver_dq_quarantine")
+    metrics = target.history(1).select("operationMetrics").first().operationMetrics or {}
+    print(f"Merged source_rows={metrics.get('numSourceRows', 'unknown')} into silver_dq_quarantine")
 
 
 def _merge_security_quarantine(q_df) -> None:
-    if q_df.limit(1).count() == 0:
+    if q_df.isEmpty():
         return
     q_df = q_df.dropDuplicates(["natural_key"])
+    target = DeltaTable.forName(spark, "silver_security_quarantine")
     (
-        DeltaTable.forName(spark, "silver_security_quarantine")
+        target
         .alias("t")
         .merge(q_df.alias("s"), "t.natural_key = s.natural_key")
         .whenMatchedUpdate(set={
@@ -95,7 +108,8 @@ def _merge_security_quarantine(q_df) -> None:
         .whenNotMatchedInsertAll()
         .execute()
     )
-    print(f"Merged {q_df.count()} rows into silver_security_quarantine")
+    metrics = target.history(1).select("operationMetrics").first().operationMetrics or {}
+    print(f"Merged source_rows={metrics.get('numSourceRows', 'unknown')} into silver_security_quarantine")
 
 
 # COMMAND ----------
@@ -124,6 +138,7 @@ bronze_df = (
     )
     .filter(F.col("symbol").isNotNull() & F.col("price_date").isNotNull())
     .dropDuplicates(["symbol", "price_date"])
+    .cache()
 )
 total_bronze = bronze_df.count()
 print(f"Bronze rows (symbol+date unique): {total_bronze}")
@@ -135,13 +150,13 @@ dq_fails = bronze_df.filter(
     | F.col("close").isNull()
     | (F.col("volume") < 0)
     | (F.col("price_date") > F.current_date())
-)
+).cache()
 dq_pass = bronze_df.filter(
     (F.col("close") > 0)
     & F.col("close").isNotNull()
-    & (F.col("volume") >= 0)
+    & (F.col("volume").isNull() | (F.col("volume") >= 0))
     & (F.col("price_date") <= F.current_date())
-)
+).cache()
 
 dq_fail_count = dq_fails.count()
 print(f"DQ pass: {dq_pass.count()} | DQ fail: {dq_fail_count}")
@@ -177,7 +192,7 @@ resolved = dq_pass.join(dim_current, dq_pass.symbol == dim_current.dim_ticker, h
 unresolved_prices = resolved.filter(F.col("security_sk").isNull())
 resolved_prices = resolved.filter(F.col("security_sk").isNotNull())
 
-if unresolved_prices.limit(1).count() > 0:
+if not unresolved_prices.isEmpty():
     security_quarantine_df = unresolved_prices.select(
         F.sha2(
             F.concat_ws("|", F.lit("prices_eod"), F.lit("SECURITY_UNRESOLVED"), F.col("symbol"), F.col("price_date").cast("string"), F.col("batch_id")),
@@ -189,7 +204,7 @@ if unresolved_prices.limit(1).count() > 0:
         F.lit("SECURITY_UNRESOLVED").alias("reason"),
         F.concat(F.lit("symbol="), F.col("symbol")).alias("details"),
         F.col("price_date").alias("event_date"),
-        F.current_date().alias("knowledge_date"),
+        F.to_date("ingest_ts").alias("knowledge_date"),
         F.col("batch_id"),
         F.current_timestamp().alias("quarantined_at"),
     )
@@ -209,7 +224,7 @@ silver_df = resolved_prices.select(
     F.col("volume"),
     F.col("issuer_cik"),
     F.col("price_date").alias("event_date"),
-    F.current_date().alias("knowledge_date"),
+    F.to_date("ingest_ts").alias("knowledge_date"),
     F.col("source_id"),
     F.col("batch_id"),
     F.col("ingest_ts"),
@@ -246,9 +261,10 @@ legacy_prices = (
     .dropDuplicates(["symbol", "date"])
 )
 legacy_resolved = legacy_prices.join(dim_current, legacy_prices.symbol == dim_current.dim_ticker, how="inner")
-if legacy_resolved.limit(1).count() > 0:
+if not legacy_resolved.isEmpty():
+    target = DeltaTable.forName(spark, "silver_prices")
     (
-        DeltaTable.forName(spark, "silver_prices")
+        target
         .alias("t")
         .merge(
             legacy_resolved.select("security_sk", "issuer_cik", "symbol", "date").alias("s"),
@@ -260,12 +276,14 @@ if legacy_resolved.limit(1).count() > 0:
         })
         .execute()
     )
-    print(f"Backfilled security_sk for {legacy_resolved.count()} legacy silver_prices rows")
+    metrics = target.history(1).select("operationMetrics").first().operationMetrics or {}
+    print(f"Backfilled legacy rows={metrics.get('numTargetRowsUpdated', 'unknown')} in silver_prices")
 
 # COMMAND ----------
 # --- MERGE into silver_prices on (security_sk, date) ---
+target = DeltaTable.forName(spark, "silver_prices")
 (
-    DeltaTable.forName(spark, "silver_prices")
+    target
     .alias("t")
     .merge(
         silver_df.alias("s"),
@@ -275,5 +293,8 @@ if legacy_resolved.limit(1).count() > 0:
     .whenNotMatchedInsertAll()
     .execute()
 )
-print(f"Merged {silver_df.count()} rows into silver_prices")
-print(f"silver_prices total: {spark.table('silver_prices').count()} rows")
+metrics = target.history(1).select("operationMetrics").first().operationMetrics or {}
+print(f"Merged source_rows={metrics.get('numSourceRows', 'unknown')} into silver_prices")
+dq_fails.unpersist()
+dq_pass.unpersist()
+bronze_df.unpersist()

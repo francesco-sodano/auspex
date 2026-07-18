@@ -13,17 +13,19 @@ from pyspark.sql.types import (
 )
 
 # COMMAND ----------
-# --- Parameters ---
-def _widget(name, default):
-    try:
-        return mssparkutils.widgets.get(name)
-    except Exception:
-        return default
-
-
+# --- Parameters: mark this cell as the Fabric parameter cell ---
 _today = date.today().isoformat()
-from_date = _widget("from_date", (date.today() - timedelta(days=7)).isoformat())
-to_date = _widget("to_date", _today)
+from_date = (date.today() - timedelta(days=7)).isoformat()
+to_date = _today
+
+# COMMAND ----------
+# --- Normalize and validate injected parameter values ---
+from_date = str(from_date)
+to_date = str(to_date)
+if date.fromisoformat(from_date) > date.fromisoformat(to_date):
+    raise ValueError("from_date must be on or before to_date")
+
+print(f"Window: {from_date} to {to_date}")
 
 # COMMAND ----------
 # --- Helpers ---
@@ -65,15 +67,17 @@ def _date_sk(col_name: str):
 
 
 def _merge_all(table_name: str, source_df, condition: str) -> None:
+    target = DeltaTable.forName(spark, table_name)
     (
-        DeltaTable.forName(spark, table_name)
+        target
         .alias("t")
         .merge(source_df.alias("s"), condition)
         .whenMatchedUpdateAll()
         .whenNotMatchedInsertAll()
         .execute()
     )
-    print(f"Merged {source_df.count()} rows into {table_name}")
+    metrics = target.history(1).select("operationMetrics").first().operationMetrics or {}
+    print(f"Merged source_rows={metrics.get('numSourceRows', 'unknown')} into {table_name}")
 
 
 for required in ["dim_security", "dim_date", "dim_source"]:
@@ -100,7 +104,7 @@ raw = raw_lines.select(
     F.get_json_object("raw_json", "$.record.payload").alias("payload_json"),
     F.upper(F.get_json_object("raw_json", "$.record.symbol")).alias("finnhub_symbol"),
     F.get_json_object("raw_json", "$.record.article").alias("article_json"),
-)
+).cache()
 print(f"Alpha Vantage bronze records: {raw.count()}")
 
 security_lookup = (
@@ -218,7 +222,7 @@ fundamentals_df = (
     )
     .dropDuplicates(["security_sk", "date_sk"])
 )
-if fundamentals_df.count():
+if not fundamentals_df.isEmpty():
     _merge_all("fact_fundamentals", fundamentals_df, "t.security_sk = s.security_sk AND t.date_sk = s.date_sk")
 
 spark.sql("""
@@ -237,7 +241,7 @@ latest_fundamentals_df = spark.sql("""
     ) latest
       ON f.security_sk = latest.security_sk AND f.date_sk = latest.date_sk
 """)
-if latest_fundamentals_df.count():
+if not latest_fundamentals_df.isEmpty():
     latest_fundamentals_df.write.format("delta").mode("append").saveAsTable("v_fundamentals_latest")
 
 # COMMAND ----------
@@ -307,9 +311,9 @@ finnhub_news = (
     .withColumn("relevance", F.lit(None).cast(DecimalType(5, 4)))
     .dropDuplicates(["news_sk", "security_sk"])
 )
-news = av_news.unionByName(finnhub_news.select(av_news.columns), allowMissingColumns=True)
+news = av_news.unionByName(finnhub_news.select(av_news.columns), allowMissingColumns=True).cache()
 company_news_df = news.select("news_sk", "security_sk", "date_sk", "title", "summary", "url", "source", "source_sk", "event_date", "knowledge_date")
-if company_news_df.count():
+if not company_news_df.isEmpty():
     _merge_all("fact_company_news", company_news_df, "t.news_sk = s.news_sk AND t.security_sk = s.security_sk")
 
 news_sentiment_df = (
@@ -317,8 +321,9 @@ news_sentiment_df = (
     .withColumn("title_hash", F.sha2(F.concat_ws("|", F.col("title"), F.col("url")), 256))
     .select("news_sk", "security_sk", "date_sk", "sentiment", "relevance", "title_hash", "url", "source_sk", "event_date", "knowledge_date")
 )
-if news_sentiment_df.count():
+if not news_sentiment_df.isEmpty():
     _merge_all("fact_news_sentiment", news_sentiment_df, "t.news_sk = s.news_sk AND t.security_sk = s.security_sk")
+news.unpersist()
 
 # COMMAND ----------
 # --- fact_macro + fact_fx_rate ---
@@ -339,7 +344,7 @@ macro_df = (
     .select("indicator_code", "date_sk", "value", "source_sk", "event_date", "knowledge_date")
     .dropDuplicates(["indicator_code", "date_sk"])
 )
-if macro_df.count():
+if not macro_df.isEmpty():
     _merge_all("fact_macro", macro_df, "t.indicator_code = s.indicator_code AND t.date_sk = s.date_sk")
 
 fx_df = (
@@ -359,7 +364,7 @@ fx_df = (
     .select("ccy_pair", "date_sk", "rate", "source_sk", "event_date", "knowledge_date")
     .dropDuplicates(["ccy_pair", "date_sk"])
 )
-if fx_df.count():
+if not fx_df.isEmpty():
     _merge_all("fact_fx_rate", fx_df, "t.ccy_pair = s.ccy_pair AND t.date_sk = s.date_sk")
 
 # COMMAND ----------
@@ -392,7 +397,7 @@ inst_df = (
     )
     .dropDuplicates(["accession_no"])
 )
-if inst_df.count():
+if not inst_df.isEmpty():
     _merge_all("fact_institutional_holding", inst_df, "t.accession_no = s.accession_no")
 
 spark.sql("""
@@ -424,16 +429,16 @@ etf_df = (
     .select("theme_id", "etf_symbol", "security_sk", "weight", "is_ground_truth", "source_sk", "event_date", "knowledge_date")
     .dropDuplicates(["theme_id", "security_sk"])
 )
-if etf_df.count():
+if not etf_df.isEmpty():
     _merge_all("fact_theme_membership", etf_df, "t.theme_id = s.theme_id AND t.security_sk = s.security_sk")
 
 # COMMAND ----------
 # --- Validation summary ---
-for table_name in [
+updated_tables = [
     "fact_fundamentals", "fact_company_news", "fact_news_sentiment", "fact_macro",
     "fact_fx_rate", "fact_institutional_holding", "fact_theme_membership",
-]:
-    print(f"{table_name}: {spark.table(table_name).count()} rows")
+]
+print(f"E8 Alpha Vantage tables updated: {', '.join(updated_tables)}")
 
 missing_pit = spark.sql("""
     SELECT SUM(n) AS n
@@ -450,3 +455,4 @@ missing_pit = spark.sql("""
 print(f"E8 Alpha Vantage validation: missing_pit={missing_pit}")
 if missing_pit:
     raise RuntimeError(f"E8 Alpha Vantage validation failed: missing_pit={missing_pit}")
+raw.unpersist()

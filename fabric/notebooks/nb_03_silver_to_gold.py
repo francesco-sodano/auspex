@@ -43,15 +43,17 @@ def _date_sk(col_name: str):
 
 
 def _merge_all(table_name: str, source_df, condition: str) -> None:
+    target = DeltaTable.forName(spark, table_name)
     (
-        DeltaTable.forName(spark, table_name)
+        target
         .alias("t")
         .merge(source_df.alias("s"), condition)
         .whenMatchedUpdateAll()
         .whenNotMatchedInsertAll()
         .execute()
     )
-    print(f"Merged {source_df.count()} rows into {table_name}")
+    metrics = target.history(1).select("operationMetrics").first().operationMetrics or {}
+    print(f"Merged source_rows={metrics.get('numSourceRows', 'unknown')} into {table_name}")
 
 
 for required in ["dim_security", "silver_insider_txn", "silver_prices"]:
@@ -332,13 +334,13 @@ _merge_all("fact_insider_txn", insider_df, "t.insider_txn_sk = s.insider_txn_sk"
 
 # COMMAND ----------
 # --- E5 validation summary ---
-for table_name in [
+updated_tables = [
     "dim_security", "dim_date", "dim_source", "dim_entity",
     "fact_market_daily", "fact_insider_txn",
     "fact_institutional_holding", "fact_ownership_event", "fact_news_sentiment",
     "fact_contract_award", "fact_macro", "fact_fx_rate",
-]:
-    print(f"{table_name}: {spark.table(table_name).count()} rows")
+]
+print(f"E5 tables ready: {', '.join(updated_tables)}")
 
 orphan_market = spark.sql("""
     SELECT COUNT(*) AS n
