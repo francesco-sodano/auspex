@@ -20,11 +20,21 @@
 # META   }
 # META }
 
+
 # CELL ********************
 
 # Fabric Notebook: nb_06_sec_filings_to_gold
 # Reads E8 SEC filing bronze records and writes ownership/catalyst placeholder facts.
 # Attaches to: auspex_bronze (default lakehouse)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
 
 from datetime import date, timedelta
 from delta.tables import DeltaTable
@@ -38,18 +48,29 @@ from pyspark.sql.types import BooleanType, DecimalType, IntegerType, LongType, S
 # META   "language_group": "synapse_pyspark"
 # META }
 
+# PARAMETERS CELL ********************
+
+# --- Parameters: mark this cell as the Fabric parameter cell ---
+_today = date.today().isoformat()
+from_date = (date.today() - timedelta(days=7)).isoformat()
+to_date = _today
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
 # CELL ********************
 
-def _widget(name, default):
-    try:
-        return mssparkutils.widgets.get(name)
-    except Exception:
-        return default
+# --- Normalize and validate injected parameter values ---
+from_date = str(from_date)
+to_date = str(to_date)
+if date.fromisoformat(from_date) > date.fromisoformat(to_date):
+    raise ValueError("from_date must be on or before to_date")
 
-
-_today = date.today().isoformat()
-from_date = _widget("from_date", (date.today() - timedelta(days=7)).isoformat())
-to_date = _widget("to_date", _today)
+print(f"Window: {from_date} to {to_date}")
 
 # METADATA ********************
 
@@ -61,6 +82,11 @@ to_date = _widget("to_date", _today)
 # CELL ********************
 
 _MAX_BIGINT = 9223372036854775807
+
+
+def _require_table(table_name: str) -> None:
+    if not spark.catalog.tableExists(table_name):
+        raise RuntimeError(f"Required upstream table is missing: {table_name}")
 
 
 def _date_paths(source: str):
@@ -93,15 +119,24 @@ def _date_sk(col_name: str):
 
 
 def _merge_all(table_name: str, source_df, condition: str) -> None:
+    target = DeltaTable.forName(spark, table_name)
     (
-        DeltaTable.forName(spark, table_name)
+        target
         .alias("t")
         .merge(source_df.alias("s"), condition)
         .whenMatchedUpdateAll()
         .whenNotMatchedInsertAll()
         .execute()
     )
-    print(f"Merged {source_df.count()} rows into {table_name}")
+    metrics = target.history(1).select("operationMetrics").first().operationMetrics or {}
+    print(f"Merged source_rows={metrics.get('numSourceRows', 'unknown')} into {table_name}")
+
+
+for required in [
+    "dim_security", "dim_source", "fact_institutional_holding",
+    "fact_ownership_event",
+]:
+    _require_table(required)
 
 # METADATA ********************
 
@@ -130,6 +165,7 @@ bronze = (
     )
     .filter(F.col("accession_no").isNotNull())
     .dropDuplicates(["source_id", "accession_no"])
+    .cache()
 )
 print(f"E8 SEC bronze filings: {bronze.count()}")
 
@@ -139,7 +175,6 @@ security_lookup = (
     .select("security_sk", "ticker", "cik")
 )
 
-source_lookup = spark.table("dim_source").select("source_sk", "source_id")
 source_seed_schema = "source_sk INT, source_id STRING, source_type STRING, latency_class STRING, reliability_weight DECIMAL(3,2), source_class STRING"
 source_seed = spark.createDataFrame([
     (7, "sec_13f", "filing", "quarterly", None, "public_official"),
@@ -185,7 +220,7 @@ filing_event_df = (
     .withColumn("knowledge_date", F.to_date("file_date"))
     .select("filing_event_sk", "accession_no", "filing_type", "filer_name", "source_sk", "event_date", "knowledge_date")
 )
-if filing_event_df.count():
+if not filing_event_df.isEmpty():
     _merge_all("fact_sec_filing_event", filing_event_df, "t.filing_event_sk = s.filing_event_sk")
 
 ownership_df = (
@@ -201,7 +236,7 @@ ownership_df = (
     .withColumn("is_activist", F.col("filing_type").contains("13D").cast(BooleanType()))
     .select("security_sk", "entity_sk", "date_sk", "pct_owned", "filing_type", "is_activist", "accession_no", "source_sk", "event_date", "knowledge_date")
 )
-if ownership_df.count():
+if not ownership_df.isEmpty():
     _merge_all("fact_ownership_event", ownership_df, "t.accession_no = s.accession_no")
 
 spark.sql("""
@@ -226,7 +261,7 @@ material_event_df = (
     .withColumn("description", F.col("display_names"))
     .select("event_sk", "security_sk", "date_sk", "accession_no", "filing_type", "description", "source_sk", "event_date", "knowledge_date")
 )
-if material_event_df.count():
+if not material_event_df.isEmpty():
     _merge_all("fact_material_event", material_event_df, "t.event_sk = s.event_sk")
 
 # METADATA ********************
@@ -249,14 +284,11 @@ missing_pit = spark.sql("""
 """).collect()[0].n
 print(
     "E8 SEC validation: "
-    f"fact_institutional_holding={spark.table('fact_institutional_holding').count()}, "
-    f"fact_ownership_event={spark.table('fact_ownership_event').count()}, "
-    f"fact_material_event={spark.table('fact_material_event').count()}, "
-    f"fact_sec_filing_event={spark.table('fact_sec_filing_event').count()}, "
     f"missing_pit={missing_pit}"
 )
 if missing_pit:
     raise RuntimeError(f"E8 SEC validation failed: missing_pit={missing_pit}")
+bronze.unpersist()
 
 # METADATA ********************
 
