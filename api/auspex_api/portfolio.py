@@ -1410,6 +1410,10 @@ class PortfolioService:
         missing_capital_fx: set[str] = set()
         valuation_dates: list[str] = []
         price_dates: list[str] = []
+        transactions_by_id = {
+            transaction.transaction_id: transaction
+            for transaction in transactions
+        }
         for transaction in transactions:
             cash_amount = Decimal(transaction.cash_amount)
             fees_amount = Decimal(transaction.fees)
@@ -1434,6 +1438,16 @@ class PortfolioService:
             if capital_amount is not None:
                 conversion = None
                 if (
+                    transaction.source_currency == base_currency
+                    and transaction.source_amount is not None
+                ):
+                    conversion = (
+                        Decimal(transaction.source_amount),
+                        transaction.event_date,
+                    )
+                elif transaction.currency == base_currency:
+                    conversion = (capital_amount, transaction.event_date)
+                elif (
                     transaction.fx_rate_to_base is not None
                     and transaction.base_currency == base_currency
                 ):
@@ -1441,7 +1455,19 @@ class PortfolioService:
                         capital_amount * Decimal(transaction.fx_rate_to_base),
                         transaction.event_date,
                     )
-                else:
+                elif transaction.linked_transaction_id is not None:
+                    parent = transactions_by_id.get(transaction.linked_transaction_id)
+                    if (
+                        parent is not None
+                        and parent.source_currency == base_currency
+                        and parent.currency == transaction.currency
+                        and parent.fx_rate_to_settlement is not None
+                    ):
+                        conversion = (
+                            capital_amount / Decimal(parent.fx_rate_to_settlement),
+                            transaction.event_date,
+                        )
+                if conversion is None:
                     conversion = self._convert(
                         capital_amount,
                         transaction.currency,
@@ -1473,6 +1499,8 @@ class PortfolioService:
         cash_exposure_base: dict[str, Decimal] = {}
         missing_cash_fx: set[str] = set()
         for currency, amount in cash_by_currency.items():
+            if amount == 0:
+                continue
             conversion = self._convert(amount, currency, base_currency)
             if conversion is None:
                 pair = f"{currency}/{base_currency}"

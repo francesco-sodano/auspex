@@ -1209,14 +1209,11 @@ class E12TransactionTests(unittest.TestCase):
         service.create_transaction(
             self.user_a,
             transaction_payload(
-                "historic-chf-lot",
-                "OPENING_POSITION",
+                "historic-chf-cash",
+                "OPENING_CASH",
                 event_date="2025-11-14",
-                security_code="MSFT",
-                quantity="1",
-                price="300",
-                settlement_currency="CHF",
-                fx_rate_to_settlement="0.80",
+                currency="CHF",
+                amount="100",
             ),
         )
 
@@ -1224,13 +1221,50 @@ class E12TransactionTests(unittest.TestCase):
         ledger = service.quick_summary(self.user_a)
 
         self.assertEqual(summary["status"], "ready")
-        self.assertEqual(summary["total_value_base"], "420.00")
+        self.assertEqual(summary["total_value_base"], "125.00")
         self.assertIsNone(summary["net_contributed_capital_base"])
         self.assertIsNone(summary["total_earnings_base"])
         self.assertEqual(summary["coverage"]["missing_fx"], [])
         self.assertEqual(summary["coverage"]["missing_capital_fx"], ["CHF/USD"])
         self.assertTrue(ledger["allocation"]["complete"])
         self.assertEqual(ledger["total_value"]["status"], "ready")
+
+    def test_entered_broker_fx_values_usd_lot_and_chf_costs_without_market_history(self):
+        market_data = InMemoryMarketDataRepository(
+            quotes={"MSFT": {"price": "420.00", "currency": "USD", "as_of": "2026-07-21"}},
+        )
+        service = PortfolioService(
+            self.identity,
+            self.transactions,
+            security_catalog=self.catalog,
+            universe=self.universe,
+            market_data=market_data,
+            clock=lambda: NOW,
+        )
+        service.create_transaction(
+            self.user_a,
+            transaction_payload(
+                "broker-fx-lot",
+                "OPENING_POSITION",
+                event_date="2025-11-14",
+                security_code="MSFT",
+                quantity="1",
+                price="300",
+                settlement_currency="CHF",
+                fx_rate_to_settlement="0.80",
+                cost_components=[
+                    {"category": "BROKER_COMMISSION", "amount": "8", "currency": "CHF"},
+                ],
+            ),
+        )
+
+        summary = service.portfolio_summary(self.user_a, reporting_currency="USD")
+
+        self.assertEqual(summary["status"], "ready")
+        self.assertEqual(summary["total_value_base"], "420.00")
+        self.assertEqual(summary["net_contributed_capital_base"], "310.00")
+        self.assertEqual(summary["total_earnings_base"], "110.00")
+        self.assertEqual(summary["coverage"]["missing_capital_fx"], [])
 
     def test_portfolio_summary_marks_old_complete_prices_stale(self):
         market_data = InMemoryMarketDataRepository(

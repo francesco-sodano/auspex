@@ -1151,7 +1151,9 @@ function TransactionsPage({ user }: { user: AppUser }) {
   const heldSecurity = heldSecurityTypes.has(transactionType)
   const selectedHolding = summary.positions.find((position) => position.security_code === securityCode)
   const availableCash = summary.cash_by_currency[transactionCurrency] || '0.00'
-  const showFxRate = fxCapitalTypes.has(transactionType) && transactionCurrency !== user.base_currency
+  const showFxRate = fxCapitalTypes.has(transactionType)
+    && transactionCurrency !== user.base_currency
+    && !(securityReference && resolvedSecurity?.currency === user.base_currency)
   const showSettlementFx = securityReference && resolvedSecurity && transactionCurrency !== resolvedSecurity.currency
   function addCostComponent() {
     if (costComponents.length >= 20) return
