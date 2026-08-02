@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_07_contracts_to_gold"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "014929f6-0dfa-4a7b-8871-d97f9156cdf2"
+  }
+}

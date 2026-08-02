@@ -1,0 +1,6 @@
+{
+  "id": "69ac5142-7ad8-49db-9b88-62b5d53fa2da",
+  "dataBindingTable": {"workspaceId": "00000000-0000-4000-8000-000000000001", "itemId": "00000000-0000-4000-8000-000000000002", "sourceTableName": "iq_security_in_theme", "sourceSchema": "dbo", "sourceType": "LakehouseTable"},
+  "sourceKeyRefBindings": [{"sourceColumnName": "security_sk", "targetPropertyId": "711000000000000001"}],
+  "targetKeyRefBindings": [{"sourceColumnName": "theme_id", "targetPropertyId": "731000000000000001"}]
+}

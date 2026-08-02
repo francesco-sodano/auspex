@@ -1,0 +1,285 @@
+[
+  {
+    "id": "sec_form4",
+    "source_id": "sec_form4",
+    "name": "SEC EDGAR Form 4 (Insider Transactions)",
+    "type": "filing",
+    "schedule": "daily",
+    "base_url": "https://efts.sec.gov/LATEST/search-index",
+    "auth_secret_ref": "EDGAR-USER-AGENT",
+    "latency_class": "daily",
+    "reliability_weight": 1.0,
+    "rate_limit": {
+      "requests_per_minute": 60
+    },
+    "implementation_status": "implemented",
+    "enabled": true,
+    "schema_version": 1
+  },
+  {
+    "id": "sec_13f",
+    "source_id": "sec_13f",
+    "name": "SEC EDGAR 13F (Institutional Holdings)",
+    "type": "filing",
+    "schedule": "quarterly",
+    "base_url": "https://efts.sec.gov/LATEST/search-index",
+    "auth_secret_ref": "EDGAR-USER-AGENT",
+    "latency_class": "quarterly",
+    "reliability_weight": 1.0,
+    "rate_limit": {
+      "requests_per_minute": 60
+    },
+    "implementation_status": "implemented",
+    "enabled": true,
+    "schema_version": 2
+  },
+  {
+    "id": "sec_13dg",
+    "source_id": "sec_13dg",
+    "name": "SEC EDGAR 13D/13G (Ownership Events)",
+    "type": "filing",
+    "schedule": "daily",
+    "base_url": "https://efts.sec.gov/LATEST/search-index",
+    "auth_secret_ref": "EDGAR-USER-AGENT",
+    "latency_class": "daily",
+    "reliability_weight": 1.0,
+    "rate_limit": {
+      "requests_per_minute": 60
+    },
+    "implementation_status": "implemented",
+    "enabled": true,
+    "schema_version": 2
+  },
+  {
+    "id": "sec_8k",
+    "source_id": "sec_8k",
+    "name": "SEC EDGAR 8-K (Material Events)",
+    "type": "filing",
+    "schedule": "daily",
+    "base_url": "https://efts.sec.gov/LATEST/search-index",
+    "auth_secret_ref": "EDGAR-USER-AGENT",
+    "latency_class": "daily",
+    "reliability_weight": 1.0,
+    "rate_limit": {
+      "requests_per_minute": 60
+    },
+    "implementation_status": "implemented",
+    "enabled": true,
+    "schema_version": 2
+  },
+  {
+    "id": "sec_s1",
+    "source_id": "sec_s1",
+    "name": "SEC EDGAR S-1/S-1-A/424B (IPO Registrations)",
+    "type": "filing",
+    "schedule": "daily",
+    "base_url": "https://efts.sec.gov/LATEST/search-index",
+    "auth_secret_ref": "EDGAR-USER-AGENT",
+    "latency_class": "daily",
+    "reliability_weight": 1.0,
+    "rate_limit": {
+      "requests_per_minute": 60
+    },
+    "implementation_status": "implemented",
+    "enabled": true,
+    "schema_version": 2
+  },
+  {
+    "id": "prices_eod",
+    "source_id": "prices_eod",
+    "name": "Alpha Vantage EOD Prices",
+    "type": "price",
+    "schedule": "daily",
+    "base_url": "https://www.alphavantage.co/query",
+    "auth_secret_ref": "ALPHAVANTAGE-API-KEY",
+    "latency_class": "daily",
+    "reliability_weight": 0.85,
+    "rate_limit": {
+      "requests_per_minute": 75
+    },
+    "implementation_status": "implemented",
+    "enabled": true,
+    "schema_version": 1
+  },
+  {
+    "id": "prices_yf",
+    "source_id": "prices_yf",
+    "name": "Yahoo Finance Prices (fallback, unofficial)",
+    "type": "price",
+    "schedule": "daily",
+    "base_url": "https://query1.finance.yahoo.com",
+    "auth_secret_ref": null,
+    "latency_class": "daily",
+    "reliability_weight": 0.4,
+    "implementation_status": "fallback_disabled",
+    "enabled": false,
+    "schema_version": 1
+  },
+  {
+    "id": "alpha_vantage",
+    "source_id": "alpha_vantage",
+    "name": "Alpha Vantage (fundamentals, FX, news-sentiment, risk-free)",
+    "type": "fundamental",
+    "schedule": "daily",
+    "base_url": "https://www.alphavantage.co/query",
+    "auth_secret_ref": "ALPHAVANTAGE-API-KEY",
+    "latency_class": "daily",
+    "reliability_weight": 0.9,
+    "rate_limit": {
+      "requests_per_minute": 75
+    },
+    "etf_symbols": ["SMH", "XLK", "XLE", "XLV", "DTCR", "PAVE", "GRID"],
+    "profiles": {
+      "news_daily": {"schedule": "daily", "universe_tier": "active", "symbol_limit": 200},
+      "macro_daily": {"schedule": "daily"},
+      "themes_weekly": {"schedule": "weekly"},
+      "fundamentals_quarterly": {"schedule": "quarterly", "universe_tier": "coverage", "symbol_limit": 50},
+      "holdings_quarterly": {"schedule": "quarterly", "universe_tier": "coverage", "symbol_limit": 200}
+    },
+    "implementation_status": "implemented",
+    "enabled": true,
+    "schema_version": 1
+  },
+  {
+    "id": "fundamentals",
+    "source_id": "fundamentals",
+    "name": "FMP Fundamentals (fallback to Alpha Vantage)",
+    "type": "fundamental",
+    "schedule": "daily",
+    "base_url": "https://financialmodelingprep.com/api/v3",
+    "auth_secret_ref": "FMP-API-KEY",
+    "latency_class": "daily",
+    "reliability_weight": 0.8,
+    "implementation_status": "planned",
+    "enabled": false,
+    "schema_version": 1
+  },
+  {
+    "id": "news",
+    "source_id": "news",
+    "name": "Finnhub Company News",
+    "type": "news",
+    "schedule": "daily",
+    "base_url": "https://finnhub.io/api/v1",
+    "auth_secret_ref": "FINNHUB-API-KEY",
+    "latency_class": "daily",
+    "reliability_weight": 0.75,
+    "rate_limit": {
+      "requests_per_minute": 60
+    },
+    "max_lookback_days": 365,
+    "implementation_status": "implemented",
+    "enabled": true,
+    "schema_version": 1
+  },
+  {
+    "id": "contracts",
+    "source_id": "contracts",
+    "name": "USASpending.gov Contract Awards",
+    "type": "contract",
+    "schedule": "weekly",
+    "base_url": "https://api.usaspending.gov/api/v2",
+    "auth_secret_ref": null,
+    "latency_class": "weekly",
+    "reliability_weight": 0.95,
+    "search_terms": [
+      "artificial intelligence",
+      "semiconductor",
+      "cloud computing",
+      "data center",
+      "electrical infrastructure",
+      "energy infrastructure",
+      "healthcare technology"
+    ],
+    "implementation_status": "implemented",
+    "enabled": true,
+    "schema_version": 2
+  },
+  {
+    "id": "etf_holdings",
+    "source_id": "etf_holdings",
+    "name": "Alpha Vantage ETF Holdings (TRS ground truth)",
+    "type": "etf",
+    "schedule": "weekly",
+    "base_url": "https://www.alphavantage.co/query?function=ETF_PROFILE",
+    "auth_secret_ref": "ALPHAVANTAGE-API-KEY",
+    "latency_class": "weekly",
+    "reliability_weight": 0.95,
+    "rate_limit": {
+      "requests_per_minute": 75
+    },
+    "etf_symbols": ["SMH", "XLK", "XLE", "XLV", "DTCR", "PAVE", "GRID"],
+    "implementation_status": "implemented",
+    "enabled": true,
+    "schema_version": 1
+  },
+  {
+    "id": "benchmark_prices",
+    "source_id": "benchmark_prices",
+    "name": "Alpha Vantage Adjusted ETF Benchmarks",
+    "type": "price",
+    "schedule": "daily",
+    "base_url": "https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED",
+    "auth_secret_ref": "ALPHAVANTAGE-API-KEY",
+    "latency_class": "daily",
+    "reliability_weight": 0.9,
+    "rate_limit": {"requests_per_minute": 75},
+    "etf_symbols": ["SMH", "XLK", "XLE", "XLV", "DTCR", "PAVE", "GRID"],
+    "implementation_status": "implemented",
+    "enabled": true,
+    "schema_version": 1
+  },
+  {
+    "id": "sec_companyfacts",
+    "source_id": "sec_companyfacts",
+    "name": "SEC EDGAR Companyfacts (Historical Fundamentals)",
+    "type": "fundamental",
+    "schedule": "daily",
+    "base_url": "https://data.sec.gov/api/xbrl/companyfacts",
+    "auth_secret_ref": "EDGAR-USER-AGENT",
+    "latency_class": "filing",
+    "reliability_weight": 1.0,
+    "rate_limit": {"requests_per_minute": 60},
+    "implementation_status": "implemented",
+    "enabled": true,
+    "schema_version": 1
+  },
+  {
+    "id": "sec_nport",
+    "source_id": "sec_nport",
+    "name": "SEC EDGAR N-PORT (Historical ETF Holdings)",
+    "type": "etf",
+    "schedule": "quarterly",
+    "base_url": "https://data.sec.gov/submissions",
+    "auth_secret_ref": "EDGAR-USER-AGENT",
+    "latency_class": "quarterly",
+    "reliability_weight": 1.0,
+    "rate_limit": {"requests_per_minute": 60},
+    "etf_series": [
+      {"symbol": "XLE", "cik": "0001064641", "series_id": "S000006410", "class_id": "C000017596"},
+      {"symbol": "XLK", "cik": "0001064641", "series_id": "S000006415", "class_id": "C000017601"},
+      {"symbol": "SMH", "cik": "0001137360", "series_id": "S000034411", "class_id": "C000105869"},
+      {"symbol": "XLV", "cik": "0001064641", "series_id": "S000006412", "class_id": "C000017598"},
+      {"symbol": "DTCR", "cik": "0001432353", "series_id": "S000069709", "class_id": "C000222332"},
+      {"symbol": "PAVE", "cik": "0001432353", "series_id": "S000056509", "class_id": "C000178804"},
+      {"symbol": "GRID", "cik": "0001364608", "series_id": "S000026919", "class_id": "C000081044"}
+    ],
+    "implementation_status": "implemented",
+    "enabled": true,
+    "schema_version": 1
+  },
+  {
+    "id": "portfolio",
+    "source_id": "portfolio",
+    "name": "Manual Portfolio Entry",
+    "type": "portfolio",
+    "schedule": "on_change",
+    "base_url": null,
+    "auth_secret_ref": null,
+    "latency_class": "on_change",
+    "reliability_weight": 1.0,
+    "implementation_status": "implemented",
+    "enabled": true,
+    "schema_version": 5
+  }
+]

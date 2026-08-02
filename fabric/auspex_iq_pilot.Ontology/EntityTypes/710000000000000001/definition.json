@@ -1,0 +1,20 @@
+{
+  "id": "710000000000000001",
+  "namespace": "usertypes",
+  "baseEntityTypeId": null,
+  "name": "Security",
+  "entityIdParts": ["711000000000000001"],
+  "displayNamePropertyId": "711000000000000002",
+  "namespaceType": "Custom",
+  "visibility": "Visible",
+  "properties": [
+    {"id": "711000000000000001", "name": "SecuritySk", "redefines": null, "baseTypeNamespaceType": null, "valueType": "BigInt"},
+    {"id": "711000000000000002", "name": "Symbol", "redefines": null, "baseTypeNamespaceType": null, "valueType": "String"},
+    {"id": "711000000000000003", "name": "CompanyName", "redefines": null, "baseTypeNamespaceType": null, "valueType": "String"},
+    {"id": "711000000000000004", "name": "Sector", "redefines": null, "baseTypeNamespaceType": null, "valueType": "String"},
+    {"id": "711000000000000005", "name": "Industry", "redefines": null, "baseTypeNamespaceType": null, "valueType": "String"},
+    {"id": "711000000000000006", "name": "Exchange", "redefines": null, "baseTypeNamespaceType": null, "valueType": "String"},
+    {"id": "711000000000000007", "name": "Currency", "redefines": null, "baseTypeNamespaceType": null, "valueType": "String"}
+  ],
+  "timeseriesProperties": []
+}

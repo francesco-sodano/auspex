@@ -1,0 +1,1 @@
+"""SEC Company Facts connector package."""

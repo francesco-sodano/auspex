@@ -1,0 +1,19 @@
+{
+  "id": "963d041b-0851-4de2-9e36-f274db6feb13",
+  "dataBindingConfiguration": {
+    "dataBindingType": "NonTimeSeries",
+    "propertyBindings": [
+      {"sourceColumnName": "company_sk", "targetPropertyId": "721000000000000001"},
+      {"sourceColumnName": "company_name", "targetPropertyId": "721000000000000002"},
+      {"sourceColumnName": "gics_sector", "targetPropertyId": "721000000000000003"},
+      {"sourceColumnName": "gics_industry", "targetPropertyId": "721000000000000004"}
+    ],
+    "sourceTableProperties": {
+      "sourceType": "LakehouseTable",
+      "workspaceId": "00000000-0000-4000-8000-000000000001",
+      "itemId": "00000000-0000-4000-8000-000000000002",
+      "sourceTableName": "iq_company",
+      "sourceSchema": "dbo"
+    }
+  }
+}

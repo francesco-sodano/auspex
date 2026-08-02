@@ -1,0 +1,610 @@
+import json
+import logging
+import os
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from functools import lru_cache
+from pathlib import Path
+
+import azure.durable_functions as df
+import azure.functions as func
+from azure.identity import DefaultAzureCredential
+
+from alpha_vantage.connector import AlphaVantageConnector
+from benchmark_prices.connector import BenchmarkPricesConnector
+from contracts.connector import ContractsConnector
+from etf_holdings.connector import EtfHoldingsConnector
+from news.connector import NewsConnector
+from portfolio.connector import PortfolioConnector
+from prices_eod.connector import PricesEodConnector
+from prices_eod.blueprint import bp as prices_eod_bp
+from sec_13dg.connector import Sec13DgConnector
+from sec_13f.connector import Sec13FConnector
+from sec_companyfacts.connector import SecCompanyFactsConnector
+from sec_nport.connector import SecNportConnector
+from sec_8k.connector import Sec8KConnector
+from sec_form4.connector import SecForm4Connector
+from sec_form4.blueprint import bp as sec_form4_bp
+from sec_s1.connector import SecS1Connector
+from shared.clients import get_bronze_writer, get_control_plane
+from shared.daily_build import (
+	FabricDailyBuildClient,
+	alpha_vantage_profiles,
+	daily_build_orchestrator,
+	promote_daily_warehouse_snapshot,
+	scheduled_source_ids,
+)
+from shared.models import RunContext
+from search.clients import AzureOpenAIChat, AzureOpenAIEmbeddings, AzureSearchRestClient, load_index_schema
+from search.indexing import EvidenceIndexer
+from search.narrative import (
+	CosmosNarrativeFeatureCache,
+	NarrativeFeatureService,
+	build_narrative_projection,
+)
+from search.sentiment import (
+	CosmosSentimentCache,
+	SentimentService,
+	enrich_with_cached_sentiment,
+	page_evidence_documents,
+)
+
+app = df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
+app.register_blueprint(sec_form4_bp)
+app.register_blueprint(prices_eod_bp)
+
+_CONNECTORS = {
+	"sec_form4": lambda cp, bw, body, source: SecForm4Connector(cp, bw, source_config=source, since_date=body.get("since_date") or None, to_date=body.get("to_date") or None),
+	"sec_13f": lambda cp, bw, body, source: Sec13FConnector(cp, bw, since_date=body.get("since_date") or None, to_date=body.get("to_date") or None, filing_offset=body.get("filing_offset") or 0, filing_limit=body.get("filing_limit"), source_config=source),
+	"sec_13dg": lambda cp, bw, body, source: Sec13DgConnector(cp, bw, since_date=body.get("since_date") or None, to_date=body.get("to_date") or None, filing_offset=body.get("filing_offset") or 0, filing_limit=body.get("filing_limit"), source_config=source),
+	"sec_8k": lambda cp, bw, body, source: Sec8KConnector(cp, bw, since_date=body.get("since_date") or None, to_date=body.get("to_date") or None, filing_offset=body.get("filing_offset") or 0, filing_limit=body.get("filing_limit"), source_config=source),
+	"sec_s1": lambda cp, bw, body, source: SecS1Connector(cp, bw, since_date=body.get("since_date") or None, to_date=body.get("to_date") or None, filing_offset=body.get("filing_offset") or 0, filing_limit=body.get("filing_limit"), source_config=source),
+	"prices_eod": lambda cp, bw, body, source: PricesEodConnector(
+		cp,
+		bw,
+		symbols=body.get("symbols") or None,
+		since_date=body.get("since_date") or None,
+		to_date=body.get("to_date") or None,
+		symbol_offset=body.get("symbol_offset") or 0,
+		symbol_limit=body.get("symbol_limit") or None,
+		outputsize=body.get("outputsize") or None,
+		source_config=source,
+	),
+	"benchmark_prices": lambda cp, bw, body, source: BenchmarkPricesConnector(
+		cp,
+		bw,
+		symbols=body.get("symbols") or None,
+		etf_symbols=body.get("etf_symbols") or None,
+		since_date=body.get("since_date") or None,
+		to_date=body.get("to_date") or None,
+		symbol_offset=body.get("symbol_offset") or 0,
+		symbol_limit=body.get("symbol_limit") or None,
+		source_config=source,
+	),
+	"alpha_vantage": lambda cp, bw, body, source: AlphaVantageConnector(
+		cp,
+		bw,
+		symbols=body.get("symbols") or None,
+		etf_symbols=body.get("etf_symbols") or None,
+		since_date=body.get("since_date") or None,
+		symbol_offset=body.get("symbol_offset") or 0,
+		symbol_limit=body.get("symbol_limit") or None,
+		include_etfs=body.get("include_etfs"),
+		include_global=body.get("include_global"),
+		profile=body.get("profile") or "combined",
+		source_config=source,
+	),
+	"news": lambda cp, bw, body, source: NewsConnector(
+		cp,
+		bw,
+		symbols=body.get("symbols") or None,
+		since_date=body.get("since_date") or None,
+		to_date=body.get("to_date") or None,
+		symbol_offset=body.get("symbol_offset") or 0,
+		symbol_limit=body.get("symbol_limit") or None,
+		source_config=source,
+	),
+	"contracts": lambda cp, bw, body, source: ContractsConnector(
+		cp,
+		bw,
+		search_terms=body.get("search_terms") or None,
+		since_date=body.get("since_date") or None,
+		to_date=body.get("to_date") or None,
+		source_config=source,
+	),
+	"etf_holdings": lambda cp, bw, body, source: EtfHoldingsConnector(
+		cp,
+		bw,
+		etf_symbols=body.get("etf_symbols") or None,
+		source_config=source,
+	),
+	"sec_companyfacts": lambda cp, bw, body, source: SecCompanyFactsConnector(
+		cp,
+		bw,
+		symbols=body.get("symbols") or None,
+		since_date=body.get("since_date") or None,
+		to_date=body.get("to_date") or None,
+		symbol_offset=body.get("symbol_offset") or 0,
+		symbol_limit=body.get("symbol_limit") or None,
+		source_config=source,
+	),
+	"sec_nport": lambda cp, bw, body, source: SecNportConnector(
+		cp,
+		bw,
+		etf_series=body.get("etf_series") or None,
+		since_date=body.get("since_date") or None,
+		to_date=body.get("to_date") or None,
+		filing_offset=body.get("filing_offset") or 0,
+		filing_limit=body.get("filing_limit"),
+		source_config=source,
+	),
+	"portfolio": lambda cp, bw, body, source: PortfolioConnector(
+		cp,
+		bw,
+		source_config=source,
+	),
+}
+
+_EXPECTED_SCHEMA_VERSIONS = {
+	"benchmark_prices": 1,
+	"sec_companyfacts": 1,
+	"sec_nport": 1,
+	"sec_13f": 2,
+	"sec_13dg": 2,
+	"sec_8k": 2,
+	"sec_s1": 2,
+	"contracts": 2,
+	"portfolio": 5,
+}
+
+_SOURCE_SEEDS = {
+	source["source_id"]: source
+	for source in json.loads(
+		(Path(__file__).parent / "shared" / "sources_seed.json").read_text(encoding="utf-8")
+	)
+}
+
+def _json_response(payload: dict, status_code: int = 200) -> func.HttpResponse:
+	return func.HttpResponse(json.dumps(payload), mimetype="application/json", status_code=status_code)
+
+
+@lru_cache(maxsize=1)
+def _evidence_indexer() -> EvidenceIndexer:
+	search_endpoint = os.environ.get("AI_SEARCH_ENDPOINT", "").strip()
+	openai_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
+	index_name = os.environ.get("AI_SEARCH_EVIDENCE_INDEX", "idx-news-filings").strip()
+	embedding_deployment = os.environ.get(
+		"AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-large"
+	).strip()
+	if not search_endpoint or not openai_endpoint:
+		raise RuntimeError("AI_SEARCH_ENDPOINT and AZURE_OPENAI_ENDPOINT are required")
+	credential = DefaultAzureCredential()
+	return EvidenceIndexer(
+		AzureSearchRestClient(search_endpoint, index_name, credential=credential),
+		AzureOpenAIEmbeddings(openai_endpoint, embedding_deployment, credential=credential),
+		load_index_schema(openai_endpoint, embedding_deployment),
+	)
+
+
+@lru_cache(maxsize=1)
+def _sentiment_service() -> SentimentService:
+	openai_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
+	deployment = os.environ.get("AZURE_OPENAI_CHAT_DEPLOYMENT", "gpt-4o").strip()
+	model_version = os.environ.get(
+		"AZURE_OPENAI_CHAT_MODEL_VERSION", "gpt-4o:2024-11-20"
+	).strip()
+	if not openai_endpoint:
+		raise RuntimeError("AZURE_OPENAI_ENDPOINT is required")
+	credential = DefaultAzureCredential()
+	container = get_control_plane().container(
+		os.environ.get("SENTIMENT_CACHE_CONTAINER", "sentiment_cache")
+	)
+	return SentimentService(
+		AzureOpenAIChat(openai_endpoint, deployment, credential=credential),
+		CosmosSentimentCache(container),
+		model_version,
+	)
+
+
+def _narrative_prompt_path() -> Path:
+	local_path = Path(__file__).parent.parent / "prompts" / "narrative" / "e21_v1.txt"
+	deployed_path = Path(__file__).parent / "prompts" / "narrative" / "e21_v1.txt"
+	return local_path if local_path.exists() else deployed_path
+
+
+@lru_cache(maxsize=1)
+def _narrative_service() -> NarrativeFeatureService:
+	openai_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
+	deployment = os.environ.get("AZURE_OPENAI_CHAT_DEPLOYMENT", "gpt-4o").strip()
+	model_version = os.environ.get(
+		"AZURE_OPENAI_CHAT_MODEL_VERSION", "gpt-4o:2024-11-20"
+	).strip()
+	if not openai_endpoint:
+		raise RuntimeError("AZURE_OPENAI_ENDPOINT is required")
+	prompt_path = _narrative_prompt_path()
+	if not prompt_path.exists():
+		raise RuntimeError("E21 narrative prompt is missing")
+	credential = DefaultAzureCredential()
+	container = get_control_plane().container(
+		os.environ.get("NARRATIVE_FEATURE_CACHE_CONTAINER", "narrative_feature_cache")
+	)
+	return NarrativeFeatureService(
+		AzureOpenAIChat(openai_endpoint, deployment, credential=credential),
+		CosmosNarrativeFeatureCache(container),
+		model_version=model_version,
+		prompt_text=prompt_path.read_text(encoding="utf-8"),
+	)
+
+
+def _execute_connector(body: dict) -> tuple[dict, int]:
+	source_id = body.get("source_id")
+	if not source_id:
+		return {"status": "failed", "error": "source_id is required"}, 400
+
+	factory = _CONNECTORS.get(source_id)
+	if factory is None:
+		return {"source_id": source_id, "status": "failed", "error": "source is not implemented"}, 404
+
+	run_id = body.get("run_id") or f"{source_id}-{uuid.uuid4().hex[:12]}"
+	mode = body.get("mode") or "run"
+	if mode not in {"run", "backfill"}:
+		return {"run_id": run_id, "source_id": source_id, "status": "failed", "error": f"unsupported mode: {mode}"}, 400
+
+	cp = get_control_plane()
+	source = cp.get_source(source_id)
+	if source is None and source_id in _SOURCE_SEEDS:
+		source = dict(_SOURCE_SEEDS[source_id])
+		cp.upsert_source(source)
+	if source is None:
+		return {"run_id": run_id, "source_id": source_id, "status": "failed", "error": "source is not registered"}, 404
+	expected_schema_version = _EXPECTED_SCHEMA_VERSIONS.get(source_id)
+	if source_id == "portfolio":
+		source.update(_SOURCE_SEEDS["portfolio"])
+		cp.upsert_source(source)
+	canonical_seed = _SOURCE_SEEDS.get(source_id, {})
+	canonical_fields = (
+		"enabled", "schedule", "schema_version", "etf_symbols", "etf_series",
+		"profiles", "rate_limit", "max_lookback_days", "search_terms",
+	)
+	contract_changed = False
+	for field in canonical_fields:
+		canonical_value = canonical_seed.get(field)
+		if canonical_value is not None and source.get(field) != canonical_value:
+			source[field] = canonical_value
+			contract_changed = True
+	if expected_schema_version is not None and source.get("schema_version") != expected_schema_version:
+		source["schema_version"] = expected_schema_version
+		contract_changed = True
+	if contract_changed:
+		cp.upsert_source(source)
+	if not source.get("enabled", False):
+		return {
+			"run_id": run_id,
+			"source_id": source_id,
+			"schema_version": source.get("schema_version"),
+			"schedule": source.get("schedule"),
+			"status": "skipped",
+			"error": "source is disabled",
+		}, 200
+
+	connector = factory(cp, get_bronze_writer(), body, source)
+	result = connector.run(RunContext(run_id=run_id, source_id=source_id, mode=mode))
+	payload = {
+		"run_id": run_id,
+		"source_id": source_id,
+		"schema_version": source.get("schema_version"),
+		"status": result.status,
+		"records_in": result.records_in,
+		"bytes_written": result.bytes_written,
+		"error": result.error,
+		"has_more": result.has_more,
+	}
+	return payload, 500 if result.status == "failed" else 200
+
+
+@app.route(route="run", methods=["POST"])
+def run_connector(req: func.HttpRequest) -> func.HttpResponse:
+	body = req.get_json() if req.get_body() else {}
+	payload, status_code = _execute_connector(body)
+	return _json_response(payload, status_code)
+
+
+def _sync_serving_projections() -> dict:
+	cp = get_control_plane()
+	bw = get_bronze_writer()
+	security_documents = bw.read_serving_projection("security_catalog")
+	market_documents = bw.read_serving_projection("market_data")
+	if any(not str(document.get("id") or "").startswith(("ticker:", "isin:", "security:")) for document in security_documents):
+		raise ValueError("invalid security projection id")
+	if any(not str(document.get("id") or "").startswith(("quote:", "fx:", "score:security:")) for document in market_documents):
+		raise ValueError("invalid market projection id")
+	security_generations = {document.get("generation") for document in security_documents}
+	market_generations = {document.get("generation") for document in market_documents}
+	if len(security_generations) != 1 or None in security_generations:
+		raise ValueError("security projection generation is invalid")
+	if len(market_generations) != 1 or None in market_generations:
+		raise ValueError("market projection generation is invalid")
+	with ThreadPoolExecutor(max_workers=16) as executor:
+		list(executor.map(cp.upsert_security_catalog, security_documents))
+		list(executor.map(cp.upsert_market_data, market_documents))
+	deleted_security_documents = cp.delete_stale_projection_generation(
+		"security_catalog", next(iter(security_generations))
+	)
+	deleted_market_documents = cp.delete_stale_projection_generation(
+		"market_data", next(iter(market_generations))
+	)
+	return {
+		"status": "ok",
+		"security_documents": len(security_documents),
+		"market_documents": len(market_documents),
+		"deleted_security_documents": deleted_security_documents,
+		"deleted_market_documents": deleted_market_documents,
+	}
+
+
+@app.route(route="sync_serving_projections", methods=["POST"])
+def sync_serving_projections(req: func.HttpRequest) -> func.HttpResponse:
+	try:
+		return _json_response(_sync_serving_projections())
+	except ValueError as exc:
+		return _json_response({"status": "failed", "error": str(exc)}, 400)
+
+
+@app.route(route="serving_projection_status", methods=["GET"])
+def serving_projection_status(req: func.HttpRequest) -> func.HttpResponse:
+	cp = get_control_plane()
+	return _json_response({
+		"security_documents": cp.count_documents("security_catalog"),
+		"market_documents": cp.count_documents("market_data"),
+		"universe_symbols": cp.count_documents("ingestion_universe"),
+	})
+
+
+def _sync_evidence_index() -> dict:
+	documents = get_bronze_writer().read_serving_projection("evidence")
+	sentiment_documents = enrich_with_cached_sentiment(documents, _sentiment_service())
+	return {
+		"status": "ok",
+		"sentiment_documents": sentiment_documents,
+		**_evidence_indexer().sync(documents),
+	}
+
+
+@app.route(route="sync_evidence_index", methods=["POST"])
+def sync_evidence_index(req: func.HttpRequest) -> func.HttpResponse:
+	try:
+		return _json_response(_sync_evidence_index())
+	except ValueError as exc:
+		return _json_response({"status": "failed", "error": str(exc)}, 400)
+	except Exception as exc:
+		return _json_response({"status": "failed", "error": str(exc)}, 500)
+
+
+@app.route(route="score_evidence_sentiment", methods=["POST"])
+def score_evidence_sentiment(req: func.HttpRequest) -> func.HttpResponse:
+	try:
+		body = req.get_json() if req.get_body() else {}
+		limit = int(body.get("limit", 25))
+		if limit < 1 or limit > 200:
+			raise ValueError("limit must be between 1 and 200")
+		after_id = str(body.get("after_id") or "").strip()
+		documents, next_after_id, has_more = page_evidence_documents(
+			get_bronze_writer().read_serving_projection("evidence"),
+			limit=limit,
+			after_id=after_id,
+		)
+		cache_hits = 0
+		for document in documents:
+			_, cached = _sentiment_service().score(document)
+			cache_hits += int(cached)
+		return _json_response({
+			"status": "ok",
+			"documents": len(documents),
+			"cache_hits": cache_hits,
+			"scored": len(documents) - cache_hits,
+			"next_after_id": next_after_id,
+			"has_more": has_more,
+		})
+	except ValueError as exc:
+		return _json_response({"status": "failed", "error": str(exc)}, 400)
+	except Exception as exc:
+		return _json_response({"status": "failed", "error": str(exc)}, 500)
+
+
+@app.route(route="score_narrative_features", methods=["POST"])
+def score_narrative_features(req: func.HttpRequest) -> func.HttpResponse:
+	try:
+		body = req.get_json() if req.get_body() else {}
+		return _json_response(_score_narrative_page(body))
+	except ValueError as exc:
+		return _json_response({"status": "failed", "error": str(exc)}, 400)
+	except Exception as exc:
+		return _json_response({"status": "failed", "error": str(exc)}, 500)
+
+
+@app.route(route="publish_narrative_features", methods=["POST"])
+def publish_narrative_features(req: func.HttpRequest) -> func.HttpResponse:
+	try:
+		return _json_response(_publish_narrative_features())
+	except ValueError as exc:
+		return _json_response({"status": "failed", "error": str(exc)}, 400)
+	except Exception as exc:
+		return _json_response({"status": "failed", "error": str(exc)}, 500)
+
+
+def _score_narrative_page(body: dict) -> dict:
+	limit = int(body.get("limit", 25))
+	max_workers = int(body.get("max_workers", 4))
+	if limit < 1 or limit > 100:
+		raise ValueError("limit must be between 1 and 100")
+	if max_workers < 1 or max_workers > 8:
+		raise ValueError("max_workers must be between 1 and 8")
+	after_id = str(body.get("after_id") or "").strip()
+	documents, next_after_id, has_more = page_evidence_documents(
+		get_bronze_writer().read_serving_projection("evidence"),
+		limit=limit,
+		after_id=after_id,
+	)
+	service = _narrative_service()
+	with ThreadPoolExecutor(max_workers=max_workers) as executor:
+		results = list(executor.map(service.score, documents))
+	cache_hits = sum(int(cached) for _, cached in results)
+	return {
+		"status": "ok",
+		"documents": len(documents),
+		"cache_hits": cache_hits,
+		"scored": len(documents) - cache_hits,
+		"next_after_id": next_after_id,
+		"has_more": has_more,
+	}
+
+
+def _publish_narrative_features() -> dict:
+	bw = get_bronze_writer()
+	service = _narrative_service()
+	projection, manifest = build_narrative_projection(
+		bw.read_serving_projection("evidence"),
+		service.list_cached(),
+	)
+	bytes_written = bw.write_serving_projection("narrative_features", projection)
+	return {"status": "ok", **manifest, "bytes_written": bytes_written}
+
+
+@lru_cache(maxsize=1)
+def _daily_build_client() -> FabricDailyBuildClient:
+	return FabricDailyBuildClient()
+
+
+@app.timer_trigger(
+	schedule="%DAILY_BUILD_SCHEDULE%",
+	arg_name="timer",
+	run_on_startup=False,
+	use_monitor=True,
+)
+@app.durable_client_input(client_name="client")
+async def daily_build_schedule(timer: func.TimerRequest, client):
+	as_of_date = datetime.now(timezone.utc).date().isoformat()
+	instance_id = f"daily-build-{as_of_date}"
+	if await client.get_status(instance_id) is not None:
+		return
+	await client.start_new(
+		"daily_build",
+		instance_id,
+		{
+			"as_of_date": as_of_date,
+			"source_ids": scheduled_source_ids(_SOURCE_SEEDS.values(), as_of_date),
+			"poll_seconds": int(os.environ.get("DAILY_BUILD_POLL_SECONDS", "30")),
+			"narrative_page_size": int(
+				os.environ.get("DAILY_BUILD_NARRATIVE_PAGE_SIZE", "20")
+			),
+			"narrative_max_workers": int(
+				os.environ.get("DAILY_BUILD_NARRATIVE_MAX_WORKERS", "2")
+			),
+		},
+	)
+
+
+@app.orchestration_trigger(context_name="context")
+def daily_build(context):
+	return daily_build_orchestrator(context)
+
+
+@app.activity_trigger(input_name="payload")
+def resume_fabric_capacity(payload):
+	result = _daily_build_client().set_capacity_state("resume")
+	logging.info("CapacityResumed")
+	return result
+
+
+@app.activity_trigger(input_name="payload")
+def run_scheduled_connector(payload: dict):
+	source_id = payload["source_id"]
+	profiles = (
+		alpha_vantage_profiles(payload["as_of_date"])
+		if source_id == "alpha_vantage"
+		else [None]
+	)
+	results = []
+	for profile in profiles:
+		body = {
+			"source_id": source_id,
+			"run_id": "-".join(filter(None, [
+				f"daily-{payload['as_of_date']}-{source_id}",
+				profile,
+			])),
+			"to_date": payload["as_of_date"],
+		}
+		if profile:
+			body["profile"] = profile
+		result, _ = _execute_connector(body)
+		results.append(result)
+	if any(result.get("status") == "failed" for result in results):
+		logging.error("RequiredConnectorFailed source_id=%s", source_id)
+		return {"status": "failed", "source_id": source_id, "results": results}
+	return {"status": "completed", "source_id": source_id, "results": results}
+
+
+@app.activity_trigger(input_name="payload")
+def start_fabric_daily_pipeline(payload: dict):
+	return _daily_build_client().start_pipeline(
+		payload["as_of_date"], payload.get("pipeline_name")
+	)
+
+
+@app.activity_trigger(input_name="payload")
+def get_fabric_daily_pipeline_status(payload: dict):
+	return _daily_build_client().get_pipeline_status(
+		payload["job_id"], payload.get("pipeline_name")
+	)
+
+
+@app.activity_trigger(input_name="payload")
+def score_daily_narrative_page(payload: dict):
+	return _score_narrative_page(payload)
+
+
+@app.activity_trigger(input_name="payload")
+def publish_daily_narrative_features(payload):
+	return _publish_narrative_features()
+
+
+@app.activity_trigger(input_name="payload")
+def promote_daily_warehouse(payload: dict):
+	return promote_daily_warehouse_snapshot(
+		as_of_date=payload["as_of_date"],
+		release_run_id=payload["release_run_id"],
+	)
+
+
+@app.activity_trigger(input_name="payload")
+def record_daily_build_completion(payload: dict):
+	logging.info("DailyBuildCompleted as_of_date=%s", payload["as_of_date"])
+	return {"status": "recorded"}
+
+
+@app.activity_trigger(input_name="payload")
+def record_daily_build_failure(payload: dict):
+	logging.error(
+		"DailyBuildFailed as_of_date=%s error=%s",
+		payload.get("as_of_date"),
+		payload.get("error"),
+	)
+	return {"status": "recorded"}
+
+
+@app.activity_trigger(input_name="payload")
+def sync_daily_serving_projections(payload):
+	return _sync_serving_projections()
+
+
+@app.activity_trigger(input_name="payload")
+def sync_daily_evidence_index(payload):
+	return _sync_evidence_index()
+
+
+@app.activity_trigger(input_name="payload")
+def suspend_fabric_capacity(payload):
+	result = _daily_build_client().set_capacity_state("suspend")
+	logging.info("CapacitySuspended")
+	return result

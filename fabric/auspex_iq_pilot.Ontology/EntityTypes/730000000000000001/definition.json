@@ -1,0 +1,17 @@
+{
+  "id": "730000000000000001",
+  "namespace": "usertypes",
+  "baseEntityTypeId": null,
+  "name": "Theme",
+  "entityIdParts": ["731000000000000001"],
+  "displayNamePropertyId": "731000000000000001",
+  "namespaceType": "Custom",
+  "visibility": "Visible",
+  "properties": [
+    {"id": "731000000000000001", "name": "ThemeId", "redefines": null, "baseTypeNamespaceType": null, "valueType": "String"},
+    {"id": "731000000000000002", "name": "EtfSymbol", "redefines": null, "baseTypeNamespaceType": null, "valueType": "String"},
+    {"id": "731000000000000003", "name": "EventDate", "redefines": null, "baseTypeNamespaceType": null, "valueType": "DateTime"},
+    {"id": "731000000000000004", "name": "KnowledgeDate", "redefines": null, "baseTypeNamespaceType": null, "valueType": "DateTime"}
+  ],
+  "timeseriesProperties": []
+}

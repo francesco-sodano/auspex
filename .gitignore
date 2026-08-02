@@ -1,0 +1,49 @@
+# Claude Code
+.claude/settings.local.json
+.claude/worktrees/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.env
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Node
+node_modules/
+dist/
+.next/
+
+# Azure Functions
+local.settings.json
+.python_packages/
+function-deploy.zip
+
+# Local backfill manifests
+.backfill/
+
+# Deployment-specific state and parameter overrides
+.azure/
+infra/params/*.local.json
+.fabric-bound/
+
+# Fabric / Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
+*.suo
+*.user

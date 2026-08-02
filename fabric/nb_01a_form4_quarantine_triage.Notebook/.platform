@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "nb_01a_form4_quarantine_triage"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "e55cda74-65e5-4052-8a0b-703408db9068"
+  }
+}

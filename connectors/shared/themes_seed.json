@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "listing_scope": {
+    "country": "US",
+    "allowed_exchanges": ["NASDAQ", "NYSE", "CBOE"],
+    "include_us_listed_adrs": true,
+    "exclude_otc": true
+  },
+  "themes": [
+    {
+      "theme_id": "ai_compute_semiconductors",
+      "name": "AI Compute & Semiconductors",
+      "benchmark_symbol": "SMH",
+      "components": [
+        {"etf_symbol": "SMH", "blend_weight": 1.0}
+      ]
+    },
+    {
+      "theme_id": "enterprise_technology",
+      "name": "Enterprise Technology",
+      "benchmark_symbol": "XLK",
+      "components": [
+        {"etf_symbol": "XLK", "blend_weight": 1.0}
+      ]
+    },
+    {
+      "theme_id": "energy_security_producers",
+      "name": "Energy Security & Producers",
+      "benchmark_symbol": "XLE",
+      "components": [
+        {"etf_symbol": "XLE", "blend_weight": 1.0}
+      ]
+    },
+    {
+      "theme_id": "healthcare",
+      "name": "Healthcare",
+      "benchmark_symbol": "XLV",
+      "components": [
+        {"etf_symbol": "XLV", "blend_weight": 1.0}
+      ]
+    },
+    {
+      "theme_id": "data_center_buildout",
+      "name": "Data Center Buildout",
+      "benchmark_symbol": "DTCR",
+      "components": [
+        {"etf_symbol": "DTCR", "blend_weight": 0.5},
+        {"etf_symbol": "PAVE", "blend_weight": 0.25},
+        {"etf_symbol": "GRID", "blend_weight": 0.25}
+      ]
+    }
+  ]
+}

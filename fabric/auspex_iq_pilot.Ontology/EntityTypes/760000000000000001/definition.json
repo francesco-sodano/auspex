@@ -1,0 +1,16 @@
+{
+  "id": "760000000000000001",
+  "namespace": "usertypes",
+  "baseEntityTypeId": null,
+  "name": "Institution",
+  "entityIdParts": ["761000000000000001"],
+  "displayNamePropertyId": "761000000000000002",
+  "namespaceType": "Custom",
+  "visibility": "Visible",
+  "properties": [
+    {"id": "761000000000000001", "name": "InstitutionSk", "redefines": null, "baseTypeNamespaceType": null, "valueType": "BigInt"},
+    {"id": "761000000000000002", "name": "InstitutionName", "redefines": null, "baseTypeNamespaceType": null, "valueType": "String"},
+    {"id": "761000000000000003", "name": "Cik", "redefines": null, "baseTypeNamespaceType": null, "valueType": "String"}
+  ],
+  "timeseriesProperties": []
+}

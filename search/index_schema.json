@@ -1,0 +1,189 @@
+{
+  "name": "idx-news-filings",
+  "fields": [
+    {
+      "name": "id",
+      "type": "Edm.String",
+      "key": true,
+      "filterable": true
+    },
+    {
+      "name": "security_sk",
+      "type": "Edm.Int64",
+      "filterable": true,
+      "facetable": true
+    },
+    {
+      "name": "symbol",
+      "type": "Edm.String",
+      "searchable": true,
+      "filterable": true,
+      "facetable": true
+    },
+    {
+      "name": "source_type",
+      "type": "Edm.String",
+      "searchable": true,
+      "filterable": true,
+      "facetable": true
+    },
+    {
+      "name": "source_id",
+      "type": "Edm.String",
+      "filterable": true
+    },
+    {
+      "name": "source_name",
+      "type": "Edm.String",
+      "searchable": true,
+      "filterable": true,
+      "facetable": true
+    },
+    {
+      "name": "source_url",
+      "type": "Edm.String"
+    },
+    {
+      "name": "title",
+      "type": "Edm.String",
+      "searchable": true
+    },
+    {
+      "name": "content",
+      "type": "Edm.String",
+      "searchable": true
+    },
+    {
+      "name": "content_vector",
+      "type": "Collection(Edm.Single)",
+      "searchable": true,
+      "dimensions": 3072,
+      "vectorSearchProfile": "evidence-vector-profile"
+    },
+    {
+      "name": "event_date",
+      "type": "Edm.DateTimeOffset",
+      "filterable": true,
+      "sortable": true
+    },
+    {
+      "name": "knowledge_date",
+      "type": "Edm.DateTimeOffset",
+      "filterable": true,
+      "sortable": true
+    },
+    {
+      "name": "published_at",
+      "type": "Edm.DateTimeOffset",
+      "filterable": true,
+      "sortable": true
+    },
+    {
+      "name": "revision_hash",
+      "type": "Edm.String",
+      "filterable": true
+    },
+    {
+      "name": "chunk_index",
+      "type": "Edm.Int32",
+      "filterable": true,
+      "sortable": true
+    },
+    {
+      "name": "generation",
+      "type": "Edm.String",
+      "filterable": true
+    },
+    {
+      "name": "content_status",
+      "type": "Edm.String",
+      "filterable": true,
+      "facetable": true
+    },
+    {
+      "name": "sentiment",
+      "type": "Edm.Double",
+      "filterable": true,
+      "sortable": true
+    },
+    {
+      "name": "relevance",
+      "type": "Edm.Double",
+      "filterable": true,
+      "sortable": true
+    },
+    {
+      "name": "sentiment_model_version",
+      "type": "Edm.String",
+      "filterable": true
+    },
+    {
+      "name": "sentiment_prompt_version",
+      "type": "Edm.String",
+      "filterable": true
+    },
+    {
+      "name": "sentiment_cache_key",
+      "type": "Edm.String",
+      "filterable": true
+    }
+  ],
+  "vectorSearch": {
+    "algorithms": [
+      {
+        "name": "evidence-hnsw",
+        "kind": "hnsw",
+        "hnswParameters": {
+          "metric": "cosine",
+          "m": 4,
+          "efConstruction": 400,
+          "efSearch": 500
+        }
+      }
+    ],
+    "profiles": [
+      {
+        "name": "evidence-vector-profile",
+        "algorithm": "evidence-hnsw",
+        "vectorizer": "evidence-openai-vectorizer"
+      }
+    ],
+    "vectorizers": [
+      {
+        "name": "evidence-openai-vectorizer",
+        "kind": "azureOpenAI",
+        "azureOpenAIParameters": {
+          "resourceUri": "{{AZURE_OPENAI_ENDPOINT}}",
+          "deploymentId": "text-embedding-3-large",
+          "modelName": "text-embedding-3-large"
+        }
+      }
+    ]
+  },
+  "semantic": {
+    "defaultConfiguration": "evidence-semantic-config",
+    "configurations": [
+      {
+        "name": "evidence-semantic-config",
+        "prioritizedFields": {
+          "titleField": {
+            "fieldName": "title"
+          },
+          "prioritizedContentFields": [
+            {
+              "fieldName": "content"
+            }
+          ],
+          "prioritizedKeywordsFields": [
+            {
+              "fieldName": "symbol"
+            },
+            {
+              "fieldName": "source_type"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

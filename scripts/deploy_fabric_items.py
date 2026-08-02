@@ -1,0 +1,223 @@
+import argparse
+import base64
+import hashlib
+import json
+import time
+from pathlib import Path
+
+import httpx
+from azure.identity import DefaultAzureCredential
+
+
+ROOT = Path(__file__).resolve().parents[1]
+FABRIC_ROOT = ROOT / "fabric"
+WORKSPACE_TOKEN = "00000000-0000-4000-8000-000000000001"
+LAKEHOUSE_TOKEN = "00000000-0000-4000-8000-000000000002"
+EDGAR_USER_AGENT_TOKEN = "{{EDGAR_USER_AGENT}}"
+FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
+STORAGE_SCOPE = "https://storage.azure.com/.default"
+ENGINE_TARGETS = {
+    ROOT / "engine" / "thesis.py": "Files/config/e14/c2e46ed74b73c478528b4b39177990e988f9477dbd1be91c9d756eb5b844adab.py",
+    ROOT / "engine" / "fundamental_anchor.py": "Files/config/e20/84641443bde957496881c8cce27b4c8a0dda7f2b5b94eca79b4fdd6213a9a14b.py",
+    ROOT / "engine" / "narrative_premium.py": "Files/config/e22/09e9532dd031ecb45e8e3591986164d763a4ebbec3da43246c8ca8040aaa02ea.py",
+}
+
+
+def bind_definition_text(text, workspace_id, lakehouse_id, edgar_user_agent=""):
+    bound = text.replace(WORKSPACE_TOKEN, workspace_id).replace(
+        LAKEHOUSE_TOKEN, lakehouse_id
+    )
+    if EDGAR_USER_AGENT_TOKEN in bound:
+        if not edgar_user_agent.strip():
+            raise RuntimeError("EDGAR user agent is required for Fabric notebook deployment")
+        bound = bound.replace(EDGAR_USER_AGENT_TOKEN, edgar_user_agent)
+    return bound
+
+
+class FabricItemDeployer:
+    def __init__(
+        self,
+        workspace_id,
+        lakehouse_id,
+        edgar_user_agent,
+        credential=None,
+        http_client=None,
+    ):
+        self.workspace_id = workspace_id
+        self.lakehouse_id = lakehouse_id
+        self.edgar_user_agent = edgar_user_agent
+        self.credential = credential or DefaultAzureCredential()
+        self.http = http_client or httpx.Client(timeout=60)
+        self.base_url = f"https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}"
+
+    def _headers(self, scope):
+        return {
+            "Authorization": f"Bearer {self.credential.get_token(scope).token}",
+            "Content-Type": "application/json",
+        }
+
+    def _items(self):
+        response = self.http.get(
+            f"{self.base_url}/items", headers=self._headers(FABRIC_SCOPE)
+        )
+        response.raise_for_status()
+        return response.json().get("value", [])
+
+    def _parts(self, item_path, allowed_names=None):
+        parts = []
+        for path in sorted(candidate for candidate in item_path.rglob("*") if candidate.is_file()):
+            if allowed_names and path.name not in allowed_names:
+                continue
+            relative_path = path.relative_to(item_path).as_posix()
+            text = bind_definition_text(
+                path.read_text(encoding="utf-8"),
+                self.workspace_id,
+                self.lakehouse_id,
+                self.edgar_user_agent,
+            )
+            parts.append(
+                {
+                    "path": relative_path,
+                    "payload": base64.b64encode(text.encode("utf-8")).decode("ascii"),
+                    "payloadType": "InlineBase64",
+                }
+            )
+        return parts
+
+    def _upsert(self, display_name, item_type, parts, items):
+        matches = [
+            item
+            for item in items
+            if item.get("displayName") == display_name and item.get("type") == item_type
+        ]
+        if len(matches) > 1:
+            raise RuntimeError(f"Multiple {item_type} items named {display_name} exist")
+        definition = {"parts": parts}
+        if matches:
+            item_id = matches[0]["id"]
+            response = self.http.post(
+                f"{self.base_url}/items/{item_id}/updateDefinition?updateMetadata=true",
+                headers=self._headers(FABRIC_SCOPE),
+                json={"definition": definition},
+            )
+            action = "updated"
+        else:
+            response = self.http.post(
+                f"{self.base_url}/items",
+                headers=self._headers(FABRIC_SCOPE),
+                json={
+                    "displayName": display_name,
+                    "type": item_type,
+                    "definition": definition,
+                },
+            )
+            item_id = None
+            action = "created"
+        response.raise_for_status()
+        self._wait_for_operation(response)
+        return {"display_name": display_name, "item_id": item_id, "action": action}
+
+    def _wait_for_operation(self, response):
+        if response.status_code != 202:
+            return
+        location = response.headers.get("Location") or response.headers.get("Operation-Location")
+        if not location:
+            raise RuntimeError("Fabric accepted an item deployment without an operation URL")
+        while True:
+            result = self.http.get(location, headers=self._headers(FABRIC_SCOPE))
+            result.raise_for_status()
+            status = str(result.json().get("status") or "").lower()
+            if status in {"succeeded", "completed"}:
+                return
+            if status in {"failed", "cancelled"}:
+                raise RuntimeError(f"Fabric item deployment {status}: {result.text}")
+            time.sleep(int(result.headers.get("Retry-After", "2")))
+
+    def _upload_engine(self, source_path, target_path):
+        content = source_path.read_text(encoding="utf-8").replace("\r\n", "\n").encode("utf-8")
+        digest = hashlib.sha256(content).hexdigest()
+        if digest != Path(target_path).stem:
+            raise RuntimeError(f"Content-addressed engine path mismatch for {source_path.name}")
+        base_url = (
+            "https://onelake.dfs.fabric.microsoft.com/"
+            f"{self.workspace_id}/{self.lakehouse_id}"
+        )
+        headers = self._headers(STORAGE_SCOPE)
+        headers["x-ms-version"] = "2023-11-03"
+        target_url = f"{base_url}/{target_path}"
+        existing = self.http.get(target_url, headers=headers)
+        if existing.status_code == 200:
+            if hashlib.sha256(existing.content).hexdigest() != digest:
+                raise RuntimeError(f"Immutable engine conflict at {target_path}")
+            return {"path": target_path, "sha256": digest, "action": "verified"}
+        if existing.status_code != 404:
+            existing.raise_for_status()
+        for directory in ("Files/config", str(Path(target_path).parent).replace("\\", "/")):
+            response = self.http.put(
+                f"{base_url}/{directory}", headers=headers, params={"resource": "directory"}
+            )
+            if response.status_code != 409:
+                response.raise_for_status()
+        response = self.http.put(target_url, headers=headers, params={"resource": "file"})
+        response.raise_for_status()
+        response = self.http.patch(
+            target_url,
+            headers=headers,
+            params={"action": "append", "position": "0"},
+            content=content,
+        )
+        response.raise_for_status()
+        response = self.http.patch(
+            target_url,
+            headers=headers,
+            params={"action": "flush", "position": str(len(content))},
+        )
+        response.raise_for_status()
+        return {"path": target_path, "sha256": digest, "action": "created"}
+
+    def deploy(self, *, include_ontology=True):
+        engines = [
+            self._upload_engine(source_path, target_path)
+            for source_path, target_path in ENGINE_TARGETS.items()
+        ]
+        items = self._items()
+        notebooks = [
+            self._upsert(
+                item_path.name.removesuffix(".Notebook"),
+                "Notebook",
+                self._parts(item_path, {".platform", "notebook-content.py"}),
+                items,
+            )
+            for item_path in sorted(FABRIC_ROOT.glob("*.Notebook"))
+        ]
+        ontology = None
+        if include_ontology:
+            ontology_path = FABRIC_ROOT / "auspex_iq_pilot.Ontology"
+            ontology = self._upsert(
+                "auspex_iq_pilot",
+                "Ontology",
+                self._parts(ontology_path),
+                items,
+            )
+        return {"engines": engines, "notebooks": notebooks, "ontology": ontology}
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Bind and deploy portable Auspex Fabric items")
+    parser.add_argument("--workspace-id", required=True)
+    parser.add_argument("--lakehouse-id", required=True)
+    parser.add_argument("--edgar-user-agent", required=True)
+    parser.add_argument("--skip-ontology", action="store_true")
+    args = parser.parse_args()
+    result = FabricItemDeployer(
+        args.workspace_id,
+        args.lakehouse_id,
+        args.edgar_user_agent,
+    ).deploy(
+        include_ontology=not args.skip_ontology
+    )
+    print(json.dumps(result, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

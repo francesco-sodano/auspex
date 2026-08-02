@@ -1,0 +1,12 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Ontology",
+    "displayName": "auspex_iq_pilot",
+    "description": "Preview-only shared public-signal ontology for Auspex thesis traversal."
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "eaaa3996-111a-4860-a469-1cb634b47fde"
+  }
+}

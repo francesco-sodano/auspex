@@ -1,0 +1,8 @@
+{
+  "namespace": "usertypes",
+  "id": "830000000000000001",
+  "name": "hasEvidence",
+  "namespaceType": "Custom",
+  "source": {"entityTypeId": "710000000000000001"},
+  "target": {"entityTypeId": "740000000000000001"}
+}

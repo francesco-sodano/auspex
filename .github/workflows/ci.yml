@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            api/requirements.txt
+            connectors/requirements.txt
+            scripts/requirements.txt
+      - name: Install Python dependencies
+        run: pip install -r api/requirements.txt -r connectors/requirements.txt -r scripts/requirements.txt
+      - name: Compile Python
+        run: python -m compileall -q agent api connectors engine recommender scripts search tests
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm audit --audit-level=high
+
+  infrastructure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/CLI@v2
+        with:
+          inlineScript: az bicep build --file infra/main.bicep --outfile /tmp/auspex-main.json

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-20T00:00:00Z",
+  "policy": {
+    "active_max_symbols": 1000,
+    "active_priority": [
+      "portfolio",
+      "watchlist",
+      "recommendations_and_candidates",
+      "thematic_etf_constituents"
+    ],
+    "coverage_eligibility": "current_us_listed_resolved_and_price_covered"
+  },
+  "tiers": {
+    "active": [
+      "AAPL",
+      "AVGO",
+      "GOOGL",
+      "MSFT",
+      "NVDA"
+    ],
+    "coverage": [
+      "AAPL",
+      "AVGO",
+      "GOOGL",
+      "MSFT",
+      "NVDA"
+    ]
+  }
+}

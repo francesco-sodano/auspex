@@ -1,0 +1,32 @@
+:root {
+  color-scheme: dark;
+  --bg: #0c0d10;
+  --surface: #14161b;
+  --surface-2: #191c22;
+  --line: #292d35;
+  --line-2: #3a3f49;
+  --text: #e8eaed;
+  --muted: #9a9fa9;
+  --faint: #696f7b;
+  --gold: #c2a86b;
+  --gold-soft: rgba(194, 168, 107, .11);
+  --success: #87aa8a;
+  --danger: #b97b78;
+  --warning: #d3b36b;
+  --serif: 'Fraunces', Georgia, serif;
+  --sans: 'Inter', 'Segoe UI', sans-serif;
+  --mono: 'JetBrains Mono', Consolas, monospace;
+  font-family: var(--sans);
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { min-height: 100%; margin: 0; }
+body { min-width: 320px; background: var(--bg); }
+button, input { font: inherit; }
+button, a { -webkit-tap-highlight-color: transparent; }
+a { color: inherit; }
