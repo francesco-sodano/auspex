@@ -317,7 +317,7 @@ def _sync_serving_projections() -> dict:
 	market_documents = bw.read_serving_projection("market_data")
 	if any(not str(document.get("id") or "").startswith(("ticker:", "isin:", "security:")) for document in security_documents):
 		raise ValueError("invalid security projection id")
-	if any(not str(document.get("id") or "").startswith(("quote:", "fx:", "score:security:")) for document in market_documents):
+	if any(not str(document.get("id") or "").startswith(("quote:", "history:", "fx:", "score:security:")) for document in market_documents):
 		raise ValueError("invalid market projection id")
 	security_generations = {document.get("generation") for document in security_documents}
 	market_generations = {document.get("generation") for document in market_documents}

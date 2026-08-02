@@ -114,6 +114,18 @@ class E12TransactionTests(unittest.TestCase):
             fx_rates={
                 ("USD", "CHF"): {"rate": "0.80000000", "as_of": "2026-07-21"},
             },
+            price_histories={"MSFT": {
+                "prices": [
+                    {"date": "2026-07-17", "price": "400.00"},
+                    {"date": "2026-07-21", "price": "420.00"},
+                ],
+            }},
+            scores={101: {
+                "opportunity_score": "82.5",
+                "theme_id": "enterprise_technology",
+                "as_of": "2026-07-21",
+                "coverage_status": "READY",
+            }},
         )
         self.service = PortfolioService(
             self.identity,
@@ -1092,6 +1104,11 @@ class E12TransactionTests(unittest.TestCase):
         self.assertEqual(summary["total_earnings_base"], "40.00")
         self.assertEqual(summary["holdings"][0]["company_name"], "Microsoft Corporation")
         self.assertEqual(summary["holdings"][0]["price_currency"], "USD")
+        self.assertEqual(summary["holdings"][0]["average_acquisition_price"], "400.00")
+        self.assertEqual(summary["holdings"][0]["gain_loss_pct"], "5")
+        self.assertEqual(summary["holdings"][0]["opportunity_score"], "82.5")
+        self.assertEqual(summary["holdings"][0]["theme_id"], "enterprise_technology")
+        self.assertEqual(len(summary["holdings"][0]["price_history"]), 2)
         self.assertEqual(summary["exposures"]["sector"], [{
             "name": "Information Technology",
             "market_value_base": "840.00",
@@ -1099,6 +1116,69 @@ class E12TransactionTests(unittest.TestCase):
         }])
         self.assertEqual(summary["exposures"]["country"][0]["name"], "US")
         self.assertEqual(summary["exposures"]["currency"][0]["name"], "USD")
+        self.assertEqual(summary["exposures"]["theme"][0]["name"], "enterprise_technology")
+        self.assertEqual(summary["exposures"]["exchange"][0]["name"], "NASDAQ")
+
+    def test_holding_history_is_sorted_and_bounded_to_latest_seven_sessions(self):
+        market_data = InMemoryMarketDataRepository(
+            quotes={"MSFT": {"price": "420.00", "currency": "USD", "as_of": "2026-07-21"}},
+            price_histories={"MSFT": {"prices": [
+                {"date": f"2026-07-{day:02d}", "price": str(390 + day)}
+                for day in range(10, 19)
+            ][::-1]}},
+        )
+        service = PortfolioService(
+            self.identity,
+            self.transactions,
+            security_catalog=self.catalog,
+            universe=self.universe,
+            market_data=market_data,
+            clock=lambda: NOW,
+        )
+        service.create_transaction(
+            self.user_a,
+            transaction_payload(
+                "history-position", "OPENING_POSITION",
+                security_code="MSFT", quantity="1", price="400",
+            ),
+        )
+
+        history = service.portfolio_summary(self.user_a)["holdings"][0]["price_history"]
+
+        self.assertEqual(len(history), 7)
+        self.assertEqual(history[0]["date"], "2026-07-12")
+        self.assertEqual(history[-1]["date"], "2026-07-18")
+
+    def test_correction_chain_recalculates_weighted_acquisition_price(self):
+        original, _ = self.service.create_transaction(
+            self.user_a,
+            transaction_payload(
+                "chain-original", "OPENING_POSITION",
+                security_code="MSFT", quantity="2", price="100",
+            ),
+        )
+        first, _ = self.service.correct_transaction(
+            self.user_a,
+            original.transaction_id,
+            transaction_payload(
+                "chain-first", "OPENING_POSITION",
+                security_code="MSFT", quantity="1", price="100",
+            ),
+        )
+        self.service.correct_transaction(
+            self.user_a,
+            first.transaction_id,
+            transaction_payload(
+                "chain-second", "OPENING_POSITION",
+                security_code="MSFT", quantity="1", price="110",
+            ),
+        )
+
+        holding = self.service.portfolio_summary(self.user_a)["holdings"][0]
+
+        self.assertEqual(holding["quantity"], "1")
+        self.assertEqual(holding["average_acquisition_price"], "110.00")
+        self.assertEqual(holding["gain_loss_pct"], "281.8181818181818181818181818")
 
     def test_portfolio_summary_withholds_partial_value_when_quote_is_missing(self):
         self.market_data = InMemoryMarketDataRepository()

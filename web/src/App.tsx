@@ -172,8 +172,15 @@ type PortfolioHomeSummary = {
     price_as_of: string | null
     market_value_base: string | null
     weight: string | null
+    average_acquisition_price: string | null
+    gain_loss_pct: string | null
+    price_history: Array<{ date: string; price: string }>
+    opportunity_score: string | null
+    score_as_of: string | null
+    score_coverage_status: 'READY' | 'PARTIAL' | null
+    theme_id: string | null
   }>
-  exposures: Record<'sector' | 'country' | 'currency', Array<{
+  exposures: Record<'sector' | 'country' | 'currency' | 'theme' | 'exchange', Array<{
     name: string
     market_value_base: string
     weight: string
@@ -184,6 +191,33 @@ type PortfolioHomeSummary = {
     missing_capital_fx: string[]
     oldest_price_date: string | null
   }
+}
+
+function PriceSparkline({ points, ticker }: {
+  points: Array<{ date: string; price: string }>
+  ticker: string
+}) {
+  const values = points.map((point) => Number(point.price)).filter(Number.isFinite)
+  if (values.length < 2) return <span className="sparkline-empty">Not enough history</span>
+  const width = 128
+  const height = 38
+  const padding = 3
+  const minimum = Math.min(...values)
+  const maximum = Math.max(...values)
+  const range = maximum - minimum || 1
+  const coordinates = values.map((value, index) => {
+    const x = padding + (index / (values.length - 1)) * (width - padding * 2)
+    const y = height - padding - ((value - minimum) / range) * (height - padding * 2)
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+  const rising = values.at(-1)! >= values[0]
+  const change = ((values.at(-1)! / values[0]) - 1) * 100
+  return <div className={`price-sparkline ${rising ? 'rising' : 'falling'}`} title={`${ticker}: ${change >= 0 ? '+' : ''}${change.toFixed(1)}% over ${values.length} sessions`}>
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${ticker} ${values.length}-session price trend, ${change >= 0 ? 'up' : 'down'} ${Math.abs(change).toFixed(1)} percent`}>
+      <polyline points={coordinates} fill="none" stroke="currentColor" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+    </svg>
+    <small>{change >= 0 ? '+' : ''}{change.toFixed(1)}%</small>
+  </div>
 }
 
 type RecommendationResponse = {
@@ -208,6 +242,7 @@ type RecommendationResponse = {
     suppression_reasons: string[]
     tax_flags: string[]
     opportunity_score: string
+    theme_id: string | null
     coverage_status: 'READY' | 'PARTIAL'
     coverage_reasons: string[]
     attribution: Array<{
@@ -624,6 +659,22 @@ function ProductHome({ user }: { user: AppUser }) {
       : largest,
     null,
   )
+  const scoredHoldings = summary?.holdings.filter((holding) => holding.opportunity_score !== null) || []
+  const strongestHolding = scoredHoldings.reduce<(PortfolioHomeSummary['holdings'][number] | null)>(
+    (strongest, holding) => !strongest || Number(holding.opportunity_score) > Number(strongest.opportunity_score)
+      ? holding
+      : strongest,
+    null,
+  )
+  const actionableRecommendations = recommendations?.recommendations.filter((row) => row.action !== 'HOLD') || []
+  const holdRecommendations = recommendations?.recommendations.filter((row) => row.action === 'HOLD') || []
+  const analysisText = !summary
+    ? 'Portfolio analysis is loading.'
+    : recommendations?.status === 'withheld'
+      ? `Auspex is withholding actions until ${recommendations.reasons.map((reason) => reason.replaceAll('_', ' ')).join(' and ')}.`
+      : actionableRecommendations.length
+        ? `${actionableRecommendations.length} policy action${actionableRecommendations.length === 1 ? '' : 's'} currently clear coverage, portfolio limits, cash buffers, and estimated costs. The highest-priority action is ${actionableRecommendations[0].action} ${actionableRecommendations[0].ticker}.`
+        : `No trade currently clears all policy, cash-buffer, and cost gates. ${holdRecommendations.length} covered holding${holdRecommendations.length === 1 ? '' : 's'} remain at HOLD.`
 
   async function explainRecommendation(recommendationId: string) {
     setExplainingId(recommendationId)
@@ -704,11 +755,14 @@ function ProductHome({ user }: { user: AppUser }) {
           <p>Start with cash, one stock, both, or nothing more than you know today.</p>
           <a className="primary-action link-button" href="/ledger">Open ledger <ArrowRight size={16} /></a>
         </section> : <>
-          <div className="freshness"><span className={`pulse ${pending || stale ? 'pending' : ''}`} /> {pending ? 'Valuation waiting for market coverage' : stale ? `Stale valuation · last complete source ${summary?.valuation_as_of || 'unknown'}` : cashOnly ? 'Cash ledger current · no market prices required' : `Valued through ${summary?.valuation_as_of || 'the latest available close'}`}</div>
           <section className="portfolio-value-hero">
             <span className="eyebrow" aria-label="Portfolio value · cash + stocks"><MetricLabel metricKey="portfolio_value" metadata={metadata} fallback="Portfolio value" /> · cash + stocks</span>
             <h1>{formatMoney(summary?.total_value_base)}</h1>
             <p>{pending ? 'Auspex will show a total only when every holding has a current price and required FX rate.' : `${summary?.holdings.length || 0} positions plus cash in ${summary?.base_currency}.`}</p>
+          </section>
+          <section className={`coverage-strip ${pending || stale ? 'attention' : ''}`} aria-label="Coverage and freshness">
+            <div className="coverage-status"><span className={`pulse ${pending || stale ? 'pending' : ''}`} /><div><span className="eyebrow">Coverage & freshness</span><strong>{pending ? 'Valuation waiting for market coverage' : stale ? 'Coverage complete · sources are stale' : 'Portfolio coverage complete'}</strong></div></div>
+            <dl><div><dt>Valued through</dt><dd>{summary?.valuation_as_of || 'Unavailable'}</dd></div><div><dt>Oldest price</dt><dd>{summary?.coverage.oldest_price_date || 'Unavailable'}</dd></div><div><dt>Missing prices</dt><dd>{summary?.coverage.missing_prices.length ? summary.coverage.missing_prices.join(', ') : 'None'}</dd></div><div><dt>Missing current FX</dt><dd>{summary?.coverage.missing_fx.length ? summary.coverage.missing_fx.join(', ') : 'None'}</dd></div></dl>
           </section>
           <div className="portfolio-stat-grid">
             <article><MetricLabel metricKey="net_contributed_capital" metadata={metadata} fallback="Net contributed capital" /><strong>{formatMoney(summary?.net_contributed_capital_base)}</strong><small>{summary?.coverage.missing_capital_fx.length ? `Missing historical FX: ${summary.coverage.missing_capital_fx.join(', ')}` : 'Opening capital + deposits − withdrawals'}</small></article>
@@ -716,73 +770,54 @@ function ProductHome({ user }: { user: AppUser }) {
             <article><MetricLabel metricKey="cash_available" metadata={metadata} fallback="Cash available" /><strong>{formatMoney(summary?.total_cash_base)}</strong><small>{summary?.cash_weight ? `${(Number(summary.cash_weight) * 100).toFixed(1)}% of portfolio` : 'Cash derived from the ledger'}</small></article>
             <article><MetricLabel metricKey="stocks_value" metadata={metadata} fallback="Stocks value" /><strong>{cashOnly ? 'No stock positions' : formatMoney(summary?.total_stocks_base)}</strong><small>{cashOnly ? 'Add a holding from the ledger when ready' : `Latest covered closes in ${summary?.base_currency}`}</small></article>
           </div>
-          <div className="portfolio-home-grid">
-            <section className="home-panel holdings-panel">
-              <div className="panel-title"><div><h2>Holdings</h2><p>{summary?.holdings.length || 0} current positions</p></div><a className="text-action" href="/ledger">Open ledger <ArrowRight size={14} /></a></div>
-              <div className="table-scroll">
-                <table className="holdings-table">
-                  <thead><tr><th scope="col">Name</th><th scope="col"><MetricLabel metricKey="position_quantity" metadata={metadata} fallback="Quantity" /></th><th scope="col"><MetricLabel metricKey="latest_price" metadata={metadata} fallback="Price" /></th><th scope="col"><MetricLabel metricKey="stocks_value" metadata={metadata} fallback="Value" /></th></tr></thead>
-                  <tbody>{summary?.holdings.map((holding) => <tr key={`${holding.security_sk}-${holding.ticker}`}>
-                    <th scope="row"><strong>{holding.ticker}</strong><small>{holding.company_name}</small></th>
-                    <td>{holding.quantity}</td>
-                    <td>{holding.latest_price ? `${holding.price_currency || holding.currency} ${holding.latest_price}` : 'Pending'}</td>
-                    <td>{formatMoney(holding.market_value_base)}</td>
-                  </tr>)}</tbody>
-                </table>
-              </div>
-            </section>
-            <aside className="home-panel coverage-panel">
-              <span className="eyebrow">Coverage & freshness</span>
-              <h2>{pending ? 'Market data is still arriving.' : stale ? 'Coverage is complete, but prices are old.' : 'Portfolio coverage is complete.'}</h2>
-              <dl>
-                <div><dt>Oldest price</dt><dd>{summary?.coverage.oldest_price_date || 'Not available'}</dd></div>
-                <div><dt>Missing prices</dt><dd>{summary?.coverage.missing_prices.length ? summary.coverage.missing_prices.join(', ') : 'None'}</dd></div>
-                <div><dt>Missing FX</dt><dd>{summary?.coverage.missing_fx.length ? summary.coverage.missing_fx.join(', ') : 'None'}</dd></div>
-                <div><dt>Missing historical FX</dt><dd>{summary?.coverage.missing_capital_fx.length ? summary.coverage.missing_capital_fx.join(', ') : 'None'}</dd></div>
-              </dl>
-              <p>Research, not advice. You decide and act at your broker.</p>
-            </aside>
-          </div>
-          <section className="home-panel exposure-panel">
-            <div className="panel-title"><div><h2>Portfolio exposure</h2><p>Stocks and cash as a share of total value</p></div></div>
-            <div className="exposure-groups">
-              {(['sector', 'country', 'currency'] as const).map((type) => <div className="exposure-group" key={type}><h3>{type}</h3>{summary?.exposures[type].map((exposure) => <div className="exposure-row" key={`${type}-${exposure.name}`}><div><span>{exposure.name}</span><strong title={metadata.position_weight?.plain_description}>{(Number(exposure.weight) * 100).toFixed(1)}%</strong></div><span className="exposure-track"><i style={{ width: `${Math.min(100, Number(exposure.weight) * 100)}%` }} /></span></div>)}</div>)}
+          <section className="home-panel holdings-panel">
+            <div className="panel-title"><div><h2>Holdings</h2><p>{summary?.holdings.length || 0} current positions · seven latest sessions</p></div><a className="text-action" href="/ledger">Open ledger <ArrowRight size={14} /></a></div>
+            <div className="table-scroll">
+              <table className="holdings-table analytical-holdings">
+                <thead><tr><th scope="col">Security</th><th scope="col">7 sessions</th><th scope="col"><MetricLabel metricKey="position_quantity" metadata={metadata} fallback="Quantity" /></th><th scope="col"><MetricLabel metricKey="latest_price" metadata={metadata} fallback="Last price" /></th><th scope="col"><MetricLabel metricKey="stocks_value" metadata={metadata} fallback="Stock value" /></th><th scope="col"><MetricLabel metricKey="opportunity_score" metadata={metadata} fallback="Auspex score" /></th></tr></thead>
+                <tbody>{summary?.holdings.map((holding) => <tr key={`${holding.security_sk}-${holding.ticker}`}>
+                  <th scope="row"><strong>{holding.ticker}</strong><small>{holding.company_name}</small><small>{holding.exchange || 'Exchange unavailable'} · {(holding.theme_id || 'Unclassified').replaceAll('_', ' ')}</small></th>
+                  <td><PriceSparkline points={holding.price_history} ticker={holding.ticker} /></td>
+                  <td>{holding.quantity}<small>Avg {holding.average_acquisition_price ? `${holding.currency} ${holding.average_acquisition_price}` : 'unavailable'}</small></td>
+                  <td>{holding.latest_price ? `${holding.price_currency || holding.currency} ${holding.latest_price}` : 'Pending'}<small>{holding.price_as_of || 'Date unavailable'}</small></td>
+                  <td>{formatMoney(holding.market_value_base)}<small className={Number(holding.gain_loss_pct) > 0 ? 'positive' : Number(holding.gain_loss_pct) < 0 ? 'negative' : ''}>{holding.gain_loss_pct === null ? 'Return unavailable' : `${Number(holding.gain_loss_pct) >= 0 ? '+' : ''}${Number(holding.gain_loss_pct).toFixed(1)}% vs acquisition`}</small></td>
+                  <td><strong className="holding-score">{holding.opportunity_score === null ? '—' : Number(holding.opportunity_score).toFixed(1)}</strong><small>{holding.score_coverage_status ? `${holding.score_coverage_status.toLowerCase()} · ${holding.score_as_of}` : 'Score unavailable'}</small></td>
+                </tr>)}</tbody>
+              </table>
             </div>
           </section>
-          <section className="home-panel monthly-outlook-panel"><div className="panel-title"><div><span className="eyebrow">This month at a glance</span><h2>Monthly outlook</h2><p>Current portfolio context, without false precision.</p></div></div><dl><div><dt>Portfolio mix</dt><dd>{summary?.holdings.length || 0} stocks · {summary?.cash_weight ? `${(Number(summary.cash_weight) * 100).toFixed(1)}% cash` : 'cash weight unavailable'}</dd></div><div><dt>Largest concentration</dt><dd>{largestHolding ? `${largestHolding.ticker} · ${(Number(largestHolding.weight || 0) * 100).toFixed(1)}%` : 'No stock concentration'}</dd></div><div><dt><MetricLabel metricKey="monthly_outlook_range" metadata={metadata} fallback="Forward range" /></dt><dd>Withheld</dd></div></dl><p className="grounded-withheld">The range is withheld until measured portfolio volatility is available. A month is short and most movement is unpredictable.</p></section>
+          <section className="home-panel exposure-panel">
+            <div className="panel-title"><div><h2>Portfolio exposure</h2><p>Stocks and cash as a share of total value</p></div></div>
+            <div className="exposure-groups four-up">
+              {(['theme', 'exchange', 'country', 'currency'] as const).map((type) => <div className="exposure-group" key={type}><h3>{type}</h3>{summary?.exposures[type].map((exposure) => <div className="exposure-row" key={`${type}-${exposure.name}`}><div><span>{exposure.name.replaceAll('_', ' ')}</span><strong title={metadata.position_weight?.plain_description}>{(Number(exposure.weight) * 100).toFixed(1)}%</strong></div><span className="exposure-track"><i style={{ width: `${Math.min(100, Number(exposure.weight) * 100)}%` }} /></span></div>)}</div>)}
+            </div>
+          </section>
+          <section className="home-panel monthly-outlook-panel"><div className="panel-title"><div><span className="eyebrow">Latest deterministic review</span><h2>Current portfolio analysis</h2><p>Auspex policy applied to the latest portfolio, scores, coverage, and estimated trading costs.</p></div><span className="research-label">As of {recommendations?.as_of || summary?.valuation_as_of || 'unavailable'}</span></div><dl><div><dt>Portfolio mix</dt><dd>{summary?.holdings.length || 0} stocks · {summary?.cash_weight ? `${(Number(summary.cash_weight) * 100).toFixed(1)}% cash` : 'cash weight unavailable'}</dd></div><div><dt>Largest concentration</dt><dd>{largestHolding ? `${largestHolding.ticker} · ${(Number(largestHolding.weight || 0) * 100).toFixed(1)}%` : 'No stock concentration'}</dd></div><div><dt>Strongest holding signal</dt><dd>{strongestHolding ? `${strongestHolding.ticker} · ${Number(strongestHolding.opportunity_score).toFixed(1)}` : 'No scored holding'}</dd></div><div><dt>Score coverage</dt><dd>{scoredHoldings.length} of {summary?.holdings.length || 0} holdings</dd></div></dl><p className="portfolio-analysis-copy">{analysisText}</p></section>
           <section className="home-panel recommendations-panel">
             <div className="panel-title"><div><span className="eyebrow">Deterministic policy · {user.risk_profile}</span><h2>Suggested actions</h2><p>{recommendations?.as_of ? `Signals through ${recommendations.as_of}` : 'Waiting for complete inputs'}</p></div><span className="research-label">Research only</span></div>
-            {!recommendations ? <p className="recommendation-state">Loading recommendations…</p> : recommendations.status === 'withheld' ? <p className="recommendation-state">Recommendations are withheld until {recommendations.reasons.map((reason) => reason.replaceAll('_', ' ')).join(' and ')}.</p> : <div className="table-scroll">
-              <table className="recommendation-table">
-                <thead><tr><th scope="col">Security</th><th scope="col"><MetricLabel metricKey="opportunity_score" metadata={metadata} fallback="Score" /></th><th scope="col">Action</th><th scope="col"><MetricLabel metricKey="target_weight" metadata={metadata} fallback="Target" /></th><th scope="col"><MetricLabel metricKey="suggested_amount" metadata={metadata} fallback="Amount" /></th><th scope="col"><MetricLabel metricKey="estimated_cost" metadata={metadata} fallback="Cost" /></th></tr></thead>
-                {recommendations.recommendations.slice(0, 12).map((recommendation) => <tbody key={recommendation.recommendation_id}>
-                  <tr className="recommendation-row">
-                    <th scope="row"><strong>{recommendation.ticker}</strong><small><MetricLabel metricKey="confidence" metadata={metadata} fallback={recommendation.confidence.toLowerCase()} /> · {recommendation.confidence.toLowerCase()}</small></th>
-                    <td><strong>{Number(recommendation.opportunity_score).toFixed(1)}</strong><small>{recommendation.coverage_status.toLowerCase()} coverage</small></td>
-                    <td><b className={`recommendation-action action-${recommendation.action.toLowerCase()}`}>{recommendation.action}</b><small>{recommendation.suppression_reasons.length ? recommendation.suppression_reasons.join(', ').replaceAll('_', ' ') : 'Policy eligible'}</small></td>
-                    <td>{(Number(recommendation.target_weight) * 100).toFixed(1)}%</td>
-                    <td>{new Intl.NumberFormat(undefined, { style: 'currency', currency: recommendations.base_currency }).format(Number(recommendation.suggested_amount_base))}</td>
-                    <td>{new Intl.NumberFormat(undefined, { style: 'currency', currency: recommendations.base_currency }).format(Number(recommendation.estimated_cost_base))}</td>
-                  </tr>
-                  <tr className="recommendation-detail"><td colSpan={6}>
-                    <p>{recommendation.rationale}</p>
-                    <details className="score-attribution"><summary>Why this score · six deterministic legs</summary><ol>{recommendation.attribution.map((leg) => <li key={leg.key}><span><MetricLabel metricKey={leg.key} metadata={metadata} fallback={leg.key.replaceAll('_', ' ')} /></span><strong className={leg.direction === 'RAISED' ? 'positive' : leg.direction === 'LOWERED' ? 'negative' : ''}>{leg.contribution === null ? 'Unavailable' : `${Number(leg.contribution) >= 0 ? '+' : ''}${Number(leg.contribution).toFixed(2)}`}</strong><small>{leg.direction.toLowerCase()}</small></li>)}</ol>{recommendation.coverage_reasons.length > 0 && <p>Coverage notes: {recommendation.coverage_reasons.join(', ').replaceAll('_', ' ')}</p>}</details>
-                    <div className="recommendation-actions" aria-label={`${recommendation.ticker} suggestion response`}>
-                      <button className="secondary-action compact" type="button" disabled={savingDisposition !== null || history.current_dispositions[recommendation.recommendation_id] === 'ACCEPTED'} onClick={() => recordDisposition(recommendation.recommendation_id, 'ACCEPTED')}><ThumbsUp size={14} />Accept suggestion</button>
-                      <button className="secondary-action compact" type="button" disabled={savingDisposition !== null || history.current_dispositions[recommendation.recommendation_id] === 'DISMISSED'} onClick={() => recordDisposition(recommendation.recommendation_id, 'DISMISSED')}><ThumbsDown size={14} />Dismiss suggestion</button>
-                      {history.current_dispositions[recommendation.recommendation_id] && <span className="disposition-status">Recorded as {history.current_dispositions[recommendation.recommendation_id].toLowerCase()}.</span>}
-                      <small>Accepting records your decision only; it does not place a trade.</small>
-                    </div>
-                    {dispositionErrors[recommendation.recommendation_id] && <p className="error" role="alert">{dispositionErrors[recommendation.recommendation_id]}</p>}
-                    <div className="grounded-explanation">
-                  <button className="secondary-action compact" type="button" disabled={explainingId === recommendation.recommendation_id || Boolean(explanations[recommendation.recommendation_id])} onClick={() => explainRecommendation(recommendation.recommendation_id)}><BookOpenText size={14} />{explainingId === recommendation.recommendation_id ? 'Checking evidence…' : explanations[recommendation.recommendation_id] ? 'Evidence checked' : 'Explain with evidence'}</button>
-                  {explanationErrors[recommendation.recommendation_id] && <p className="error" role="alert">{explanationErrors[recommendation.recommendation_id]}</p>}
-                  {explanations[recommendation.recommendation_id]?.status === 'withheld' && <p className="grounded-withheld">Explanation withheld: {explanations[recommendation.recommendation_id].reasons.map((reason) => reason.replaceAll('_', ' ')).join(', ')}.</p>}
-                      {explanations[recommendation.recommendation_id]?.status === 'published' && <div className="grounded-output"><p>{explanations[recommendation.recommendation_id].output.explanation}</p><small>{explanations[recommendation.recommendation_id].output.uncertainty}</small><div className="evidence-list">{explanations[recommendation.recommendation_id].citations.map((citation) => <details className="evidence-item" key={citation.id}><summary>{citation.title || citation.source_name || 'Source evidence'}<small>{citation.knowledge_date ? `Known ${citation.knowledge_date}` : 'Knowledge date unavailable'}</small></summary>{citation.excerpt && <p>{citation.excerpt}</p>}<dl><div><dt>Source</dt><dd>{citation.source_name || citation.source_type || 'Unavailable'}</dd></div><div><dt>Event date</dt><dd>{citation.event_date || 'Unavailable'}</dd></div><div><dt>Knowledge date</dt><dd>{citation.knowledge_date || 'Unavailable'}</dd></div><div><dt>Content</dt><dd>{citation.content_status?.replaceAll('_', ' ') || 'Unavailable'}</dd></div></dl>{citation.url && <a href={citation.url} target="_blank" rel="noreferrer">Open original source <ArrowRight size={12} /></a>}</details>)}</div></div>}
-                    </div>
-                  </td></tr>
-                </tbody>)}
-              </table>
+            {!recommendations ? <p className="recommendation-state">Loading recommendations…</p> : recommendations.status === 'withheld' ? <p className="recommendation-state">Recommendations are withheld until {recommendations.reasons.map((reason) => reason.replaceAll('_', ' ')).join(' and ')}.</p> : recommendations.recommendations.length === 0 ? <p className="recommendation-state">No trade currently clears portfolio limits, cash buffers, coverage, and estimated costs.</p> : <div className="recommendation-list">
+              {recommendations.recommendations.slice(0, 12).map((recommendation) => <article className={`recommendation-card action-${recommendation.action.toLowerCase()}`} key={recommendation.recommendation_id} aria-labelledby={`recommendation-${recommendation.recommendation_id}`}>
+                <dl className="recommendation-card-head">
+                  <div className="recommendation-security"><dt>Security</dt><dd><strong id={`recommendation-${recommendation.recommendation_id}`}>{recommendation.ticker}</strong><small>{(recommendation.theme_id || 'Unclassified').replaceAll('_', ' ')} · {recommendation.confidence.toLowerCase()} confidence</small></dd></div>
+                  <div><dt>Auspex score</dt><dd><strong>{Number(recommendation.opportunity_score).toFixed(1)}</strong><small>{recommendation.coverage_status.toLowerCase()} coverage</small></dd></div>
+                  <div><dt>Action</dt><dd><b className={`recommendation-action action-${recommendation.action.toLowerCase()}`}>{recommendation.action}</b><small>{recommendation.suppression_reasons.length ? recommendation.suppression_reasons.join(', ').replaceAll('_', ' ') : 'Policy eligible'}</small></dd></div>
+                  <div><dt>Current → target</dt><dd><strong>{(Number(recommendation.current_weight) * 100).toFixed(1)}% → {(Number(recommendation.target_weight) * 100).toFixed(1)}%</strong><small>Portfolio weight</small></dd></div>
+                  <div><dt>Suggested amount</dt><dd><strong>{new Intl.NumberFormat(undefined, { style: 'currency', currency: recommendations.base_currency }).format(Number(recommendation.suggested_amount_base))}</strong><small>Est. cost {new Intl.NumberFormat(undefined, { style: 'currency', currency: recommendations.base_currency }).format(Number(recommendation.estimated_cost_base))}</small></dd></div>
+                </dl>
+                <p className="recommendation-rationale">{recommendation.rationale}</p>
+                <details className="score-attribution"><summary>Score details · six deterministic legs</summary><ol>{recommendation.attribution.map((leg) => <li key={leg.key}><span><MetricLabel metricKey={leg.key} metadata={metadata} fallback={leg.key.replaceAll('_', ' ')} /></span><strong className={leg.direction === 'RAISED' ? 'positive' : leg.direction === 'LOWERED' ? 'negative' : ''}>{leg.contribution === null ? 'Unavailable' : `${Number(leg.contribution) >= 0 ? '+' : ''}${Number(leg.contribution).toFixed(2)}`}</strong><small>{leg.direction.toLowerCase()}</small></li>)}</ol>{recommendation.coverage_reasons.length > 0 && <p>Coverage notes: {recommendation.coverage_reasons.join(', ').replaceAll('_', ' ')}</p>}</details>
+                <footer className="recommendation-card-actions" aria-label={`${recommendation.ticker} suggestion response`}>
+                  <button className="secondary-action compact" type="button" disabled={savingDisposition !== null || history.current_dispositions[recommendation.recommendation_id] === 'ACCEPTED'} onClick={() => recordDisposition(recommendation.recommendation_id, 'ACCEPTED')}><ThumbsUp size={14} />Accept</button>
+                  <button className="secondary-action compact" type="button" disabled={savingDisposition !== null || history.current_dispositions[recommendation.recommendation_id] === 'DISMISSED'} onClick={() => recordDisposition(recommendation.recommendation_id, 'DISMISSED')}><ThumbsDown size={14} />Dismiss</button>
+                  <button className="secondary-action compact" type="button" disabled={explainingId === recommendation.recommendation_id || Boolean(explanations[recommendation.recommendation_id])} onClick={() => explainRecommendation(recommendation.recommendation_id)}><BookOpenText size={14} />{explainingId === recommendation.recommendation_id ? 'Checking…' : explanations[recommendation.recommendation_id] ? 'Evidence checked' : 'Explain with evidence'}</button>
+                  {history.current_dispositions[recommendation.recommendation_id] && <span className="disposition-status">{history.current_dispositions[recommendation.recommendation_id].toLowerCase()}</span>}
+                  <small>Records your decision only; no trade is placed.</small>
+                </footer>
+                {dispositionErrors[recommendation.recommendation_id] && <p className="error" role="alert">{dispositionErrors[recommendation.recommendation_id]}</p>}
+                {explanationErrors[recommendation.recommendation_id] && <p className="error" role="alert">{explanationErrors[recommendation.recommendation_id]}</p>}
+                {explanations[recommendation.recommendation_id]?.status === 'withheld' && <p className="grounded-withheld">Explanation withheld: {explanations[recommendation.recommendation_id].reasons.map((reason) => reason.replaceAll('_', ' ')).join(', ')}.</p>}
+                {explanations[recommendation.recommendation_id]?.status === 'published' && <div className="grounded-output"><p>{explanations[recommendation.recommendation_id].output.explanation}</p><small>{explanations[recommendation.recommendation_id].output.uncertainty}</small><div className="evidence-list">{explanations[recommendation.recommendation_id].citations.map((citation) => <details className="evidence-item" key={citation.id}><summary>{citation.title || citation.source_name || 'Source evidence'}<small>{citation.knowledge_date ? `Known ${citation.knowledge_date}` : 'Knowledge date unavailable'}</small></summary>{citation.excerpt && <p>{citation.excerpt}</p>}<dl><div><dt>Source</dt><dd>{citation.source_name || citation.source_type || 'Unavailable'}</dd></div><div><dt>Event date</dt><dd>{citation.event_date || 'Unavailable'}</dd></div><div><dt>Knowledge date</dt><dd>{citation.knowledge_date || 'Unavailable'}</dd></div><div><dt>Content</dt><dd>{citation.content_status?.replaceAll('_', ' ') || 'Unavailable'}</dd></div></dl>{citation.url && <a href={citation.url} target="_blank" rel="noreferrer">Open original source <ArrowRight size={12} /></a>}</details>)}</div></div>}
+              </article>)}
             </div>}
             <p className="recommendation-disclaimer">{recommendations?.disclaimer || 'Research only; not financial or tax advice. You decide and execute.'}</p>
           </section>

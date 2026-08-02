@@ -93,6 +93,29 @@ class E12HomeContractTests(unittest.TestCase):
         self.assertIn("Deterministic policy", app)
         self.assertIn("recommendation_service_unavailable", app)
         self.assertIn("recommendations.recommendations.slice(0, 12)", app)
+        self.assertIn("recommendation-list", app)
+        self.assertIn("recommendation-card-head", app)
+        self.assertIn("aria-labelledby={`recommendation-", app)
+        self.assertIn("<dt>Auspex score</dt>", app)
+        self.assertNotIn('<table className="recommendation-table">', app)
+
+    def test_home_has_analytical_holdings_coverage_and_current_analysis(self):
+        app = (ROOT / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
+
+        for value in [
+            "coverage-strip",
+            "PriceSparkline",
+            "seven latest sessions",
+            "average_acquisition_price",
+            "gain_loss_pct",
+            "Auspex score",
+            "Current portfolio analysis",
+            "Strongest holding signal",
+            "Score coverage",
+        ]:
+            self.assertIn(value, app)
+        self.assertIn("['theme', 'exchange', 'country', 'currency']", app)
+        self.assertNotIn("(['sector', 'country', 'currency']", app)
 
     def test_login_brand_and_loading_transition_are_purposeful(self):
         app = (ROOT / "web" / "src" / "App.tsx").read_text(encoding="utf-8")

@@ -39,7 +39,7 @@ class E15RecommenderTests(unittest.TestCase):
         ingestion_app = (
             Path(__file__).resolve().parents[1] / "connectors" / "function_app.py"
         ).read_text(encoding="utf-8")
-        self.assertIn('("quote:", "fx:", "score:security:")', ingestion_app)
+        self.assertIn('("quote:", "history:", "fx:", "score:security:")', ingestion_app)
 
     def test_engine_is_packaged_with_the_function_app(self):
         package = Path(__file__).resolve().parents[1] / "api" / "auspex_api" / "recommender"
@@ -244,6 +244,34 @@ class E15RecommenderTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "withheld")
         self.assertEqual(result["reasons"], ["portfolio_valuation_incomplete"])
+        self.assertEqual(result["recommendations"], [])
+
+    def test_service_omits_suppressed_holds_for_unowned_candidates(self):
+        identity = SimpleNamespace(product_user=lambda _: SimpleNamespace(
+            user_sk="owner-a", risk_profile="Growth", base_currency="USD",
+        ))
+        portfolio = SimpleNamespace(
+            portfolio_summary=lambda _: {
+                "status": "ready", "base_currency": "USD",
+                "valuation_as_of": "2026-07-29", "total_cash_base": "0.00",
+                "total_value_base": "100000.00", "holdings": [],
+            },
+            annual_trade_count=lambda *_: 0,
+        )
+        service = RecommendationService(
+            identity,
+            portfolio,
+            InMemoryOpportunitySignalRepository([{
+                "security_sk": 101, "ticker": "AAPL", "opportunity_score": "100",
+                "coverage_status": "READY", "country": "US", "spread_bps": "5",
+                "theme_id": "enterprise_technology", "coverage_reasons": [],
+                "as_of": "2026-07-29",
+            }]),
+        )
+
+        result = service.recommendations("principal-a")
+
+        self.assertEqual(result["status"], "ready")
         self.assertEqual(result["recommendations"], [])
 
 

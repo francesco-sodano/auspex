@@ -226,6 +226,57 @@ latest_quotes_by_ticker = (
     .withColumn("id", F.concat(F.lit("quote:"), F.col("ticker")))
 )
 
+# Export the latest seven distinct point-in-time closes for compact Home sparklines.
+history_revision_window = Window.partitionBy("security_sk", "event_date").orderBy(
+    F.col("knowledge_date").desc(),
+    F.col("revision_loaded_at").desc_nulls_last(),
+    F.col("price_revision_hash").desc(),
+)
+history_session_window = Window.partitionBy("security_sk").orderBy(
+    F.col("event_date").desc()
+)
+recent_price_points = (
+    spark.table("fact_market_daily")
+    .filter(F.col("knowledge_date") <= F.to_date(F.lit(to_date)))
+    .withColumn("revision_number", F.row_number().over(history_revision_window))
+    .filter(F.col("revision_number") == 1)
+    .withColumn("session_number", F.row_number().over(history_session_window))
+    .filter(F.col("session_number") <= 7)
+    .join(current_securities.select("security_sk", "ticker", "currency"), "security_sk", "inner")
+    .select(
+        "security_sk", "ticker", "currency",
+        F.col("event_date").cast(StringType()).alias("date"),
+        F.col("close").cast(StringType()).alias("price"),
+    )
+)
+price_histories = (
+    recent_price_points.withColumn(
+        "price_point_json",
+        F.concat(
+            F.lit('{"date":"'), F.col("date"),
+            F.lit('","price":"'), F.col("price"), F.lit('"}'),
+        ),
+    )
+    .groupBy("security_sk", "ticker", "currency")
+    .agg(
+        F.concat(
+            F.lit("["),
+            F.concat_ws(",", F.sort_array(F.collect_list("price_point_json"))),
+            F.lit("]"),
+        ).alias("prices_json")
+    )
+    .withColumn("kind", F.lit("price_history"))
+    .withColumn("source_id", F.lit("fabric"))
+    .withColumn("generation", F.lit(projection_generation))
+)
+price_histories_by_security = price_histories.withColumn(
+    "id", F.concat(F.lit("history:security:"), F.col("security_sk"))
+)
+price_histories_by_ticker = (
+    price_histories.join(unique_current_tickers.select("security_sk"), "security_sk", "inner")
+    .withColumn("id", F.concat(F.lit("history:"), F.col("ticker")))
+)
+
 fx_window = Window.partitionBy("ccy_pair").orderBy(
     F.col("event_date").desc(),
     F.col("knowledge_date").desc(),
@@ -359,6 +410,8 @@ dated_fx = (
 )
 (
     latest_quotes_by_security.unionByName(latest_quotes_by_ticker, allowMissingColumns=True)
+    .unionByName(price_histories_by_security, allowMissingColumns=True)
+    .unionByName(price_histories_by_ticker, allowMissingColumns=True)
     .unionByName(latest_fx, allowMissingColumns=True)
     .unionByName(dated_fx, allowMissingColumns=True)
     .unionByName(latest_scores, allowMissingColumns=True)
@@ -873,6 +926,7 @@ summary = {
     "to_date": to_date,
     "security_documents": security_by_sk.count() + security_by_ticker.count() + security_by_isin.count(),
     "quote_documents": latest_quotes_by_security.count() + latest_quotes_by_ticker.count(),
+    "price_history_documents": price_histories_by_security.count() + price_histories_by_ticker.count(),
     "fx_documents": latest_fx.count() + dated_fx.count(),
     "score_documents": latest_scores.count(),
     "transactions": spark.table("silver_portfolio_transaction").count(),

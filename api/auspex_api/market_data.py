@@ -1,4 +1,5 @@
 from decimal import Decimal
+import json
 import re
 from typing import TYPE_CHECKING
 
@@ -92,6 +93,24 @@ class CosmosMarketDataRepository:
             if document is not None:
                 return document
         return _read(self._container, f"quote:{str(ticker).strip().upper()}")
+
+    def price_history(self, ticker: str, security_sk: int | None = None) -> dict | None:
+        if security_sk is not None:
+            document = _read(self._container, f"history:security:{int(security_sk)}")
+            if document is not None:
+                return self._normalized_history(document)
+        document = _read(self._container, f"history:{str(ticker).strip().upper()}")
+        return self._normalized_history(document) if document is not None else None
+
+    @staticmethod
+    def _normalized_history(document: dict) -> dict:
+        normalized = dict(document)
+        if "prices" not in normalized and normalized.get("prices_json"):
+            normalized["prices"] = json.loads(normalized["prices_json"])
+        return normalized
+
+    def score(self, security_sk: int) -> dict | None:
+        return _read(self._container, f"score:security:{int(security_sk)}")
 
     def fx_rate(
         self,

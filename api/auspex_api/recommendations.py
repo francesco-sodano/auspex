@@ -122,6 +122,8 @@ class RecommendationService:
         )
         recommendation_rows = []
         for recommendation in recommendations:
+            if recommendation.action == "HOLD" and recommendation.security_sk not in holdings:
+                continue
             payload = recommendation_payload(recommendation)
             signal = signals_by_security.get(recommendation.security_sk)
             payload["opportunity_score"] = str(

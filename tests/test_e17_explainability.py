@@ -158,11 +158,11 @@ class E17ExplainabilityTests(unittest.TestCase):
 
         for contract in (
             "fetch('/api/metric_metadata')", "fetch('/api/recommendation_history')",
-            "<table className=\"holdings-table\"", "<table className=\"recommendation-table\"",
-            "recommendation.attribution", "Accept suggestion", "Dismiss suggestion",
-            "does not place a trade", "Decision history", "citation.excerpt",
+            "<table className=\"holdings-table analytical-holdings\"", "recommendation-list",
+            "recommendation.attribution", ">Accept</button>", ">Dismiss</button>",
+            "no trade is placed", "Decision history", "citation.excerpt",
             "citation.event_date", "citation.content_status",
-            "Monthly outlook", "The range is withheld until measured portfolio volatility",
+            "Current portfolio analysis", "Latest deterministic review",
         ):
             self.assertIn(contract, app)
 

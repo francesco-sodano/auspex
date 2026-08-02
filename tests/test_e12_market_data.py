@@ -104,10 +104,20 @@ class E12MarketDataTests(unittest.TestCase):
                 "id": "fx:USDCHF", "pair": "USDCHF", "rate": "0.80000000",
                 "as_of": "2026-07-21",
             },
+            ("history:security:101", "history:security:101"): {
+                "id": "history:security:101", "ticker": "MSFT",
+                "prices_json": '[{"date":"2026-07-21","price":"420.00"}]',
+            },
+            ("score:security:101", "score:security:101"): {
+                "id": "score:security:101", "opportunity_score": "82.5",
+                "theme_id": "enterprise_technology",
+            },
         })
         repository = CosmosMarketDataRepository(container)
 
         self.assertEqual(repository.quote("msft", 101)["price"], "420.00")
+        self.assertEqual(repository.price_history("msft", 101)["prices"][0]["price"], "420.00")
+        self.assertEqual(repository.score(101)["opportunity_score"], "82.5")
         inverse = repository.fx_rate("CHF", "USD")
 
         self.assertEqual(Decimal(inverse["rate"]), Decimal("1.25"))

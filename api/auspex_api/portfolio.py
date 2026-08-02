@@ -216,6 +216,10 @@ class UniverseRepository(Protocol):
 class MarketDataRepository(Protocol):
     def quote(self, ticker: str, security_sk: int | None = None) -> dict | None: ...
 
+    def price_history(self, ticker: str, security_sk: int | None = None) -> dict | None: ...
+
+    def score(self, security_sk: int) -> dict | None: ...
+
     def fx_rate(self, from_currency: str, to_currency: str, as_of: str | None = None) -> dict | None: ...
 
 
@@ -267,15 +271,32 @@ class InMemoryUniverseRepository:
 
 
 class InMemoryMarketDataRepository:
-    def __init__(self, quotes: dict | None = None, fx_rates: dict | None = None) -> None:
+    def __init__(
+        self,
+        quotes: dict | None = None,
+        fx_rates: dict | None = None,
+        price_histories: dict | None = None,
+        scores: dict | None = None,
+    ) -> None:
         self._quotes = {str(key).upper(): value for key, value in (quotes or {}).items()}
         self._fx_rates = {
             (str(pair[0]).upper(), str(pair[1]).upper()): value
             for pair, value in (fx_rates or {}).items()
         }
+        self._price_histories = {
+            str(key).upper(): value
+            for key, value in (price_histories or {}).items()
+        }
+        self._scores = {int(key): value for key, value in (scores or {}).items()}
 
     def quote(self, ticker: str, security_sk: int | None = None) -> dict | None:
         return self._quotes.get(ticker.upper())
+
+    def price_history(self, ticker: str, security_sk: int | None = None) -> dict | None:
+        return self._price_histories.get(ticker.upper())
+
+    def score(self, security_sk: int) -> dict | None:
+        return self._scores.get(int(security_sk))
 
     def fx_rate(self, from_currency: str, to_currency: str, as_of: str | None = None) -> dict | None:
         source = from_currency.upper()
@@ -1414,7 +1435,16 @@ class PortfolioService:
             transaction.transaction_id: transaction
             for transaction in transactions
         }
-        for transaction in transactions:
+        ordered_transactions = sorted(
+            transactions,
+            key=lambda transaction: (
+                transaction.event_date,
+                int(transaction.transaction_type not in {"OPENING_CASH", "OPENING_POSITION"}),
+                transaction.created_at,
+                transaction.transaction_id,
+            ),
+        )
+        for transaction in ordered_transactions:
             cash_amount = Decimal(transaction.cash_amount)
             fees_amount = Decimal(transaction.fees)
             _add_amount(cash_by_currency, transaction.currency, cash_amount)
@@ -1491,9 +1521,27 @@ class PortfolioService:
                     "sector": transaction.security_sector,
                     "country": transaction.security_country,
                     "quantity": Decimal("0"),
+                    "acquisition_cost_source": Decimal("0"),
                 })
-                direction = Decimal("-1") if transaction.transaction_type == "SELL" else Decimal("1")
-                position["quantity"] += direction * Decimal(transaction.quantity)
+                quantity = Decimal(transaction.quantity)
+                if transaction.transaction_type in {"OPENING_POSITION", "BUY"}:
+                    position["quantity"] += quantity
+                    position["acquisition_cost_source"] += (
+                        Decimal(transaction.source_amount)
+                        if transaction.source_amount is not None
+                        else quantity * Decimal(transaction.price)
+                    )
+                else:
+                    held_quantity = position["quantity"]
+                    average_cost = (
+                        position["acquisition_cost_source"] / held_quantity
+                        if held_quantity > 0
+                        else Decimal("0")
+                    )
+                    position["quantity"] -= quantity
+                    position["acquisition_cost_source"] -= average_cost * quantity
+                    if position["quantity"] == 0:
+                        position["acquisition_cost_source"] = Decimal("0")
 
         cash_base = Decimal("0")
         cash_exposure_base: dict[str, Decimal] = {}
@@ -1516,21 +1564,49 @@ class PortfolioService:
         stocks_base = Decimal("0")
         sector_exposure_base: dict[str, Decimal] = {}
         country_exposure_base: dict[str, Decimal] = {}
+        theme_exposure_base: dict[str, Decimal] = {}
+        exchange_exposure_base: dict[str, Decimal] = {}
         currency_exposure_base = dict(cash_exposure_base)
         holdings = []
         for position in positions.values():
             if position["quantity"] == 0:
                 continue
+            score = (
+                self._market_data.score(position["security_sk"])
+                if position["security_sk"] is not None
+                else None
+            )
+            history_document = self._market_data.price_history(
+                position["ticker"], position["security_sk"]
+            )
+            price_history = sorted(
+                list((history_document or {}).get("prices") or []),
+                key=lambda point: str(point.get("date") or ""),
+            )[-7:]
             quote = self._market_data.quote(position["ticker"], position["security_sk"])
             market_value_base = None
             latest_price = None
             price_as_of = None
+            average_acquisition_price = (
+                position["acquisition_cost_source"] / position["quantity"]
+                if position["quantity"] > 0
+                else None
+            )
+            gain_loss_pct = None
             if not quote:
                 missing_prices.add(position["ticker"])
             else:
                 latest_price = Decimal(quote["price"])
                 price_as_of = quote.get("as_of")
                 quote_currency = str(quote.get("currency") or position["currency"]).upper()
+                if (
+                    average_acquisition_price is not None
+                    and average_acquisition_price > 0
+                    and quote_currency == position["currency"]
+                ):
+                    gain_loss_pct = (
+                        (latest_price / average_acquisition_price) - Decimal("1")
+                    ) * Decimal("100")
                 conversion = self._convert(
                     position["quantity"] * latest_price,
                     quote_currency,
@@ -1550,6 +1626,16 @@ class PortfolioService:
                     _add_amount(
                         country_exposure_base,
                         position["country"] or "Unknown",
+                        conversion[0],
+                    )
+                    _add_amount(
+                        theme_exposure_base,
+                        str((score or {}).get("theme_id") or "Unclassified"),
+                        conversion[0],
+                    )
+                    _add_amount(
+                        exchange_exposure_base,
+                        position["exchange"] or "Unknown",
                         conversion[0],
                     )
                     _add_amount(currency_exposure_base, quote_currency, conversion[0])
@@ -1572,6 +1658,19 @@ class PortfolioService:
                 "latest_price": _money(latest_price) if latest_price is not None else None,
                 "price_as_of": price_as_of,
                 "market_value_base": _money(market_value_base) if market_value_base is not None else None,
+                "average_acquisition_price": (
+                    _money(average_acquisition_price)
+                    if average_acquisition_price is not None
+                    else None
+                ),
+                "gain_loss_pct": (
+                    _quantity(gain_loss_pct) if gain_loss_pct is not None else None
+                ),
+                "price_history": price_history,
+                "opportunity_score": (score or {}).get("opportunity_score"),
+                "score_as_of": (score or {}).get("as_of"),
+                "score_coverage_status": (score or {}).get("coverage_status"),
+                "theme_id": (score or {}).get("theme_id"),
                 "weight": None,
                 "valuation_status": (
                     "valued"
@@ -1632,6 +1731,8 @@ class PortfolioService:
                 "sector": exposure_rows(sector_exposure_base),
                 "country": exposure_rows(country_exposure_base),
                 "currency": exposure_rows(currency_exposure_base),
+                "theme": exposure_rows(theme_exposure_base),
+                "exchange": exposure_rows(exchange_exposure_base),
             },
             "coverage": {
                 "missing_prices": sorted(missing_prices),
