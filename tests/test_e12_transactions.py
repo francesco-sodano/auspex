@@ -463,6 +463,7 @@ class E12TransactionTests(unittest.TestCase):
             transaction_payload(
                 "opening-position", "OPENING_POSITION",
                 security_code="MSFT", quantity="2", price="300",
+                event_date="2026-07-20",
             ),
         )
         dividend, _ = self.service.create_transaction(
@@ -559,7 +560,10 @@ class E12TransactionTests(unittest.TestCase):
     def test_correction_supersedes_parent_and_all_linked_costs(self):
         self.service.create_transaction(
             self.user_a,
-            transaction_payload("opening-cash", "OPENING_CASH", amount="1000"),
+            transaction_payload(
+                "opening-cash", "OPENING_CASH", amount="1000",
+                event_date="2026-07-19",
+            ),
         )
         original, _ = self.service.create_transaction(
             self.user_a,
@@ -931,12 +935,18 @@ class E12TransactionTests(unittest.TestCase):
     def test_opening_balances_are_unique_and_must_precede_activity(self):
         self.service.create_transaction(
             self.user_a,
-            transaction_payload("opening-cash", "OPENING_CASH", amount="1000"),
+            transaction_payload(
+                "opening-cash", "OPENING_CASH", amount="1000",
+                event_date="2026-07-19",
+            ),
         )
         with self.assertRaisesRegex(ValueError, "opening cash"):
             self.service.create_transaction(
                 self.user_a,
-                transaction_payload("opening-cash-again", "OPENING_CASH", amount="100"),
+                transaction_payload(
+                    "opening-cash-again", "OPENING_CASH", amount="100",
+                    event_date="2026-07-19",
+                ),
             )
 
         self.service.create_transaction(
@@ -944,14 +954,43 @@ class E12TransactionTests(unittest.TestCase):
             transaction_payload(
                 "opening-position", "OPENING_POSITION",
                 security_code="MSFT", quantity="2", price="300",
+                event_date="2026-07-20",
             ),
         )
-        with self.assertRaisesRegex(ValueError, "opening position"):
+        second_lot, created = self.service.create_transaction(
+            self.user_a,
+            transaction_payload(
+                "opening-position-again", "OPENING_POSITION",
+                security_code="MSFT", quantity="1", price="300",
+                event_date="2026-07-20",
+            ),
+        )
+        self.assertTrue(created)
+        self.assertEqual(second_lot.quantity, "1")
+        summary = self.service.quick_summary(self.user_a)
+        self.assertEqual(summary["positions"], [
+            {"security_code": "MSFT", "quantity": "3"},
+        ])
+        self.assertEqual(
+            [asset for asset in summary["assets"] if asset["ticker"] == "MSFT"][0]["quantity"],
+            "3",
+        )
+
+        self.service.create_transaction(
+            self.user_a,
+            transaction_payload(
+                "buy-after-opening", "BUY",
+                security_code="MSFT", quantity="1", price="300",
+                event_date="2026-07-21",
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "must precede"):
             self.service.create_transaction(
                 self.user_a,
                 transaction_payload(
-                    "opening-position-again", "OPENING_POSITION",
+                    "late-opening-position", "OPENING_POSITION",
                     security_code="MSFT", quantity="1", price="300",
+                    event_date="2026-07-22",
                 ),
             )
 

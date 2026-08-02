@@ -1129,7 +1129,6 @@ class PortfolioService:
         cash_activity: set[tuple[str, str]] = set()
         security_activity: set[tuple[str, int | str]] = set()
         opening_cash: set[tuple[str, str]] = set()
-        opening_positions: set[tuple[str, int | str]] = set()
 
         for transaction in ordered:
             cash_key = (transaction.account_id, transaction.currency)
@@ -1149,11 +1148,8 @@ class PortfolioService:
                 cash_activity.add(cash_key)
 
             if transaction_type == "OPENING_POSITION":
-                if security_key in opening_positions:
-                    raise ValueError("opening position already exists for this account and security")
                 if security_key in security_activity:
                     raise ValueError("opening position must precede other security activity")
-                opening_positions.add(security_key)
             elif transaction_type in _SECURITY_REFERENCE_TYPES:
                 security_activity.add(security_key)
 
