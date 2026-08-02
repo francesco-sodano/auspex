@@ -254,6 +254,8 @@ class E12TransactionTests(unittest.TestCase):
         self.assertEqual(summary["allocation"], {
             "cash_value": "1250.00",
             "stocks_value": "840.00",
+            "complete": True,
+            "reason": None,
             "cash_weight": "0.5980861244019138755980861244",
             "stocks_weight": "0.4019138755980861244019138756",
         })
@@ -984,10 +986,34 @@ class E12TransactionTests(unittest.TestCase):
         )
 
         summary = service.portfolio_summary(self.user_a)
+        ledger_summary = service.quick_summary(self.user_a)
 
         self.assertEqual(summary["status"], "pending_ingestion")
         self.assertIsNone(summary["total_value_base"])
+        self.assertEqual(summary["valued_total_base"], "0.00")
+        self.assertEqual(summary["holdings"][0]["valuation_status"], "missing_price")
         self.assertEqual(summary["coverage"]["missing_prices"], ["MSFT"])
+        self.assertEqual(
+            ledger_summary["total_value"]["value_by_currency"],
+            {"USD": "0.00"},
+        )
+        self.assertEqual(ledger_summary["coverage"]["missing_prices"], ["MSFT"])
+        self.assertEqual(ledger_summary["assets"][1], {
+            "asset_type": "stock",
+            "ticker": "MSFT",
+            "name": "Microsoft Corporation",
+            "quantity": "1",
+            "price_currency": None,
+            "latest_price": None,
+            "current_value": None,
+            "weight": None,
+            "valuation_status": "missing_price",
+        })
+        self.assertFalse(ledger_summary["allocation"]["complete"])
+        self.assertEqual(
+            ledger_summary["allocation"]["reason"],
+            "incomplete_coverage",
+        )
 
     def test_missing_position_fx_does_not_hide_convertible_cash(self):
         market_data = InMemoryMarketDataRepository(

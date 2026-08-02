@@ -1276,20 +1276,84 @@ class PortfolioService:
             "dividends_total": reporting_total(dividends),
             "interest_total": reporting_total(interest),
             "currency_exposure": valuation["exposures"]["currency"],
+            "coverage": valuation["coverage"],
+            "assets": [
+                {
+                    "asset_type": "cash",
+                    "ticker": "CASH",
+                    "name": "Cash",
+                    "quantity": None,
+                    "price_currency": None,
+                    "latest_price": None,
+                    "current_value": valuation["total_cash_base"],
+                    "weight": (
+                        _quantity(
+                            Decimal(valuation["total_cash_base"])
+                            / Decimal(valuation["valued_total_base"])
+                        )
+                        if valuation["total_cash_base"] is not None
+                        and Decimal(valuation["valued_total_base"]) != 0
+                        else None
+                    ),
+                    "valuation_status": (
+                        "valued"
+                        if valuation["total_cash_base"] is not None
+                        else "missing_fx"
+                    ),
+                },
+                *[
+                    {
+                        "asset_type": "stock",
+                        "ticker": holding["ticker"],
+                        "name": holding["company_name"],
+                        "quantity": holding["quantity"],
+                        "price_currency": holding["price_currency"],
+                        "latest_price": holding["latest_price"],
+                        "current_value": holding["market_value_base"],
+                        "weight": holding["weight"],
+                        "valuation_status": holding["valuation_status"],
+                    }
+                    for holding in valuation["holdings"]
+                ],
+            ],
             "allocation": {
                 "cash_value": valuation["total_cash_base"],
-                "stocks_value": valuation["total_stocks_base"],
-                "cash_weight": valuation["cash_weight"],
+                "stocks_value": valuation["valued_stocks_base"],
+                "complete": valuation["status"] in {"ready", "stale"},
+                "reason": (
+                    "negative_cash"
+                    if valuation["total_cash_base"] is not None
+                    and Decimal(valuation["total_cash_base"]) < 0
+                    else "incomplete_coverage"
+                    if valuation["status"] not in {"ready", "stale"}
+                    else None
+                ),
+                "cash_weight": (
+                    valuation["cash_weight"]
+                    if valuation["total_cash_base"] is not None
+                    and Decimal(valuation["total_cash_base"]) >= 0
+                    else None
+                ),
                 "stocks_weight": (
                     _quantity(Decimal("1") - Decimal(valuation["cash_weight"]))
                     if valuation["cash_weight"] is not None
+                    and valuation["total_cash_base"] is not None
+                    and Decimal(valuation["total_cash_base"]) >= 0
                     else None
                 ),
             },
             "total_value": {
                 "status": valuation["status"] if valuation_ready else "pending_market_valuation",
-                "value_by_currency": {valuation_currency: total_value} if valuation_ready else None,
-                "reason": None if valuation_ready else "Total value requires market prices and FX valuation.",
+                "value_by_currency": {
+                    valuation_currency: (
+                        total_value if valuation_ready else valuation["valued_total_base"]
+                    )
+                },
+                "reason": (
+                    None
+                    if valuation_ready
+                    else "Valued subtotal excludes assets with missing prices or FX."
+                ),
             },
             "earnings": {
                 "status": valuation["status"] if valuation_ready else "pending_market_valuation",
@@ -1316,6 +1380,8 @@ class PortfolioService:
                 "total_cash_base": "0.00",
                 "total_stocks_base": "0.00",
                 "total_value_base": "0.00",
+                "valued_stocks_base": "0.00",
+                "valued_total_base": "0.00",
                 "net_contributed_capital_base": "0.00",
                 "total_earnings_base": "0.00",
                 "cash_weight": None,
@@ -1469,24 +1535,32 @@ class PortfolioService:
                 "price_as_of": price_as_of,
                 "market_value_base": _money(market_value_base) if market_value_base is not None else None,
                 "weight": None,
+                "valuation_status": (
+                    "valued"
+                    if market_value_base is not None
+                    else "missing_price"
+                    if not quote
+                    else "missing_fx"
+                ),
             })
 
         complete = not missing_prices and not missing_fx
+        valued_total = cash_base + stocks_base
         total_value = cash_base + stocks_base if complete else None
-        if total_value and total_value != 0:
+        if valued_total != 0:
             for holding in holdings:
                 if holding["market_value_base"] is not None:
                     holding["weight"] = _quantity(
-                        Decimal(holding["market_value_base"]) / total_value
+                        Decimal(holding["market_value_base"]) / valued_total
                     )
         def exposure_rows(values: dict[str, Decimal]) -> list[dict]:
-            if total_value is None or total_value == 0:
+            if valued_total == 0:
                 return []
             return [
                 {
                     "name": name,
                     "market_value_base": _money(value),
-                    "weight": _quantity(value / total_value),
+                    "weight": _quantity(value / valued_total),
                 }
                 for name, value in sorted(values.items())
                 if value != 0
@@ -1505,6 +1579,8 @@ class PortfolioService:
             "total_cash_base": _money(cash_base) if not missing_cash_fx else None,
             "total_stocks_base": _money(stocks_base) if complete else None,
             "total_value_base": _money(total_value) if total_value is not None else None,
+            "valued_stocks_base": _money(stocks_base),
+            "valued_total_base": _money(valued_total),
             "net_contributed_capital_base": _money(capital_base) if not missing_capital_fx else None,
             "total_earnings_base": _money(total_value - capital_base) if total_value is not None and not missing_fx else None,
             "cash_weight": _quantity(cash_base / total_value) if total_value else None,

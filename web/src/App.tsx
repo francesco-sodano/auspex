@@ -112,11 +112,29 @@ type PortfolioSummary = {
     market_value_base: string
     weight: string
   }>
+  coverage: {
+    missing_prices: string[]
+    missing_fx: string[]
+    oldest_price_date: string | null
+  }
+  assets: Array<{
+    asset_type: 'cash' | 'stock'
+    ticker: string
+    name: string
+    quantity: string | null
+    price_currency: string | null
+    latest_price: string | null
+    current_value: string | null
+    weight: string | null
+    valuation_status: 'valued' | 'missing_price' | 'missing_fx'
+  }>
   allocation: {
     cash_value: string | null
     stocks_value: string | null
     cash_weight: string | null
     stocks_weight: string | null
+    complete: boolean
+    reason: 'negative_cash' | 'incomplete_coverage' | null
   }
   total_value: {
     status: 'pending_market_valuation' | 'ready' | 'stale'
@@ -879,11 +897,15 @@ function TransactionsPage({ user }: { user: AppUser }) {
     dividends_total: null,
     interest_total: null,
     currency_exposure: [],
+    coverage: { missing_prices: [], missing_fx: [], oldest_price_date: null },
+    assets: [],
     allocation: {
       cash_value: null,
       stocks_value: null,
       cash_weight: null,
       stocks_weight: null,
+      complete: false,
+      reason: 'incomplete_coverage',
     },
     total_value: {
       status: 'pending_market_valuation',
@@ -1162,7 +1184,7 @@ function TransactionsPage({ user }: { user: AppUser }) {
       <section className="transactions-main">
         <div className="transactions-heading"><h1>Ledger</h1><div className="ledger-heading-meta"><span>Updated {formatUpdatedOn(summary.updated_on)}</span><span className="transaction-count" title={metadata.transaction_count?.plain_description}>{summary.transaction_count} entries</span></div></div>
         <div className="ledger-metrics">
-          <article className={`ledger-total ${summary.total_value.status === 'pending_market_valuation' ? 'valuation-pending' : ''}`}><MetricLabel metricKey="portfolio_value" metadata={metadata} fallback="Total ledger value" /><strong>{ledgerLoaded ? summary.total_value.value_by_currency ? formatUsd(summary.total_value.value_by_currency.USD, 'Pending valuation') : 'Pending valuation' : 'Loading…'}</strong><small>{summary.total_value.status === 'stale' ? 'Last complete valuation; market prices are stale' : 'Cash + current stock values; income and fees already flow through cash'}</small></article>
+          <article className={`ledger-total ${summary.total_value.status === 'pending_market_valuation' ? 'valuation-pending' : ''}`}><MetricLabel metricKey="portfolio_value" metadata={metadata} fallback={summary.total_value.status === 'pending_market_valuation' ? 'Valued subtotal' : 'Total ledger value'} /><strong>{ledgerLoaded ? summary.total_value.value_by_currency ? formatUsd(summary.total_value.value_by_currency.USD, 'Pending valuation') : 'Pending valuation' : 'Loading…'}</strong><small>{summary.total_value.status === 'pending_market_valuation' ? summary.total_value.reason : summary.total_value.status === 'stale' ? 'Last complete valuation; market prices are stale' : 'Cash + current stock values; income and fees already flow through cash'}</small></article>
           <article><MetricLabel metricKey="cash_available" metadata={metadata} fallback="Current cash" /><strong>{formatUsd(summary.cash_total, 'Pending valuation')}</strong><small>All cash balances converted to USD</small></article>
           <article><MetricLabel metricKey="net_contributed_capital" metadata={metadata} fallback="Net contributed capital" /><strong>{formatUsd(summary.net_contributed_capital_total, 'Pending valuation')}</strong><small>Opening capital + deposits − withdrawals, in USD</small></article>
           <article className={summary.earnings.status === 'pending_market_valuation' ? 'valuation-pending' : ''}><MetricLabel metricKey="total_gain_loss" metadata={metadata} fallback="Current earnings" /><strong>{summary.earnings.value_by_currency ? formatUsd(summary.earnings.value_by_currency.USD, 'Pending valuation') : 'Pending valuation'}</strong><small>{summary.earnings.status === 'stale' ? 'Last complete earnings; market prices are stale' : 'Total value − net contributed capital, in USD'}</small></article>
@@ -1173,14 +1195,18 @@ function TransactionsPage({ user }: { user: AppUser }) {
         </div>
         <section className="ledger-allocation" aria-labelledby="ledger-allocation-title">
           <div className="ledger-allocation-head"><div><span className="eyebrow">Portfolio allocation</span><h2 id="ledger-allocation-title">Stocks and cash</h2></div><strong>{formatUsd(summary.total_value.value_by_currency?.USD || null, 'Pending valuation')}</strong></div>
-          {cashPercent === null || stocksPercent === null ? <p>Allocation is available when prices and FX rates are complete.</p> : <>
+          {cashPercent === null || stocksPercent === null ? <p>{summary.allocation.reason === 'negative_cash' ? 'Allocation is unavailable while cash is negative.' : `Allocation is available when coverage is complete${summary.coverage.missing_prices.length ? `; missing prices: ${summary.coverage.missing_prices.join(', ')}` : ''}${summary.coverage.missing_fx.length ? `; missing FX: ${summary.coverage.missing_fx.join(', ')}` : ''}.`}</p> : <>
             <div className="allocation-bar" role="img" aria-label={`Portfolio allocation: ${stocksPercent.toFixed(1)}% stocks and ${cashPercent.toFixed(1)}% cash`}><span className="allocation-stocks" style={{ width: `${stocksPercent}%` }} /><span className="allocation-cash" style={{ width: `${cashPercent}%` }} /></div>
             <div className="allocation-legend"><div><i className="stocks-key" /><span>Stocks</span><strong>{stocksPercent.toFixed(1)}%</strong><small>{formatUsd(summary.allocation.stocks_value, 'Pending')}</small></div><div><i className="cash-key" /><span>Cash</span><strong>{cashPercent.toFixed(1)}%</strong><small>{formatUsd(summary.allocation.cash_value, 'Pending')}</small></div></div>
           </>}
         </section>
+        <section className="ledger-assets" aria-labelledby="ledger-assets-title">
+          <div className="panel-title ledger-assets-head"><div><h2 id="ledger-assets-title">Current assets</h2><p>Consolidated cash and current holdings. Repeated transactions for one ticker are combined.</p></div><strong>{summary.assets.filter((asset) => asset.asset_type === 'stock').length} stocks</strong></div>
+          <div className="table-scroll"><table className="asset-table"><thead><tr><th scope="col">Asset</th><th scope="col">Quantity</th><th scope="col">Current price</th><th scope="col">Current value (USD)</th><th scope="col">Share / status</th></tr></thead><tbody>{summary.assets.map((asset) => <tr key={`${asset.asset_type}-${asset.ticker}`}><th scope="row"><strong>{asset.ticker}</strong><small>{asset.name}</small></th><td>{asset.quantity || '—'}</td><td>{asset.latest_price && asset.price_currency ? `${asset.price_currency} ${asset.latest_price}` : '—'}</td><td>{asset.current_value === null ? 'Pending' : formatUsd(asset.current_value, 'Pending')}</td><td>{asset.valuation_status === 'valued' && asset.weight !== null ? `${(Number(asset.weight) * 100).toFixed(1)}%` : asset.valuation_status === 'missing_price' ? 'Missing current price' : 'Missing FX rate'}</td></tr>)}</tbody></table></div>
+        </section>
         {loadError && <p className="error" role="alert">{loadError}</p>}
         <section className="ledger-list ledger-full">
-          <div className="panel-title ledger-head"><div><h2>Ledger</h2><p>Every cash movement and holding starts here.</p></div><button className="primary-action compact ledger-add-action" type="button" onClick={() => openTransaction()}><Plus size={16} aria-hidden="true" /><span>Add transaction</span></button></div>
+          <div className="panel-title ledger-head"><div><h2>Transactions</h2><p>Chronological record of the actions entered in the Ledger.</p></div><button className="primary-action compact ledger-add-action" type="button" onClick={() => openTransaction()}><Plus size={16} aria-hidden="true" /><span>Add transaction</span></button></div>
           {!ledgerLoaded ? <div className="empty-ledger"><span>Loading ledger…</span></div> : transactions.length === 0 ? <div className="empty-ledger"><WalletCards size={24} /><h3>Start with what you have</h3><p>Cash only and one-stock-only portfolios are both valid. Add the other side later if you want.</p><div className="empty-ledger-actions"><button className="secondary-action" onClick={() => openTransaction('OPENING_CASH')}>Start with cash</button><button className="secondary-action" onClick={() => openTransaction('OPENING_POSITION')}>Start with one stock</button></div></div> : <div className="table-scroll"><table className="transaction-table"><thead><tr><th scope="col">Date</th><th scope="col">Type</th><th scope="col">Asset</th><th scope="col"><MetricLabel metricKey="cash_impact" metadata={metadata} fallback="Cash impact" /></th><th scope="col"><span className="visually-hidden">Actions</span></th></tr></thead><tbody>{transactions.map((transaction) => {
             const typeLabel = transaction.cost_category || transaction.transaction_type
             return <tr className={`transaction-row ${transaction.linked_transaction_id ? 'linked-cost-row' : ''}`} key={transaction.transaction_id}><td>{transaction.event_date}</td><td>{typeLabel.replaceAll('_',' ')}{transaction.linked_transaction_id && <small>Linked cost</small>}</td><td>{transaction.security_code || transaction.source_currency || transaction.currency}</td><td><strong className={transaction.cash_amount.startsWith('-') ? 'negative' : 'positive'}>{transaction.currency} {transaction.cash_amount === '0.00' ? 'No cash movement' : transaction.cash_amount}</strong>{transaction.source_currency && transaction.source_currency !== transaction.currency && <small>{transaction.source_currency} {transaction.source_amount} at {transaction.fx_rate_to_settlement}</small>}</td><td><button className="icon-action correction-action" type="button" disabled={Boolean(transaction.linked_transaction_id)} onClick={() => openCorrection(transaction)} aria-label={`Edit ${transaction.transaction_type.toLowerCase().replaceAll('_', ' ')} from ${transaction.event_date}`} title={transaction.linked_transaction_id ? 'Edit this cost with its parent transaction' : 'Edit transaction'}><Pencil size={15} /></button></td></tr>

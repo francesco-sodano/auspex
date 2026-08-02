@@ -57,6 +57,10 @@ class E12HomeContractTests(unittest.TestCase):
         self.assertIn("allocation-stocks", app)
         self.assertIn("allocation-cash", app)
         self.assertNotIn('fallback="Positions"', app)
+        self.assertIn("Current assets", app)
+        self.assertIn("Repeated transactions for one ticker are combined", app)
+        self.assertIn("Missing current price", app)
+        self.assertIn("<h2>Transactions</h2>", app)
 
     def test_transaction_modal_exposes_search_state_limits_and_fx(self):
         app = (ROOT / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
