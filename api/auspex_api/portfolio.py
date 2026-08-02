@@ -1293,6 +1293,7 @@ class PortfolioService:
                         )
                         if valuation["total_cash_base"] is not None
                         and Decimal(valuation["valued_total_base"]) != 0
+                        and Decimal(valuation["total_cash_base"]) >= 0
                         else None
                     ),
                     "valuation_status": (
@@ -1310,7 +1311,12 @@ class PortfolioService:
                         "price_currency": holding["price_currency"],
                         "latest_price": holding["latest_price"],
                         "current_value": holding["market_value_base"],
-                        "weight": holding["weight"],
+                        "weight": (
+                            holding["weight"]
+                            if valuation["total_cash_base"] is not None
+                            and Decimal(valuation["total_cash_base"]) >= 0
+                            else None
+                        ),
                         "valuation_status": holding["valuation_status"],
                     }
                     for holding in valuation["holdings"]
@@ -1319,7 +1325,11 @@ class PortfolioService:
             "allocation": {
                 "cash_value": valuation["total_cash_base"],
                 "stocks_value": valuation["valued_stocks_base"],
-                "complete": valuation["status"] in {"ready", "stale"},
+                "complete": (
+                    valuation["status"] in {"ready", "stale"}
+                    and valuation["total_cash_base"] is not None
+                    and Decimal(valuation["total_cash_base"]) >= 0
+                ),
                 "reason": (
                     "negative_cash"
                     if valuation["total_cash_base"] is not None

@@ -4,6 +4,7 @@ from decimal import Decimal
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from api.auspex_api.app_users import InMemoryAppUserRepository
 from api.auspex_api.portfolio import (
@@ -259,6 +260,46 @@ class E12TransactionTests(unittest.TestCase):
             "cash_weight": "0.5980861244019138755980861244",
             "stocks_weight": "0.4019138755980861244019138756",
         })
+
+    def test_negative_cash_suppresses_asset_and_allocation_percentages(self):
+        valuation = {
+            "status": "ready",
+            "base_currency": "USD",
+            "valuation_as_of": "2026-07-22",
+            "total_cash_base": "-100.00",
+            "total_stocks_base": "500.00",
+            "total_value_base": "400.00",
+            "valued_stocks_base": "500.00",
+            "valued_total_base": "400.00",
+            "net_contributed_capital_base": "400.00",
+            "total_earnings_base": "0.00",
+            "cash_weight": "-0.25",
+            "holdings": [{
+                "ticker": "MSFT",
+                "company_name": "Microsoft Corporation",
+                "quantity": "1",
+                "price_currency": "USD",
+                "latest_price": "500.00",
+                "market_value_base": "500.00",
+                "weight": "1.25",
+                "valuation_status": "valued",
+            }],
+            "exposures": {"currency": []},
+            "coverage": {
+                "missing_prices": [],
+                "missing_fx": [],
+                "oldest_price_date": "2026-07-22",
+            },
+        }
+        with patch.object(self.service, "portfolio_summary", return_value=valuation):
+            summary = self.service.quick_summary(self.user_a)
+
+        self.assertIsNone(summary["assets"][0]["weight"])
+        self.assertIsNone(summary["assets"][1]["weight"])
+        self.assertFalse(summary["allocation"]["complete"])
+        self.assertEqual(summary["allocation"]["reason"], "negative_cash")
+        self.assertIsNone(summary["allocation"]["cash_weight"])
+        self.assertIsNone(summary["allocation"]["stocks_weight"])
 
     def test_ledger_summary_separates_capital_income_costs_and_withdrawals(self):
         for payload in [
