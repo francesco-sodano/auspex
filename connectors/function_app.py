@@ -314,7 +314,10 @@ def _sync_serving_projections() -> dict:
 	cp = get_control_plane()
 	bw = get_bronze_writer()
 	security_documents = bw.read_serving_projection("security_catalog")
-	market_documents = bw.read_serving_projection("market_data")
+	market_documents = (
+		bw.read_serving_projection("market_data")
+		+ bw.read_serving_projection("market_history")
+	)
 	if any(not str(document.get("id") or "").startswith(("ticker:", "isin:", "security:")) for document in security_documents):
 		raise ValueError("invalid security projection id")
 	if any(not str(document.get("id") or "").startswith(("quote:", "history:", "fx:", "score:security:")) for document in market_documents):

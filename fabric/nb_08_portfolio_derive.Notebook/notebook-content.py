@@ -250,20 +250,11 @@ recent_price_points = (
     )
 )
 price_histories = (
-    recent_price_points.withColumn(
-        "price_point_json",
-        F.concat(
-            F.lit('{"date":"'), F.col("date"),
-            F.lit('","price":"'), F.col("price"), F.lit('"}'),
-        ),
-    )
-    .groupBy("security_sk", "ticker", "currency")
+    recent_price_points.groupBy("security_sk", "ticker", "currency")
     .agg(
-        F.concat(
-            F.lit("["),
-            F.concat_ws(",", F.sort_array(F.collect_list("price_point_json"))),
-            F.lit("]"),
-        ).alias("prices_json")
+        F.sort_array(
+            F.collect_list(F.struct("date", "price"))
+        ).alias("prices")
     )
     .withColumn("kind", F.lit("price_history"))
     .withColumn("source_id", F.lit("fabric"))
@@ -275,6 +266,12 @@ price_histories_by_security = price_histories.withColumn(
 price_histories_by_ticker = (
     price_histories.join(unique_current_tickers.select("security_sk"), "security_sk", "inner")
     .withColumn("id", F.concat(F.lit("history:"), F.col("ticker")))
+)
+(
+    price_histories_by_security.unionByName(price_histories_by_ticker)
+    .coalesce(1)
+    .write.mode("overwrite")
+    .json("Files/serving/market_history")
 )
 
 fx_window = Window.partitionBy("ccy_pair").orderBy(
@@ -410,8 +407,6 @@ dated_fx = (
 )
 (
     latest_quotes_by_security.unionByName(latest_quotes_by_ticker, allowMissingColumns=True)
-    .unionByName(price_histories_by_security, allowMissingColumns=True)
-    .unionByName(price_histories_by_ticker, allowMissingColumns=True)
     .unionByName(latest_fx, allowMissingColumns=True)
     .unionByName(dated_fx, allowMissingColumns=True)
     .unionByName(latest_scores, allowMissingColumns=True)
@@ -671,19 +666,23 @@ duplicate_corrections = (
     superseded_transaction_ids.groupBy("owner_user_sk", "transaction_id")
     .count().filter(F.col("count") > 1)
 )
-correction_chains = (
+invalid_correction_order = (
     ledger_asof.filter(F.col("corrects_transaction_id").isNotNull()).alias("c")
     .join(
-        ledger_asof.filter(F.col("corrects_transaction_id").isNotNull()).alias("t"),
+        ledger_asof.alias("t"),
         (F.col("c.owner_user_sk") == F.col("t.owner_user_sk"))
         & (F.col("c.corrects_transaction_id") == F.col("t.transaction_id")),
         "inner",
+    )
+    .filter(
+        (F.col("c.transaction_id") == F.col("c.corrects_transaction_id"))
+        | (F.col("c.created_at") <= F.col("t.created_at"))
     )
 )
 if (
     not missing_correction_targets.isEmpty()
     or not duplicate_corrections.isEmpty()
-    or not correction_chains.isEmpty()
+    or not invalid_correction_order.isEmpty()
 ):
     raise RuntimeError("Portfolio snapshot contains an invalid correction graph")
 effective_ledger = ledger_asof.join(
@@ -897,7 +896,8 @@ positions_enriched = (
     )
     .select(
         "owner_user_sk", "account_id", "security_sk", "ticker",
-        "security_currency", "gics_sector", "country", "quantity",
+        "security_currency", "gics_sector", "country",
+        F.col("quantity").cast(DecimalType(20, 8)).alias("quantity"),
         "market_value_base", "position_weight", "event_date", "knowledge_date",
     )
 )

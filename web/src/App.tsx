@@ -418,6 +418,16 @@ function Brand() {
   )
 }
 
+function LoadingScreen({ message }: { message: string }) {
+  return (
+    <section className="loading-screen" role="status" aria-live="polite" aria-busy="true">
+      <Brand />
+      <div className="loading-ring" aria-hidden="true"><span /></div>
+      <span className="loading-message">{message}</span>
+    </section>
+  )
+}
+
 function Login() {
   return (
     <main className="auth-shell">
@@ -748,7 +758,7 @@ function ProductHome({ user }: { user: AppUser }) {
           <h1>Your portfolio starts with its guardrails.</h1>
           <p>Choose a base currency, horizon, and risk profile before entering cash or holdings.</p>
           <a className="primary-action link-button" href="/onboarding">Start setup <ArrowRight size={16} /></a>
-        </section> : !summary && !error ? <section className="home-loading"><Brand /><span>Valuing your portfolio…</span></section> : error ? <section className="home-empty"><span className="eyebrow">Portfolio unavailable</span><h1>We could not load your portfolio.</h1><p>{error}</p><a className="secondary-action" href="/ledger">Open ledger</a></section> : summary?.status === 'empty' ? <section className="home-empty">
+        </section> : !summary && !error ? <LoadingScreen message="Valuing your portfolio…" /> : error ? <section className="home-empty"><span className="eyebrow">Portfolio unavailable</span><h1>We could not load your portfolio.</h1><p>{error}</p><a className="secondary-action" href="/ledger">Open ledger</a></section> : summary?.status === 'empty' ? <section className="home-empty">
           <WalletCards size={27} />
           <span className="eyebrow">No portfolio entries</span>
           <h1>Add your first ledger entry.</h1>
@@ -1583,7 +1593,7 @@ function App() {
     setUser(onboardedUser)
   }
 
-  if (loading) return <main className="loading"><div className="loading-ring" aria-hidden="true"><span /></div><Brand /><span>Reading the signs…</span></main>
+  if (loading) return <LoadingScreen message="Reading the signs…" />
   if (!principal) return <Login />
   if (!user && window.location.pathname.startsWith('/register')) return <Registration principal={principal} onSubmitted={completeRegistration} />
   if (!user) return <RegistrationRequired />

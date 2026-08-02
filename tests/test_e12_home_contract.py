@@ -121,9 +121,14 @@ class E12HomeContractTests(unittest.TestCase):
         app = (ROOT / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
         css = (ROOT / "web" / "src" / "App.css").read_text(encoding="utf-8")
 
+        self.assertIn("function LoadingScreen", app)
+        self.assertEqual(app.count("<LoadingScreen"), 2)
         self.assertIn("loading-ring", app)
+        self.assertNotIn("home-loading", app)
+        self.assertNotIn('<main className="loading">', app)
         self.assertIn("@keyframes loading-spin", css)
         self.assertIn(".login-panel .brand-lockup", css)
+        self.assertIn(".loading-screen .brand-lockup{flex-direction:column", css)
         self.assertIn("flex-direction:column", css)
 
 
