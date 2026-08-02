@@ -394,6 +394,61 @@ class E12TransactionTests(unittest.TestCase):
         self.assertEqual({row.cost_category for row in linked}, {"BROKER_COMMISSION", "TRANSACTION_TAX"})
         self.assertTrue(all(not row.affects_cash and row.cash_amount == "0.00" for row in linked))
 
+    def test_multiple_opening_lots_with_costs_aggregate_after_one_lot_is_corrected(self):
+        first_lot, _ = self.service.create_transaction(
+            self.user_a,
+            transaction_payload(
+                "opening-lot-one",
+                "OPENING_POSITION",
+                event_date="2026-07-19",
+                security_code="MSFT",
+                quantity="2",
+                price="100",
+                cost_components=[
+                    {"category": "BROKER_COMMISSION", "amount": "5", "currency": "USD"},
+                ],
+            ),
+        )
+        self.service.create_transaction(
+            self.user_a,
+            transaction_payload(
+                "opening-lot-two",
+                "OPENING_POSITION",
+                event_date="2026-07-20",
+                security_code="MSFT",
+                quantity="3",
+                price="120",
+                cost_components=[
+                    {"category": "BROKER_COMMISSION", "amount": "7", "currency": "USD"},
+                ],
+            ),
+        )
+
+        before = self.service.quick_summary(self.user_a)
+        self.assertEqual(before["positions"], [{"security_code": "MSFT", "quantity": "5"}])
+        self.assertEqual(before["net_contributed_capital_by_currency"], {"USD": "572.00"})
+
+        self.service.correct_transaction(
+            self.user_a,
+            first_lot.transaction_id,
+            transaction_payload(
+                "opening-lot-one-correction",
+                "OPENING_POSITION",
+                event_date="2026-07-19",
+                security_code="MSFT",
+                quantity="1",
+                price="110",
+                cost_components=[
+                    {"category": "BROKER_COMMISSION", "amount": "3", "currency": "USD"},
+                ],
+            ),
+        )
+
+        after = self.service.quick_summary(self.user_a)
+        self.assertEqual(after["positions"], [{"security_code": "MSFT", "quantity": "4"}])
+        self.assertEqual(after["net_contributed_capital_by_currency"], {"USD": "480.00"})
+        self.assertEqual(after["total_fees_by_currency"], {"USD": "10.00"})
+
     def test_buy_and_sell_store_gross_cash_separately_from_linked_costs(self):
         self.service.create_transaction(
             self.user_a,
