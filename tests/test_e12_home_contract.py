@@ -48,6 +48,16 @@ class E12HomeContractTests(unittest.TestCase):
         self.assertIn('min="0.01" max="999999999999.99" step="0.01"', app)
         self.assertIn('min="0.00000001" max="1000000000" step="0.00000001"', app)
 
+    def test_ledger_reports_usd_currency_exposure_and_cash_stock_allocation(self):
+        app = (ROOT / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
+
+        self.assertIn("Portfolio value by currency", app)
+        self.assertIn("Underlying currency; values converted to USD", app)
+        self.assertIn("Portfolio allocation", app)
+        self.assertIn("allocation-stocks", app)
+        self.assertIn("allocation-cash", app)
+        self.assertNotIn('fallback="Positions"', app)
+
     def test_transaction_modal_exposes_search_state_limits_and_fx(self):
         app = (ROOT / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
 
@@ -60,14 +70,16 @@ class E12HomeContractTests(unittest.TestCase):
         self.assertIn("Opening position (already owned)", app)
         self.assertIn("FX rate to {user.base_currency}", app)
 
-    def test_ledger_exposes_append_only_correction_workflow(self):
+    def test_ledger_exposes_repeatable_edits_without_audit_rows(self):
         app = (ROOT / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
 
         self.assertIn("corrects_transaction_id", app)
         self.assertIn("/correct`", app)
-        self.assertIn("Correct transaction", app)
-        self.assertIn("The original remains in the audit trail", app)
-        self.assertIn("Superseded", app)
+        self.assertIn("Edit transaction", app)
+        self.assertIn("Save changes", app)
+        self.assertNotIn("The original remains in the audit trail", app)
+        self.assertNotIn("Superseded", app)
+        self.assertNotIn("transaction.corrects_transaction_id || superseded", app)
 
     def test_home_exposes_bounded_deterministic_recommendations(self):
         app = (ROOT / "web" / "src" / "App.tsx").read_text(encoding="utf-8")

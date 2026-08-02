@@ -101,6 +101,23 @@ type PortfolioSummary = {
   total_fees_by_currency: Record<string, string>
   dividends_by_currency: Record<string, string>
   interest_by_currency: Record<string, string>
+  reporting_currency: 'USD'
+  cash_total: string | null
+  net_contributed_capital_total: string | null
+  total_fees_total: string | null
+  dividends_total: string | null
+  interest_total: string | null
+  currency_exposure: Array<{
+    name: string
+    market_value_base: string
+    weight: string
+  }>
+  allocation: {
+    cash_value: string | null
+    stocks_value: string | null
+    cash_weight: string | null
+    stocks_weight: string | null
+  }
   total_value: {
     status: 'pending_market_valuation' | 'ready' | 'stale'
     value_by_currency: Record<string, string> | null
@@ -855,6 +872,19 @@ function TransactionsPage({ user }: { user: AppUser }) {
     total_fees_by_currency: {},
     dividends_by_currency: {},
     interest_by_currency: {},
+    reporting_currency: 'USD',
+    cash_total: null,
+    net_contributed_capital_total: null,
+    total_fees_total: null,
+    dividends_total: null,
+    interest_total: null,
+    currency_exposure: [],
+    allocation: {
+      cash_value: null,
+      stocks_value: null,
+      cash_weight: null,
+      stocks_weight: null,
+    },
     total_value: {
       status: 'pending_market_valuation',
       value_by_currency: null,
@@ -1118,9 +1148,11 @@ function TransactionsPage({ user }: { user: AppUser }) {
     setSecurityLookupError('')
     setTransactionCurrency(security.currency)
   }
-  const formatMoneyMap = (values: Record<string, string>, empty: string) => Object.keys(values).length
-    ? Object.entries(values).map(([currency, amount]) => `${currency} ${amount}`).join(' · ')
-    : empty
+  const formatUsd = (value: string | null, empty: string) => value === null
+    ? empty
+    : new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(Number(value))
+  const cashPercent = summary.allocation.cash_weight === null ? null : Number(summary.allocation.cash_weight) * 100
+  const stocksPercent = summary.allocation.stocks_weight === null ? null : Number(summary.allocation.stocks_weight) * 100
   const formatUpdatedOn = (value: string | null) => value
     ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(`${value}T00:00:00Z`))
     : 'not available'
@@ -1130,28 +1162,34 @@ function TransactionsPage({ user }: { user: AppUser }) {
       <section className="transactions-main">
         <div className="transactions-heading"><h1>Ledger</h1><div className="ledger-heading-meta"><span>Updated {formatUpdatedOn(summary.updated_on)}</span><span className="transaction-count" title={metadata.transaction_count?.plain_description}>{summary.transaction_count} entries</span></div></div>
         <div className="ledger-metrics">
-          <article className={`ledger-total ${summary.total_value.status === 'pending_market_valuation' ? 'valuation-pending' : ''}`}><MetricLabel metricKey="portfolio_value" metadata={metadata} fallback="Total ledger value" /><strong>{ledgerLoaded ? summary.total_value.value_by_currency ? formatMoneyMap(summary.total_value.value_by_currency, 'Pending valuation') : 'Pending valuation' : 'Loading…'}</strong><small>{summary.total_value.status === 'stale' ? 'Last complete valuation; market prices are stale' : 'Cash + current stock values; income and fees already flow through cash'}</small></article>
-          <article><MetricLabel metricKey="cash_available" metadata={metadata} fallback="Current cash" /><strong>{formatMoneyMap(summary.cash_by_currency, 'No cash entered')}</strong><small>Ledger cash balance by currency</small></article>
-          <article><MetricLabel metricKey="net_contributed_capital" metadata={metadata} fallback="Net contributed capital" /><strong>{formatMoneyMap(summary.net_contributed_capital_by_currency, 'No capital entered')}</strong><small>Opening capital + deposits − withdrawals</small></article>
-          <article className={summary.earnings.status === 'pending_market_valuation' ? 'valuation-pending' : ''}><MetricLabel metricKey="total_gain_loss" metadata={metadata} fallback="Current earnings" /><strong>{summary.earnings.value_by_currency ? formatMoneyMap(summary.earnings.value_by_currency, 'Pending valuation') : 'Pending valuation'}</strong><small>{summary.earnings.status === 'stale' ? 'Last complete earnings; market prices are stale' : 'Total value − net contributed capital'}</small></article>
-          <article><MetricLabel metricKey="total_fees" metadata={metadata} fallback="Fees & commissions" /><strong>{formatMoneyMap(summary.total_fees_by_currency, 'None recorded')}</strong><small>All ledger costs to date</small></article>
-          <article><MetricLabel metricKey="dividends" metadata={metadata} fallback="Dividends" /><strong>{formatMoneyMap(summary.dividends_by_currency, 'None recorded')}</strong><small>Gross dividends before recorded fees</small></article>
-          <article><MetricLabel metricKey="interest" metadata={metadata} fallback="Interest" /><strong>{formatMoneyMap(summary.interest_by_currency, 'None recorded')}</strong><small>Gross interest received</small></article>
-          <article><MetricLabel metricKey="position_quantity" metadata={metadata} fallback="Positions" /><strong>{summary.positions.length ? summary.positions.map((position) => `${position.security_code} ${position.quantity}`).join(' · ') : 'No positions entered'}</strong><small>Current quantities from opening, buy, and sell events</small></article>
+          <article className={`ledger-total ${summary.total_value.status === 'pending_market_valuation' ? 'valuation-pending' : ''}`}><MetricLabel metricKey="portfolio_value" metadata={metadata} fallback="Total ledger value" /><strong>{ledgerLoaded ? summary.total_value.value_by_currency ? formatUsd(summary.total_value.value_by_currency.USD, 'Pending valuation') : 'Pending valuation' : 'Loading…'}</strong><small>{summary.total_value.status === 'stale' ? 'Last complete valuation; market prices are stale' : 'Cash + current stock values; income and fees already flow through cash'}</small></article>
+          <article><MetricLabel metricKey="cash_available" metadata={metadata} fallback="Current cash" /><strong>{formatUsd(summary.cash_total, 'Pending valuation')}</strong><small>All cash balances converted to USD</small></article>
+          <article><MetricLabel metricKey="net_contributed_capital" metadata={metadata} fallback="Net contributed capital" /><strong>{formatUsd(summary.net_contributed_capital_total, 'Pending valuation')}</strong><small>Opening capital + deposits − withdrawals, in USD</small></article>
+          <article className={summary.earnings.status === 'pending_market_valuation' ? 'valuation-pending' : ''}><MetricLabel metricKey="total_gain_loss" metadata={metadata} fallback="Current earnings" /><strong>{summary.earnings.value_by_currency ? formatUsd(summary.earnings.value_by_currency.USD, 'Pending valuation') : 'Pending valuation'}</strong><small>{summary.earnings.status === 'stale' ? 'Last complete earnings; market prices are stale' : 'Total value − net contributed capital, in USD'}</small></article>
+          <article><MetricLabel metricKey="total_fees" metadata={metadata} fallback="Fees & commissions" /><strong>{formatUsd(summary.total_fees_total, 'Pending FX')}</strong><small>All ledger costs converted to USD</small></article>
+          <article><MetricLabel metricKey="dividends" metadata={metadata} fallback="Dividends" /><strong>{formatUsd(summary.dividends_total, 'Pending FX')}</strong><small>Gross dividends converted to USD</small></article>
+          <article><MetricLabel metricKey="interest" metadata={metadata} fallback="Interest" /><strong>{formatUsd(summary.interest_total, 'Pending FX')}</strong><small>Gross interest converted to USD</small></article>
+          <article><span>Portfolio value by currency</span><strong className="currency-value-list">{summary.currency_exposure.length ? summary.currency_exposure.map((exposure) => <span key={exposure.name}><b>{exposure.name}</b><i>{formatUsd(exposure.market_value_base, 'Pending')} · {(Number(exposure.weight) * 100).toFixed(1)}%</i></span>) : 'Pending valuation'}</strong><small>Underlying currency; values converted to USD</small></article>
         </div>
+        <section className="ledger-allocation" aria-labelledby="ledger-allocation-title">
+          <div className="ledger-allocation-head"><div><span className="eyebrow">Portfolio allocation</span><h2 id="ledger-allocation-title">Stocks and cash</h2></div><strong>{formatUsd(summary.total_value.value_by_currency?.USD || null, 'Pending valuation')}</strong></div>
+          {cashPercent === null || stocksPercent === null ? <p>Allocation is available when prices and FX rates are complete.</p> : <>
+            <div className="allocation-bar" role="img" aria-label={`Portfolio allocation: ${stocksPercent.toFixed(1)}% stocks and ${cashPercent.toFixed(1)}% cash`}><span className="allocation-stocks" style={{ width: `${stocksPercent}%` }} /><span className="allocation-cash" style={{ width: `${cashPercent}%` }} /></div>
+            <div className="allocation-legend"><div><i className="stocks-key" /><span>Stocks</span><strong>{stocksPercent.toFixed(1)}%</strong><small>{formatUsd(summary.allocation.stocks_value, 'Pending')}</small></div><div><i className="cash-key" /><span>Cash</span><strong>{cashPercent.toFixed(1)}%</strong><small>{formatUsd(summary.allocation.cash_value, 'Pending')}</small></div></div>
+          </>}
+        </section>
         {loadError && <p className="error" role="alert">{loadError}</p>}
         <section className="ledger-list ledger-full">
           <div className="panel-title ledger-head"><div><h2>Ledger</h2><p>Every cash movement and holding starts here.</p></div><button className="primary-action compact ledger-add-action" type="button" onClick={() => openTransaction()}><Plus size={16} aria-hidden="true" /><span>Add transaction</span></button></div>
           {!ledgerLoaded ? <div className="empty-ledger"><span>Loading ledger…</span></div> : transactions.length === 0 ? <div className="empty-ledger"><WalletCards size={24} /><h3>Start with what you have</h3><p>Cash only and one-stock-only portfolios are both valid. Add the other side later if you want.</p><div className="empty-ledger-actions"><button className="secondary-action" onClick={() => openTransaction('OPENING_CASH')}>Start with cash</button><button className="secondary-action" onClick={() => openTransaction('OPENING_POSITION')}>Start with one stock</button></div></div> : <div className="table-scroll"><table className="transaction-table"><thead><tr><th scope="col">Date</th><th scope="col">Type</th><th scope="col">Asset</th><th scope="col"><MetricLabel metricKey="cash_impact" metadata={metadata} fallback="Cash impact" /></th><th scope="col"><span className="visually-hidden">Actions</span></th></tr></thead><tbody>{transactions.map((transaction) => {
-            const superseded = transactions.some((row) => row.corrects_transaction_id === (transaction.linked_transaction_id || transaction.transaction_id))
             const typeLabel = transaction.cost_category || transaction.transaction_type
-            return <tr className={`transaction-row ${transaction.linked_transaction_id ? 'linked-cost-row' : ''} ${superseded ? 'superseded' : ''}`} key={transaction.transaction_id}><td>{transaction.event_date}</td><td>{typeLabel.replaceAll('_',' ')}{transaction.linked_transaction_id && <small>Linked cost</small>}{transaction.corrects_transaction_id && <small>Correction</small>}{superseded && <small>Superseded</small>}</td><td>{transaction.security_code || transaction.source_currency || transaction.currency}</td><td><strong className={transaction.cash_amount.startsWith('-') ? 'negative' : 'positive'}>{transaction.currency} {transaction.cash_amount === '0.00' ? 'No cash movement' : transaction.cash_amount}</strong>{transaction.source_currency && transaction.source_currency !== transaction.currency && <small>{transaction.source_currency} {transaction.source_amount} at {transaction.fx_rate_to_settlement}</small>}</td><td><button className="icon-action correction-action" type="button" disabled={Boolean(transaction.linked_transaction_id || transaction.corrects_transaction_id || superseded)} onClick={() => openCorrection(transaction)} aria-label={`Correct ${transaction.transaction_type.toLowerCase().replaceAll('_', ' ')} from ${transaction.event_date}`} title={transaction.linked_transaction_id ? 'Correct this cost with its parent transaction' : transaction.corrects_transaction_id ? 'Correction events are immutable' : superseded ? 'Transaction already corrected' : 'Correct transaction'}><Pencil size={15} /></button></td></tr>
+            return <tr className={`transaction-row ${transaction.linked_transaction_id ? 'linked-cost-row' : ''}`} key={transaction.transaction_id}><td>{transaction.event_date}</td><td>{typeLabel.replaceAll('_',' ')}{transaction.linked_transaction_id && <small>Linked cost</small>}</td><td>{transaction.security_code || transaction.source_currency || transaction.currency}</td><td><strong className={transaction.cash_amount.startsWith('-') ? 'negative' : 'positive'}>{transaction.currency} {transaction.cash_amount === '0.00' ? 'No cash movement' : transaction.cash_amount}</strong>{transaction.source_currency && transaction.source_currency !== transaction.currency && <small>{transaction.source_currency} {transaction.source_amount} at {transaction.fx_rate_to_settlement}</small>}</td><td><button className="icon-action correction-action" type="button" disabled={Boolean(transaction.linked_transaction_id)} onClick={() => openCorrection(transaction)} aria-label={`Edit ${transaction.transaction_type.toLowerCase().replaceAll('_', ' ')} from ${transaction.event_date}`} title={transaction.linked_transaction_id ? 'Edit this cost with its parent transaction' : 'Edit transaction'}><Pencil size={15} /></button></td></tr>
           })}</tbody></table></div>}
         </section>
       </section>
       {transactionOpen && <div className="transaction-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setTransactionOpen(false) }}>
         <section className="transaction-sheet" role="dialog" aria-modal="true" aria-labelledby="transaction-title">
-          <div className="transaction-sheet-head"><div><span className="eyebrow">Portfolio ledger</span><h2 id="transaction-title">{correctionTarget ? 'Correct transaction' : 'Add transaction'}</h2>{correctionTarget && <p className="correction-note">The original remains in the audit trail and is replaced economically by this entry.</p>}</div><button className="icon-action" type="button" onClick={() => setTransactionOpen(false)} aria-label="Close transaction form" title="Close"><X size={17} /></button></div>
+          <div className="transaction-sheet-head"><div><span className="eyebrow">Portfolio ledger</span><h2 id="transaction-title">{correctionTarget ? 'Edit transaction' : 'Add transaction'}</h2></div><button className="icon-action" type="button" onClick={() => setTransactionOpen(false)} aria-label="Close transaction form" title="Close"><X size={17} /></button></div>
           <form className="transaction-form overlay-form" onSubmit={submit}>
             <label><span>Type</span><select name="transaction_type" value={transactionType} onChange={(event) => { setTransactionType(event.target.value); setSecurityCode(''); setResolvedSecurity(null); setSecurityOptions([]); setSecurityLookupError(''); setTransactionCurrency(user.base_currency); setFeeCategory('OTHER_FEE'); setCostComponents([]) }}><option value="DEPOSIT">Deposit</option><option value="WITHDRAWAL">Withdrawal</option><option value="OPENING_CASH">Opening cash (starting balance)</option><option value="OPENING_POSITION">Opening position (already owned)</option><option value="BUY">Buy</option><option value="SELL">Sell</option><option value="DIVIDEND">Dividend</option><option value="INTEREST">Interest</option><option value="FEE">Fee</option></select>{transactionType === 'OPENING_CASH' && <small className="field-note">Cash already held when you began tracking in Auspex.</small>}{transactionType === 'OPENING_POSITION' && <small className="field-note">Shares already owned when you began tracking, at their original average cost. Linked acquisition costs do not reduce today's cash.</small>}</label>
             <div className="form-row"><label><span>Date</span><input name="event_date" type="date" defaultValue={correctionTarget?.event_date || today} max={today} required /></label><label><span>{securityReference ? 'Settlement currency' : 'Currency'}</span><select name="currency" value={transactionCurrency} onChange={(event) => { const currency = event.target.value; setTransactionCurrency(currency); setCostComponents((current) => current.map((component) => component.currency === currency ? { ...component, fxRateToSettlement: '' } : component)) }}><option>USD</option><option>CHF</option><option>EUR</option><option>GBP</option></select>{securityReference && <small className="field-note">Cash currency on the broker statement; the listing currency is preserved separately.</small>}</label></div>
@@ -1168,7 +1206,7 @@ function TransactionsPage({ user }: { user: AppUser }) {
             {showSettlementFx && <label><span>Gross FX rate to {transactionCurrency}</span><input name="fx_rate_to_settlement" type="number" min="0.00000001" max="1000000000" step="0.00000001" defaultValue={correctionTarget?.fx_rate_to_settlement || undefined} placeholder={`1 ${resolvedSecurity.currency} in ${transactionCurrency}`} required /><small className="field-note">1 {resolvedSecurity.currency} = X {transactionCurrency}, from the broker statement.</small></label>}
             {linkedCostTypes.has(transactionType) && <fieldset className="cost-components"><legend>Costs and deductions</legend>{costComponents.map((component) => <div className="cost-component" key={component.id}><div className="cost-component-grid"><label><span>Category</span><select value={component.category} onChange={(event) => updateCostComponent(component.id, { category: event.target.value })}>{costCategories.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label><span>Amount</span><input type="number" min="0.01" max="999999999999.99" step="0.01" value={component.amount} onChange={(event) => updateCostComponent(component.id, { amount: event.target.value })} required /></label><label><span>Currency</span><select value={component.currency} onChange={(event) => updateCostComponent(component.id, { currency: event.target.value, fxRateToSettlement: '' })}><option>USD</option><option>CHF</option><option>EUR</option><option>GBP</option></select></label>{component.currency !== transactionCurrency && <label><span>FX to {transactionCurrency}</span><input type="number" min="0.00000001" max="1000000000" step="0.00000001" value={component.fxRateToSettlement} onChange={(event) => updateCostComponent(component.id, { fxRateToSettlement: event.target.value })} placeholder={`1 ${component.currency} in ${transactionCurrency}`} required /></label>}</div><button className="icon-action remove-cost" type="button" onClick={() => setCostComponents((current) => current.filter((row) => row.id !== component.id))} aria-label="Remove cost" title="Remove cost"><X size={15} /></button></div>)}<button className="secondary-action compact add-cost" type="button" onClick={addCostComponent} disabled={costComponents.length >= 20}><Plus size={15} /> Add cost or deduction</button>{transactionType === 'OPENING_POSITION' && costComponents.length > 0 && <small className="field-note">These historical acquisition costs increase contributed capital but do not debit current cash.</small>}</fieldset>}
             {formError && <p className="error" role="alert">{formError}</p>}
-            <div className="transaction-sheet-actions"><button className="secondary-action" type="button" onClick={() => setTransactionOpen(false)}>Cancel</button><button className="primary-action" disabled={saving || (securityReference && (!resolvedSecurity || resolvedSecurity.query !== securityCode.trim().toUpperCase()))}>{saving ? 'Saving…' : correctionTarget ? 'Save correction' : 'Save transaction'}</button></div>
+            <div className="transaction-sheet-actions"><button className="secondary-action" type="button" onClick={() => setTransactionOpen(false)}>Cancel</button><button className="primary-action" disabled={saving || (securityReference && (!resolvedSecurity || resolvedSecurity.query !== securityCode.trim().toUpperCase()))}>{saving ? 'Saving…' : correctionTarget ? 'Save changes' : 'Save transaction'}</button></div>
           </form>
         </section>
       </div>}

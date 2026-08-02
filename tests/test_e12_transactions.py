@@ -1,5 +1,6 @@
 import base64
 import datetime as dt
+from decimal import Decimal
 import json
 from pathlib import Path
 import unittest
@@ -170,7 +171,15 @@ class E12TransactionTests(unittest.TestCase):
         self.assertTrue(created)
         self.assertEqual(buy.cash_amount, "-1005.00")
         self.assertEqual(sell.cash_amount, "208.00")
-        self.assertEqual(summary, {
+        legacy_fields = {
+            key: summary[key]
+            for key in (
+                "cash_by_currency", "positions", "transaction_count", "updated_on",
+                "net_contributed_capital_by_currency", "total_fees_by_currency",
+                "dividends_by_currency", "interest_by_currency", "total_value", "earnings",
+            )
+        }
+        self.assertEqual(legacy_fields, {
             "cash_by_currency": {"USD": "9203.00"},
             "positions": [{"security_code": "MSFT", "quantity": "2"}],
             "transaction_count": 3,
@@ -185,6 +194,68 @@ class E12TransactionTests(unittest.TestCase):
                 "value_by_currency": {"USD": "43.00"},
                 "reason": None,
             },
+        })
+        self.assertEqual(summary["reporting_currency"], "USD")
+        self.assertEqual(summary["cash_total"], "9203.00")
+        self.assertEqual(summary["net_contributed_capital_total"], "10000.00")
+        self.assertEqual(summary["total_fees_total"], "7.00")
+        self.assertEqual(summary["currency_exposure"], [
+            {"name": "USD", "market_value_base": "10043.00", "weight": "1"},
+        ])
+        self.assertEqual(summary["allocation"]["cash_value"], "9203.00")
+        self.assertEqual(summary["allocation"]["stocks_value"], "840.00")
+        self.assertAlmostEqual(
+            Decimal(summary["allocation"]["cash_weight"]),
+            Decimal("9203") / Decimal("10043"),
+        )
+        self.assertAlmostEqual(
+            Decimal(summary["allocation"]["stocks_weight"]),
+            Decimal("840") / Decimal("10043"),
+        )
+
+    def test_ledger_usd_reporting_splits_portfolio_by_underlying_currency(self):
+        self.service.create_transaction(
+            self.user_a,
+            transaction_payload(
+                "chf-cash",
+                "OPENING_CASH",
+                currency="CHF",
+                amount="1000",
+                fx_rate_to_base="1.25",
+            ),
+        )
+        self.service.create_transaction(
+            self.user_a,
+            transaction_payload(
+                "usd-stock",
+                "OPENING_POSITION",
+                security_code="MSFT",
+                quantity="2",
+                price="400",
+            ),
+        )
+
+        summary = self.service.quick_summary(self.user_a)
+
+        self.assertEqual(summary["reporting_currency"], "USD")
+        self.assertEqual(summary["total_value"]["value_by_currency"], {"USD": "2090.00"})
+        self.assertEqual(summary["currency_exposure"], [
+            {
+                "name": "CHF",
+                "market_value_base": "1250.00",
+                "weight": "0.5980861244019138755980861244",
+            },
+            {
+                "name": "USD",
+                "market_value_base": "840.00",
+                "weight": "0.4019138755980861244019138756",
+            },
+        ])
+        self.assertEqual(summary["allocation"], {
+            "cash_value": "1250.00",
+            "stocks_value": "840.00",
+            "cash_weight": "0.5980861244019138755980861244",
+            "stocks_weight": "0.4019138755980861244019138756",
         })
 
     def test_ledger_summary_separates_capital_income_costs_and_withdrawals(self):
@@ -427,12 +498,15 @@ class E12TransactionTests(unittest.TestCase):
         )
 
         summary = self.service.quick_summary(self.user_a)
-        audit_rows = self.service.list_transactions(self.user_a)
+        effective_rows = self.service.list_transactions(self.user_a)
         self.assertTrue(created)
         self.assertFalse(replay_created)
         self.assertEqual(replay.transaction_id, correction.transaction_id)
         self.assertEqual(correction.corrects_transaction_id, original.transaction_id)
-        self.assertEqual(len(audit_rows), 3)
+        self.assertEqual(len(effective_rows), 2)
+        self.assertNotIn(original.transaction_id, {
+            row.transaction_id for row in effective_rows
+        })
         self.assertEqual(summary["cash_by_currency"], {"USD": "9395.00"})
         self.assertEqual(summary["positions"], [
             {"security_code": "MSFT", "quantity": "1.5"},
@@ -466,10 +540,8 @@ class E12TransactionTests(unittest.TestCase):
             ),
         )
 
-        audit_rows = self.service.list_transactions(self.user_a)
-        effective = self.service._effective_transactions(audit_rows)
+        effective = self.service.list_transactions(self.user_a)
         summary = self.service.quick_summary(self.user_a)
-        self.assertEqual(len(audit_rows), 6)
         self.assertEqual(len(effective), 3)
         self.assertEqual(
             [row.cost_category for row in effective if row.linked_transaction_id == correction.transaction_id],
@@ -478,7 +550,7 @@ class E12TransactionTests(unittest.TestCase):
         self.assertEqual(summary["cash_by_currency"], {"USD": "597.00"})
         self.assertEqual(summary["total_fees_by_currency"], {"USD": "3.00"})
 
-    def test_correction_is_owner_scoped_single_level_and_state_validated(self):
+    def test_correction_is_owner_scoped_repeatable_and_state_validated(self):
         opening, _ = self.service.create_transaction(
             self.user_a,
             transaction_payload("opening", "OPENING_CASH", amount="1000"),
@@ -515,12 +587,18 @@ class E12TransactionTests(unittest.TestCase):
                 opening.transaction_id,
                 transaction_payload("second-correction", "OPENING_CASH", amount="1300"),
             )
-        with self.assertRaisesRegex(ValueError, "correction event"):
-            self.service.correct_transaction(
-                self.user_a,
-                correction.transaction_id,
-                transaction_payload("correction-chain", "OPENING_CASH", amount="1300"),
-            )
+        second_correction, created = self.service.correct_transaction(
+            self.user_a,
+            correction.transaction_id,
+            transaction_payload("correction-chain", "OPENING_CASH", amount="1300"),
+        )
+        self.assertTrue(created)
+        self.assertEqual(second_correction.corrects_transaction_id, correction.transaction_id)
+        effective = self.service.list_transactions(self.user_a)
+        self.assertEqual(
+            [row.transaction_id for row in effective if row.transaction_type == "OPENING_CASH"],
+            [second_correction.transaction_id],
+        )
 
     def test_replay_normalizes_equivalent_decimal_spellings(self):
         first, created = self.service.create_transaction(

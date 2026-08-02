@@ -983,8 +983,6 @@ class PortfolioService:
             raise ValueError("transaction was not found")
         if target.linked_transaction_id is not None:
             raise ValueError("linked cost rows are corrected with their parent transaction")
-        if target.corrects_transaction_id is not None:
-            raise ValueError("a correction event cannot be corrected")
 
         request_hash = _request_hash(payload, transaction_id)
         client_request_id = payload.get("client_request_id") if isinstance(payload, dict) else None
@@ -1033,7 +1031,9 @@ class PortfolioService:
         return stored, created
 
     def list_transactions(self, principal_header):
-        return self._transactions.list(self._scope(principal_header))
+        return self._effective_transactions(
+            self._transactions.list(self._scope(principal_header))
+        )
 
     def annual_trade_count(self, principal_header, year: int) -> int:
         if year < 1900 or year > 9999:
@@ -1075,8 +1075,6 @@ class PortfolioService:
             target = by_id.get(target_id)
             if target is None:
                 raise ValueError("corrected transaction was not found")
-            if target.corrects_transaction_id is not None:
-                raise ValueError("a correction event cannot be corrected")
             if target_id in corrected:
                 raise ValueError("transaction was already corrected")
             corrected.add(target_id)
@@ -1178,9 +1176,7 @@ class PortfolioService:
             cash[cash_key] = balance
 
     def quick_summary(self, principal_header):
-        transactions = self._effective_transactions(
-            self.list_transactions(principal_header)
-        )
+        transactions = self.list_transactions(principal_header)
         cash: dict[str, Decimal] = {}
         positions: dict[str, Decimal] = {}
         contributed_capital: dict[str, Decimal] = {}
@@ -1240,7 +1236,19 @@ class PortfolioService:
                 )
             elif transaction.transaction_type == "INTEREST":
                 _add_amount(interest, transaction.currency, cash_amount + fees_amount)
-        valuation = self.portfolio_summary(principal_header)
+        reporting_currency = "USD"
+        valuation = self.portfolio_summary(
+            principal_header,
+            reporting_currency=reporting_currency,
+        )
+        def reporting_total(amounts: dict[str, Decimal]) -> str | None:
+            total = Decimal("0")
+            for currency, amount in amounts.items():
+                conversion = self._convert(amount, currency, reporting_currency)
+                if conversion is None:
+                    return None
+                total += conversion[0]
+            return _money(total)
         valuation_ready = valuation["status"] in {"ready", "stale"}
         valuation_currency = valuation["base_currency"]
         total_value = valuation["total_value_base"]
@@ -1261,6 +1269,23 @@ class PortfolioService:
             "total_fees_by_currency": _money_map(fees),
             "dividends_by_currency": _money_map(dividends),
             "interest_by_currency": _money_map(interest),
+            "reporting_currency": reporting_currency,
+            "cash_total": valuation["total_cash_base"],
+            "net_contributed_capital_total": valuation["net_contributed_capital_base"],
+            "total_fees_total": reporting_total(fees),
+            "dividends_total": reporting_total(dividends),
+            "interest_total": reporting_total(interest),
+            "currency_exposure": valuation["exposures"]["currency"],
+            "allocation": {
+                "cash_value": valuation["total_cash_base"],
+                "stocks_value": valuation["total_stocks_base"],
+                "cash_weight": valuation["cash_weight"],
+                "stocks_weight": (
+                    _quantity(Decimal("1") - Decimal(valuation["cash_weight"]))
+                    if valuation["cash_weight"] is not None
+                    else None
+                ),
+            },
             "total_value": {
                 "status": valuation["status"] if valuation_ready else "pending_market_valuation",
                 "value_by_currency": {valuation_currency: total_value} if valuation_ready else None,
@@ -1273,14 +1298,16 @@ class PortfolioService:
             },
         }
 
-    def portfolio_summary(self, principal_header):
+    def portfolio_summary(self, principal_header, *, reporting_currency=None):
         user = self._identity.product_user(principal_header)
         if not user.onboarded:
             raise AuthorizationError("Portfolio onboarding is required")
         transactions = self._effective_transactions(
             self._transactions.list(OwnerScope(user.user_sk))
         )
-        base_currency = user.base_currency
+        base_currency = str(reporting_currency or user.base_currency).upper()
+        if base_currency not in _CURRENCIES:
+            raise ValueError("invalid reporting currency")
         if not transactions:
             return {
                 "status": "empty",
