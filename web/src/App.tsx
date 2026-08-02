@@ -115,6 +115,7 @@ type PortfolioSummary = {
   coverage: {
     missing_prices: string[]
     missing_fx: string[]
+    missing_capital_fx: string[]
     oldest_price_date: string | null
   }
   assets: Array<{
@@ -180,6 +181,7 @@ type PortfolioHomeSummary = {
   coverage: {
     missing_prices: string[]
     missing_fx: string[]
+    missing_capital_fx: string[]
     oldest_price_date: string | null
   }
 }
@@ -709,8 +711,8 @@ function ProductHome({ user }: { user: AppUser }) {
             <p>{pending ? 'Auspex will show a total only when every holding has a current price and required FX rate.' : `${summary?.holdings.length || 0} positions plus cash in ${summary?.base_currency}.`}</p>
           </section>
           <div className="portfolio-stat-grid">
-            <article><MetricLabel metricKey="net_contributed_capital" metadata={metadata} fallback="Net contributed capital" /><strong>{formatMoney(summary?.net_contributed_capital_base)}</strong><small>Opening capital + deposits − withdrawals</small></article>
-            <article><MetricLabel metricKey="total_gain_loss" metadata={metadata} fallback="Total gain / loss" /><strong className={earnings !== null && earnings < 0 ? 'negative' : earnings !== null && earnings > 0 ? 'positive' : ''}>{formatMoney(summary?.total_earnings_base)}</strong><small>Total value − net contributed capital</small></article>
+            <article><MetricLabel metricKey="net_contributed_capital" metadata={metadata} fallback="Net contributed capital" /><strong>{formatMoney(summary?.net_contributed_capital_base)}</strong><small>{summary?.coverage.missing_capital_fx.length ? `Missing historical FX: ${summary.coverage.missing_capital_fx.join(', ')}` : 'Opening capital + deposits − withdrawals'}</small></article>
+            <article><MetricLabel metricKey="total_gain_loss" metadata={metadata} fallback="Total gain / loss" /><strong className={earnings !== null && earnings < 0 ? 'negative' : earnings !== null && earnings > 0 ? 'positive' : ''}>{formatMoney(summary?.total_earnings_base)}</strong><small>{summary?.coverage.missing_capital_fx.length ? `Missing historical FX: ${summary.coverage.missing_capital_fx.join(', ')}` : 'Total value − net contributed capital'}</small></article>
             <article><MetricLabel metricKey="cash_available" metadata={metadata} fallback="Cash available" /><strong>{formatMoney(summary?.total_cash_base)}</strong><small>{summary?.cash_weight ? `${(Number(summary.cash_weight) * 100).toFixed(1)}% of portfolio` : 'Cash derived from the ledger'}</small></article>
             <article><MetricLabel metricKey="stocks_value" metadata={metadata} fallback="Stocks value" /><strong>{cashOnly ? 'No stock positions' : formatMoney(summary?.total_stocks_base)}</strong><small>{cashOnly ? 'Add a holding from the ledger when ready' : `Latest covered closes in ${summary?.base_currency}`}</small></article>
           </div>
@@ -736,6 +738,7 @@ function ProductHome({ user }: { user: AppUser }) {
                 <div><dt>Oldest price</dt><dd>{summary?.coverage.oldest_price_date || 'Not available'}</dd></div>
                 <div><dt>Missing prices</dt><dd>{summary?.coverage.missing_prices.length ? summary.coverage.missing_prices.join(', ') : 'None'}</dd></div>
                 <div><dt>Missing FX</dt><dd>{summary?.coverage.missing_fx.length ? summary.coverage.missing_fx.join(', ') : 'None'}</dd></div>
+                <div><dt>Missing historical FX</dt><dd>{summary?.coverage.missing_capital_fx.length ? summary.coverage.missing_capital_fx.join(', ') : 'None'}</dd></div>
               </dl>
               <p>Research, not advice. You decide and act at your broker.</p>
             </aside>
@@ -897,7 +900,7 @@ function TransactionsPage({ user }: { user: AppUser }) {
     dividends_total: null,
     interest_total: null,
     currency_exposure: [],
-    coverage: { missing_prices: [], missing_fx: [], oldest_price_date: null },
+    coverage: { missing_prices: [], missing_fx: [], missing_capital_fx: [], oldest_price_date: null },
     assets: [],
     allocation: {
       cash_value: null,
@@ -1186,8 +1189,8 @@ function TransactionsPage({ user }: { user: AppUser }) {
         <div className="ledger-metrics">
           <article className={`ledger-total ${summary.total_value.status === 'pending_market_valuation' ? 'valuation-pending' : ''}`}><MetricLabel metricKey="portfolio_value" metadata={metadata} fallback={summary.total_value.status === 'pending_market_valuation' ? 'Valued subtotal' : 'Total ledger value'} /><strong>{ledgerLoaded ? summary.total_value.value_by_currency ? formatUsd(summary.total_value.value_by_currency.USD, 'Pending valuation') : 'Pending valuation' : 'Loading…'}</strong><small>{summary.total_value.status === 'pending_market_valuation' ? summary.total_value.reason : summary.total_value.status === 'stale' ? 'Last complete valuation; market prices are stale' : 'Cash + current stock values; income and fees already flow through cash'}</small></article>
           <article><MetricLabel metricKey="cash_available" metadata={metadata} fallback="Current cash" /><strong>{formatUsd(summary.cash_total, 'Pending valuation')}</strong><small>All cash balances converted to USD</small></article>
-          <article><MetricLabel metricKey="net_contributed_capital" metadata={metadata} fallback="Net contributed capital" /><strong>{formatUsd(summary.net_contributed_capital_total, 'Pending valuation')}</strong><small>Opening capital + deposits − withdrawals, in USD</small></article>
-          <article className={summary.earnings.status === 'pending_market_valuation' ? 'valuation-pending' : ''}><MetricLabel metricKey="total_gain_loss" metadata={metadata} fallback="Current earnings" /><strong>{summary.earnings.value_by_currency ? formatUsd(summary.earnings.value_by_currency.USD, 'Pending valuation') : 'Pending valuation'}</strong><small>{summary.earnings.status === 'stale' ? 'Last complete earnings; market prices are stale' : 'Total value − net contributed capital, in USD'}</small></article>
+          <article><MetricLabel metricKey="net_contributed_capital" metadata={metadata} fallback="Net contributed capital" /><strong>{formatUsd(summary.net_contributed_capital_total, 'Pending historical FX')}</strong><small>{summary.coverage.missing_capital_fx.length ? `Missing historical FX: ${summary.coverage.missing_capital_fx.join(', ')}` : 'Opening capital + deposits − withdrawals, in USD'}</small></article>
+          <article className={summary.earnings.status === 'pending_market_valuation' ? 'valuation-pending' : ''}><MetricLabel metricKey="total_gain_loss" metadata={metadata} fallback="Current earnings" /><strong>{summary.earnings.value_by_currency ? formatUsd(summary.earnings.value_by_currency.USD, 'Pending historical FX') : 'Pending historical FX'}</strong><small>{summary.coverage.missing_capital_fx.length ? `Missing historical FX: ${summary.coverage.missing_capital_fx.join(', ')}` : summary.earnings.status === 'stale' ? 'Last complete earnings; market prices are stale' : 'Total value − net contributed capital, in USD'}</small></article>
           <article><MetricLabel metricKey="total_fees" metadata={metadata} fallback="Fees & commissions" /><strong>{formatUsd(summary.total_fees_total, 'Pending FX')}</strong><small>All ledger costs converted to USD</small></article>
           <article><MetricLabel metricKey="dividends" metadata={metadata} fallback="Dividends" /><strong>{formatUsd(summary.dividends_total, 'Pending FX')}</strong><small>Gross dividends converted to USD</small></article>
           <article><MetricLabel metricKey="interest" metadata={metadata} fallback="Interest" /><strong>{formatUsd(summary.interest_total, 'Pending FX')}</strong><small>Gross interest converted to USD</small></article>

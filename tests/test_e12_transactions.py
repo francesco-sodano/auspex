@@ -288,6 +288,7 @@ class E12TransactionTests(unittest.TestCase):
             "coverage": {
                 "missing_prices": [],
                 "missing_fx": [],
+                "missing_capital_fx": [],
                 "oldest_price_date": "2026-07-22",
             },
         }
@@ -1183,6 +1184,53 @@ class E12TransactionTests(unittest.TestCase):
         self.assertEqual(summary["total_cash_base"], "1000.00")
         self.assertIsNone(summary["total_value_base"])
         self.assertEqual(summary["coverage"]["missing_fx"], ["EUR/USD"])
+
+    def test_missing_historical_capital_fx_does_not_block_current_valuation(self):
+        market_data = InMemoryMarketDataRepository(
+            quotes={"MSFT": {"price": "420.00", "currency": "USD", "as_of": "2026-07-21"}},
+            fx_rates={("USD", "CHF"): {"rate": "0.80", "as_of": "2026-07-21"}},
+        )
+        original_fx_rate = market_data.fx_rate
+
+        def current_only_fx(from_currency, to_currency, as_of=None):
+            if as_of == "2025-11-14":
+                return None
+            return original_fx_rate(from_currency, to_currency, as_of)
+
+        market_data.fx_rate = current_only_fx
+        service = PortfolioService(
+            self.identity,
+            self.transactions,
+            security_catalog=self.catalog,
+            universe=self.universe,
+            market_data=market_data,
+            clock=lambda: NOW,
+        )
+        service.create_transaction(
+            self.user_a,
+            transaction_payload(
+                "historic-chf-lot",
+                "OPENING_POSITION",
+                event_date="2025-11-14",
+                security_code="MSFT",
+                quantity="1",
+                price="300",
+                settlement_currency="CHF",
+                fx_rate_to_settlement="0.80",
+            ),
+        )
+
+        summary = service.portfolio_summary(self.user_a, reporting_currency="USD")
+        ledger = service.quick_summary(self.user_a)
+
+        self.assertEqual(summary["status"], "ready")
+        self.assertEqual(summary["total_value_base"], "420.00")
+        self.assertIsNone(summary["net_contributed_capital_base"])
+        self.assertIsNone(summary["total_earnings_base"])
+        self.assertEqual(summary["coverage"]["missing_fx"], [])
+        self.assertEqual(summary["coverage"]["missing_capital_fx"], ["CHF/USD"])
+        self.assertTrue(ledger["allocation"]["complete"])
+        self.assertEqual(ledger["total_value"]["status"], "ready")
 
     def test_portfolio_summary_marks_old_complete_prices_stale(self):
         market_data = InMemoryMarketDataRepository(

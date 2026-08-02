@@ -1393,7 +1393,12 @@ class PortfolioService:
                 "cash_weight": None,
                 "holdings": [],
                 "exposures": {"sector": [], "country": [], "currency": []},
-                "coverage": {"missing_prices": [], "missing_fx": [], "oldest_price_date": None},
+                "coverage": {
+                    "missing_prices": [],
+                    "missing_fx": [],
+                    "missing_capital_fx": [],
+                    "oldest_price_date": None,
+                },
             }
         if self._market_data is None:
             raise RuntimeError("market data is unavailable")
@@ -1401,9 +1406,10 @@ class PortfolioService:
         cash_by_currency: dict[str, Decimal] = {}
         capital_base = Decimal("0")
         positions: dict[int | str, dict] = {}
-        missing_fx: set[str] = set()
+        missing_valuation_fx: set[str] = set()
         missing_capital_fx: set[str] = set()
         valuation_dates: list[str] = []
+        price_dates: list[str] = []
         for transaction in transactions:
             cash_amount = Decimal(transaction.cash_amount)
             fees_amount = Decimal(transaction.fees)
@@ -1444,12 +1450,9 @@ class PortfolioService:
                     )
                 if conversion is None:
                     pair = f"{transaction.currency}/{base_currency}"
-                    missing_fx.add(pair)
                     missing_capital_fx.add(pair)
                 else:
                     capital_base += conversion[0]
-                    if conversion[1]:
-                        valuation_dates.append(conversion[1])
             if transaction.transaction_type in _SECURITY_TYPES:
                 key = transaction.security_sk or transaction.security_code
                 position = positions.setdefault(key, {
@@ -1473,7 +1476,7 @@ class PortfolioService:
             conversion = self._convert(amount, currency, base_currency)
             if conversion is None:
                 pair = f"{currency}/{base_currency}"
-                missing_fx.add(pair)
+                missing_valuation_fx.add(pair)
                 missing_cash_fx.add(pair)
             else:
                 cash_base += conversion[0]
@@ -1507,7 +1510,7 @@ class PortfolioService:
                     price_as_of,
                 )
                 if conversion is None:
-                    missing_fx.add(f"{quote_currency}/{base_currency}")
+                    missing_valuation_fx.add(f"{quote_currency}/{base_currency}")
                 else:
                     market_value_base = conversion[0]
                     stocks_base += conversion[0]
@@ -1524,6 +1527,7 @@ class PortfolioService:
                     _add_amount(currency_exposure_base, quote_currency, conversion[0])
                     if price_as_of:
                         valuation_dates.append(price_as_of)
+                        price_dates.append(price_as_of)
                     if conversion[1]:
                         valuation_dates.append(conversion[1])
             holdings.append({
@@ -1550,7 +1554,7 @@ class PortfolioService:
                 ),
             })
 
-        complete = not missing_prices and not missing_fx
+        complete = not missing_prices and not missing_valuation_fx
         valued_total = cash_base + stocks_base
         total_value = cash_base + stocks_base if complete else None
         if valued_total != 0:
@@ -1571,12 +1575,13 @@ class PortfolioService:
                 for name, value in sorted(values.items())
                 if value != 0
             ]
-        oldest_price_date = min(valuation_dates) if valuation_dates else None
+        oldest_price_date = min(price_dates) if price_dates else None
+        oldest_valuation_date = min(valuation_dates) if valuation_dates else None
         now = self._clock() if self._clock else datetime.now(timezone.utc)
         stale = bool(
             complete
-            and oldest_price_date
-            and (now.date() - date.fromisoformat(oldest_price_date)).days > 5
+            and oldest_valuation_date
+            and (now.date() - date.fromisoformat(oldest_valuation_date)).days > 5
         )
         return {
             "status": "stale" if stale else "ready" if complete else "pending_ingestion",
@@ -1588,7 +1593,11 @@ class PortfolioService:
             "valued_stocks_base": _money(stocks_base),
             "valued_total_base": _money(valued_total),
             "net_contributed_capital_base": _money(capital_base) if not missing_capital_fx else None,
-            "total_earnings_base": _money(total_value - capital_base) if total_value is not None and not missing_fx else None,
+            "total_earnings_base": (
+                _money(total_value - capital_base)
+                if total_value is not None and not missing_capital_fx
+                else None
+            ),
             "cash_weight": _quantity(cash_base / total_value) if total_value else None,
             "holdings": sorted(holdings, key=lambda holding: holding["ticker"]),
             "exposures": {
@@ -1598,7 +1607,8 @@ class PortfolioService:
             },
             "coverage": {
                 "missing_prices": sorted(missing_prices),
-                "missing_fx": sorted(missing_fx),
+                "missing_fx": sorted(missing_valuation_fx),
+                "missing_capital_fx": sorted(missing_capital_fx),
                 "oldest_price_date": oldest_price_date,
             },
         }
