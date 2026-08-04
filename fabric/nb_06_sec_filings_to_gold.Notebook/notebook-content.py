@@ -790,7 +790,9 @@ parse_sec_content = F.udf(_parse_sec_content, parsed_content_schema)
 parsed_raw = raw.withColumn(
     "parsed_content",
     parse_sec_content(
-        F.col("primary_document_content"),
+        F.when(
+            F.col("source_id") == "sec_s1", F.lit(None).cast("string")
+        ).otherwise(F.col("primary_document_content")),
         F.when(
             F.col("source_id") == "sec_13f", F.lit(None).cast("string")
         ).otherwise(F.col("information_table_content")),
@@ -1389,8 +1391,8 @@ _merge_canonical_silver(
     "t.natural_key = s.natural_key AND t.holding_revision_hash = s.holding_revision_hash",
 )
 
-material_rows = (
-    filing_pass.filter(F.col("source_id").isin("sec_8k", "sec_s1"))
+parsed_material_rows = (
+    filing_pass.filter(F.col("source_id") == "sec_8k")
     .withColumn("material", F.explode_outer("parsed_content.material_events"))
     .select(
         "source_id", "accession_no", "filing_type", "batch_id", "ingest_ts", "raw_record",
@@ -1404,6 +1406,23 @@ material_rows = (
         F.coalesce(F.to_date("material.event_date"), F.col("event_date")).alias("event_date"),
         "knowledge_date",
     )
+)
+s1_material_rows = filing_pass.filter(F.col("source_id") == "sec_s1").select(
+    "source_id", "accession_no", "filing_type", "batch_id", "ingest_ts", "raw_record",
+    F.col("parsed_content.issuer_cik").alias("issuer_cik"),
+    F.col("parsed_content.issuer_ticker").alias("issuer_ticker"),
+    F.col("parsed_content.issuer_exchange").alias("issuer_exchange"),
+    F.col("parsed_content.issuer_isin").alias("issuer_isin"),
+    F.lit(True).alias("detail_present"),
+    F.col("filing_type").alias("item_code"),
+    F.when(
+        F.upper(F.col("filing_type")).endswith("/A"),
+        F.lit("SEC registration statement amendment"),
+    ).otherwise(F.lit("SEC registration statement")).alias("description"),
+    "event_date", "knowledge_date",
+)
+material_rows = (
+    parsed_material_rows.unionByName(s1_material_rows)
     .withColumn(
         "row_key",
         F.sha2(F.concat_ws(
@@ -1504,7 +1523,7 @@ incomplete_archive_evidence = filing_pass.filter(
 unparsed_13f = filing_pass.filter(
     (F.col("source_id") == "sec_13f")
     & F.col("content_present")
-    & (F.size(F.col("parsed_content.institutional_holdings")) == 0)
+    & (F.size(_xpath_values('//*[local-name()="infoTable"]/*[local-name()="cusip"]/text()')) == 0)
     & F.col("parsed_content.parse_error").isNull()
 )
 unparsed_ownership = filing_pass.filter(
@@ -1514,7 +1533,7 @@ unparsed_ownership = filing_pass.filter(
     & F.col("parsed_content.parse_error").isNull()
 )
 unparsed_material = filing_pass.filter(
-    F.col("source_id").isin("sec_8k", "sec_s1")
+    (F.col("source_id") == "sec_8k")
     & F.col("content_present")
     & (F.size(F.col("parsed_content.material_events")) == 0)
     & F.col("parsed_content.parse_error").isNull()
