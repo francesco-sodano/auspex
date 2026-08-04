@@ -39,6 +39,7 @@
 import html
 import json
 import re
+import xml.etree.ElementTree as ET
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from delta.tables import DeltaTable
@@ -578,6 +579,31 @@ def _document_event_date(text):
     return raw_date
 
 
+def _xml_local_name(tag):
+    return str(tag).rsplit("}", 1)[-1].rsplit(":", 1)[-1].lower()
+
+
+def _xml_descendant_values(element):
+    values = {}
+    for descendant in element.iter():
+        if descendant is element:
+            continue
+        name = _xml_local_name(descendant.tag)
+        if name not in values:
+            value = _string_value(" ".join(descendant.itertext()))
+            if value is not None:
+                values[name] = value
+    return values
+
+
+def _xml_value(values, aliases):
+    for alias in aliases:
+        value = values.get(alias.lower())
+        if value is not None:
+            return value
+    return None
+
+
 def _sec_header_value(text, header_names):
     for header_name in header_names:
         match = re.search(
@@ -636,7 +662,7 @@ def _parse_sec_content(
         "parse_error": None,
     }
     primary_text = html.unescape(str(primary_document_content or "")).strip()
-    information_text = html.unescape(str(information_table_content or "")).strip()
+    information_text = str(information_table_content or "").strip()
     if "13F" not in normalized_form:
         result["issuer_cik"] = result["issuer_cik"] or _string_value(registrant_cik)
     primary_event_date = _document_event_date(primary_text) if primary_text else None
@@ -753,24 +779,28 @@ def _parse_sec_content(
                     "pct_of_portfolio": _numeric_value(_mapping_value(row, ["pct_of_portfolio", "portfolio_percent", "weight"])),
                     "event_date": _string_value(_mapping_value(row, ["event_date", "report_date", "period_of_report"])) or primary_event_date,
                 })
-        info_blocks = re.findall(
-            r"<(?:(?:[A-Za-z0-9_]+):)?infoTable\b[^>]*>(.*?)</(?:(?:[A-Za-z0-9_]+):)?infoTable>",
-            information_text,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        for block in info_blocks:
-            raw_value = _numeric_value(_tag_value(block, ["value"]))
+        try:
+            information_root = ET.fromstring(information_text)
+        except ET.ParseError as exc:
+            result["parse_error"] = f"Invalid 13F information-table XML: {exc}"
+            return result
+        for info_table in (
+            element for element in information_root.iter()
+            if _xml_local_name(element.tag) == "infotable"
+        ):
+            values = _xml_descendant_values(info_table)
+            raw_value = _numeric_value(_xml_value(values, ["value"]))
             value_usd = str(Decimal(raw_value) * Decimal(1000)) if raw_value is not None else None
             result["institutional_holdings"].append({
-                "issuer_cik": _tag_value(block, ["issuerCik"]),
-                "issuer_ticker": _tag_value(block, ["issuerTradingSymbol", "ticker"]),
-                "issuer_exchange": _tag_value(block, ["exchange"]),
-                "issuer_isin": _tag_value(block, ["isin"]),
-                "cusip": _tag_value(block, ["cusip"]),
-                "issuer_name": _tag_value(block, ["nameOfIssuer"]),
+                "issuer_cik": _xml_value(values, ["issuercik"]),
+                "issuer_ticker": _xml_value(values, ["issuertradingsymbol", "ticker"]),
+                "issuer_exchange": _xml_value(values, ["exchange"]),
+                "issuer_isin": _xml_value(values, ["isin"]),
+                "cusip": _xml_value(values, ["cusip"]),
+                "issuer_name": _xml_value(values, ["nameofissuer"]),
                 "holder_cik": result["manager_cik"],
                 "holder_name": result["manager_name"],
-                "shares": _numeric_value(_tag_value(block, ["sshPrnamt"])),
+                "shares": _numeric_value(_xml_value(values, ["sshprnamt"])),
                 "value_usd": value_usd,
                 "pct_of_portfolio": None,
                 "event_date": primary_event_date,
