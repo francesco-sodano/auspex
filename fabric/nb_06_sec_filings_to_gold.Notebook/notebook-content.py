@@ -39,7 +39,6 @@
 import html
 import json
 import re
-import xml.etree.ElementTree as ET
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from delta.tables import DeltaTable
@@ -579,31 +578,6 @@ def _document_event_date(text):
     return raw_date
 
 
-def _xml_local_name(tag):
-    return str(tag).rsplit("}", 1)[-1].rsplit(":", 1)[-1].lower()
-
-
-def _xml_descendant_values(element):
-    values = {}
-    for descendant in element.iter():
-        if descendant is element:
-            continue
-        name = _xml_local_name(descendant.tag)
-        if name not in values:
-            value = _string_value(" ".join(descendant.itertext()))
-            if value is not None:
-                values[name] = value
-    return values
-
-
-def _xml_value(values, aliases):
-    for alias in aliases:
-        value = values.get(alias.lower())
-        if value is not None:
-            return value
-    return None
-
-
 def _sec_header_value(text, header_names):
     for header_name in header_names:
         match = re.search(
@@ -779,33 +753,6 @@ def _parse_sec_content(
                     "pct_of_portfolio": _numeric_value(_mapping_value(row, ["pct_of_portfolio", "portfolio_percent", "weight"])),
                     "event_date": _string_value(_mapping_value(row, ["event_date", "report_date", "period_of_report"])) or primary_event_date,
                 })
-        try:
-            information_root = ET.fromstring(information_text)
-        except ET.ParseError as exc:
-            result["parse_error"] = f"Invalid 13F information-table XML: {exc}"
-            return result
-        for info_table in (
-            element for element in information_root.iter()
-            if _xml_local_name(element.tag) == "infotable"
-        ):
-            values = _xml_descendant_values(info_table)
-            raw_value = _numeric_value(_xml_value(values, ["value"]))
-            value_usd = str(Decimal(raw_value) * Decimal(1000)) if raw_value is not None else None
-            result["institutional_holdings"].append({
-                "issuer_cik": _xml_value(values, ["issuercik"]),
-                "issuer_ticker": _xml_value(values, ["issuertradingsymbol", "ticker"]),
-                "issuer_exchange": _xml_value(values, ["exchange"]),
-                "issuer_isin": _xml_value(values, ["isin"]),
-                "cusip": _xml_value(values, ["cusip"]),
-                "issuer_name": _xml_value(values, ["nameofissuer"]),
-                "holder_cik": result["manager_cik"],
-                "holder_name": result["manager_name"],
-                "shares": _numeric_value(_xml_value(values, ["sshprnamt"])),
-                "value_usd": value_usd,
-                "pct_of_portfolio": None,
-                "event_date": primary_event_date,
-            })
-
     if primary_text and (
         normalized_form.startswith("8-K")
         or normalized_form.startswith("S-1")
@@ -844,7 +791,9 @@ parsed_raw = raw.withColumn(
     "parsed_content",
     parse_sec_content(
         F.col("primary_document_content"),
-        F.col("information_table_content"),
+        F.when(
+            F.col("source_id") == "sec_13f", F.lit(None).cast("string")
+        ).otherwise(F.col("information_table_content")),
         F.col("filing_type"),
         F.col("registrant_cik"),
         F.col("filer_cik"),
@@ -1303,9 +1252,24 @@ _merge_canonical_silver(
     "AND t.entity_sk = s.entity_sk AND t.ownership_revision_hash = s.ownership_revision_hash",
 )
 
+def _xpath_values(path):
+    return F.expr(f"xpath(information_table_content, '{path}')")
+
+
+native_13f_holdings = F.arrays_zip(
+    _xpath_values('//*[local-name()="infoTable"]/*[local-name()="issuerCik"]/text()').alias("issuer_cik"),
+    _xpath_values('//*[local-name()="infoTable"]/*[local-name()="issuerTradingSymbol"]/text()').alias("issuer_ticker"),
+    _xpath_values('//*[local-name()="infoTable"]/*[local-name()="exchange"]/text()').alias("issuer_exchange"),
+    _xpath_values('//*[local-name()="infoTable"]/*[local-name()="isin"]/text()').alias("issuer_isin"),
+    _xpath_values('//*[local-name()="infoTable"]/*[local-name()="cusip"]/text()').alias("cusip"),
+    _xpath_values('//*[local-name()="infoTable"]/*[local-name()="nameOfIssuer"]/text()').alias("issuer_name"),
+    _xpath_values('//*[local-name()="infoTable"]//*[local-name()="sshPrnamt"]/text()').alias("shares"),
+    _xpath_values('//*[local-name()="infoTable"]/*[local-name()="value"]/text()').alias("value_thousands"),
+)
+
 holding_rows = (
     filing_pass.filter(F.col("source_id") == "sec_13f")
-    .withColumn("holding", F.explode_outer("parsed_content.institutional_holdings"))
+    .withColumn("holding", F.explode_outer(native_13f_holdings))
     .select(
         "source_id", "accession_no", "batch_id", "ingest_ts", "source_record_hash", "raw_record",
         F.coalesce(F.col("holding.issuer_cik"), F.col("parsed_content.issuer_cik")).alias("issuer_cik"),
@@ -1315,12 +1279,12 @@ holding_rows = (
         F.col("holding").isNotNull().alias("detail_present"),
         F.col("holding.cusip").alias("cusip"),
         F.col("holding.issuer_name").alias("issuer_name"),
-        F.col("holding.holder_cik").alias("holder_cik"),
-        F.col("holding.holder_name").alias("holder_name"),
+        F.col("parsed_content.manager_cik").alias("holder_cik"),
+        F.col("parsed_content.manager_name").alias("holder_name"),
         F.col("holding.shares").cast(DecimalType(20, 4)).alias("shares"),
-        F.col("holding.value_usd").cast(DecimalType(20, 2)).alias("value_usd"),
-        F.col("holding.pct_of_portfolio").cast(DecimalType(9, 6)).alias("pct_of_portfolio"),
-        F.coalesce(F.to_date("holding.event_date"), F.col("event_date")).alias("event_date"),
+        (F.col("holding.value_thousands").cast(DecimalType(20, 2)) * F.lit(1000)).alias("value_usd"),
+        F.lit(None).cast(DecimalType(9, 6)).alias("pct_of_portfolio"),
+        F.col("event_date"),
         "knowledge_date",
     )
     .withColumn(
