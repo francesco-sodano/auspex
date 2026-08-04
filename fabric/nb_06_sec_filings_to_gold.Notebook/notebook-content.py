@@ -293,56 +293,73 @@ paths = _existing_paths(
 if not paths:
     raise RuntimeError("No E8 SEC bronze files found in window")
 
+envelope_schema = StructType([
+    StructField("source_id", StringType()),
+    StructField("batch_id", StringType()),
+    StructField("ingest_ts", StringType()),
+    StructField("record", StructType([
+        StructField("adsh", StringType()),
+        StructField("file_date", StringType()),
+        StructField("period_ending", StringType()),
+        StructField("display_names", ArrayType(StringType())),
+        StructField("ciks", ArrayType(StringType())),
+        StructField("tickers", ArrayType(StringType())),
+        StructField("form", StringType()),
+        StructField("matched_forms", StringType()),
+        StructField("filing_url", StringType()),
+        StructField("sec_archive", StructType([
+            StructField("primary_document", StructType([
+                StructField("content", StringType()),
+            ])),
+            StructField("information_table_xml", StructType([
+                StructField("content", StringType()),
+            ])),
+            StructField("registrant_cik", StringType()),
+            StructField("filer_cik", StringType()),
+            StructField("subject_issuer", StructType([
+                StructField("cik", StringType()),
+                StructField("name", StringType()),
+                StructField("class_title", StringType()),
+                StructField("cusip", StringType()),
+            ])),
+            StructField("reporting_owners", ArrayType(StructType([
+                StructField("cik", StringType()),
+                StructField("name", StringType()),
+                StructField("percent_owned", StringType()),
+            ]))),
+            StructField("item_codes", ArrayType(StringType())),
+            StructField("missing_document_classes", ArrayType(StringType())),
+            StructField("archive_status", StringType()),
+        ])),
+    ])),
+])
+
 raw = (
     spark.read.text(paths)
     .select(F.col("value").alias("raw_json"))
+    .withColumn("envelope", F.from_json("raw_json", envelope_schema))
     .select(
-        F.get_json_object("raw_json", "$.source_id").alias("source_id"),
-        F.get_json_object("raw_json", "$.batch_id").alias("batch_id"),
-        F.to_timestamp(F.get_json_object("raw_json", "$.ingest_ts")).alias("ingest_ts"),
-        F.get_json_object("raw_json", "$.record.adsh").alias("accession_no"),
-        F.get_json_object("raw_json", "$.record.file_date").alias("file_date"),
-        F.get_json_object("raw_json", "$.record.period_ending").alias("period_of_report"),
-        F.from_json(
-            F.get_json_object("raw_json", "$.record.display_names"),
-            ArrayType(StringType()),
-        ).alias("display_names"),
-        F.from_json(
-            F.get_json_object("raw_json", "$.record.ciks"),
-            ArrayType(StringType()),
-        ).alias("metadata_ciks"),
-        F.from_json(
-            F.get_json_object("raw_json", "$.record.tickers"),
-            ArrayType(StringType()),
-        ).alias("metadata_tickers"),
-        F.get_json_object("raw_json", "$.record.form").alias("form"),
-        F.get_json_object("raw_json", "$.record.matched_forms").alias("matched_forms"),
-        F.get_json_object("raw_json", "$.record.filing_url").alias("filing_url"),
-        F.get_json_object(
-            "raw_json", "$.record.sec_archive.primary_document.content",
-        ).alias("primary_document_content"),
-        F.get_json_object(
-            "raw_json", "$.record.sec_archive.information_table_xml.content",
-        ).alias("information_table_content"),
-        F.get_json_object("raw_json", "$.record.sec_archive.registrant_cik").alias("registrant_cik"),
-        F.get_json_object("raw_json", "$.record.sec_archive.filer_cik").alias("filer_cik"),
-        F.from_json(
-            F.get_json_object("raw_json", "$.record.sec_archive.subject_issuer"),
-            "STRUCT<cik: STRING, name: STRING, class_title: STRING, cusip: STRING>",
-        ).alias("subject_issuer"),
-        F.from_json(
-            F.get_json_object("raw_json", "$.record.sec_archive.reporting_owners"),
-            "ARRAY<STRUCT<cik: STRING, name: STRING, percent_owned: STRING>>",
-        ).alias("reporting_owners"),
-        F.from_json(
-            F.get_json_object("raw_json", "$.record.sec_archive.item_codes"),
-            ArrayType(StringType()),
-        ).alias("item_codes"),
-        F.from_json(
-            F.get_json_object("raw_json", "$.record.sec_archive.missing_document_classes"),
-            ArrayType(StringType()),
-        ).alias("missing_document_classes"),
-        F.get_json_object("raw_json", "$.record.sec_archive.archive_status").alias("archive_status"),
+        F.col("envelope.source_id").alias("source_id"),
+        F.col("envelope.batch_id").alias("batch_id"),
+        F.to_timestamp("envelope.ingest_ts").alias("ingest_ts"),
+        F.col("envelope.record.adsh").alias("accession_no"),
+        F.col("envelope.record.file_date").alias("file_date"),
+        F.col("envelope.record.period_ending").alias("period_of_report"),
+        F.col("envelope.record.display_names").alias("display_names"),
+        F.col("envelope.record.ciks").alias("metadata_ciks"),
+        F.col("envelope.record.tickers").alias("metadata_tickers"),
+        F.col("envelope.record.form").alias("form"),
+        F.col("envelope.record.matched_forms").alias("matched_forms"),
+        F.col("envelope.record.filing_url").alias("filing_url"),
+        F.col("envelope.record.sec_archive.primary_document.content").alias("primary_document_content"),
+        F.col("envelope.record.sec_archive.information_table_xml.content").alias("information_table_content"),
+        F.col("envelope.record.sec_archive.registrant_cik").alias("registrant_cik"),
+        F.col("envelope.record.sec_archive.filer_cik").alias("filer_cik"),
+        F.col("envelope.record.sec_archive.subject_issuer").alias("subject_issuer"),
+        F.col("envelope.record.sec_archive.reporting_owners").alias("reporting_owners"),
+        F.col("envelope.record.sec_archive.item_codes").alias("item_codes"),
+        F.col("envelope.record.sec_archive.missing_document_classes").alias("missing_document_classes"),
+        F.col("envelope.record.sec_archive.archive_status").alias("archive_status"),
         F.sha2(F.col("raw_json"), 256).alias("source_record_hash"),
         F.col("raw_json").alias("raw_record"),
     )
