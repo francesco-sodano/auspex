@@ -284,36 +284,27 @@ for required in [
 # CELL ********************
 
 # --- Read raw SEC filing envelopes and locate optional enriched document content ---
-paths = _existing_paths(
+content_paths = _existing_paths(
     _date_paths("sec_13f")
     + _date_paths("sec_13dg")
     + _date_paths("sec_8k")
-    + _date_paths("sec_s1")
 )
-if not paths:
+s1_paths = _existing_paths(_date_paths("sec_s1"))
+if not content_paths and not s1_paths:
     raise RuntimeError("No E8 SEC bronze files found in window")
 
-envelope_schema = StructType([
-    StructField("source_id", StringType()),
-    StructField("batch_id", StringType()),
-    StructField("ingest_ts", StringType()),
-    StructField("record", StructType([
-        StructField("adsh", StringType()),
-        StructField("file_date", StringType()),
-        StructField("period_ending", StringType()),
-        StructField("display_names", ArrayType(StringType())),
-        StructField("ciks", ArrayType(StringType())),
-        StructField("tickers", ArrayType(StringType())),
-        StructField("form", StringType()),
-        StructField("matched_forms", StringType()),
-        StructField("filing_url", StringType()),
-        StructField("sec_archive", StructType([
+def _envelope_schema(include_document_content):
+    archive_fields = []
+    if include_document_content:
+        archive_fields.extend([
             StructField("primary_document", StructType([
                 StructField("content", StringType()),
             ])),
             StructField("information_table_xml", StructType([
                 StructField("content", StringType()),
             ])),
+        ])
+    archive_fields.extend([
             StructField("registrant_cik", StringType()),
             StructField("filer_cik", StringType()),
             StructField("subject_issuer", StructType([
@@ -330,15 +321,44 @@ envelope_schema = StructType([
             StructField("item_codes", ArrayType(StringType())),
             StructField("missing_document_classes", ArrayType(StringType())),
             StructField("archive_status", StringType()),
+    ])
+    return StructType([
+        StructField("source_id", StringType()),
+        StructField("batch_id", StringType()),
+        StructField("ingest_ts", StringType()),
+        StructField("record", StructType([
+            StructField("adsh", StringType()),
+            StructField("file_date", StringType()),
+            StructField("period_ending", StringType()),
+            StructField("display_names", ArrayType(StringType())),
+            StructField("ciks", ArrayType(StringType())),
+            StructField("tickers", ArrayType(StringType())),
+            StructField("form", StringType()),
+            StructField("matched_forms", StringType()),
+            StructField("filing_url", StringType()),
+            StructField("sec_archive", StructType(archive_fields)),
         ])),
-    ])),
-])
+    ])
 
-raw = (
-    spark.read.text(paths)
-    .select(F.col("value").alias("raw_json"))
-    .withColumn("envelope", F.from_json("raw_json", envelope_schema))
-    .select(
+
+def _read_envelopes(source_paths, include_document_content):
+    envelope_df = (
+        spark.read.text(source_paths)
+        .select(F.col("value").alias("raw_json"))
+        .withColumn(
+            "envelope",
+            F.from_json("raw_json", _envelope_schema(include_document_content)),
+        )
+    )
+    primary_content = (
+        F.col("envelope.record.sec_archive.primary_document.content")
+        if include_document_content else F.lit(None).cast("string")
+    )
+    information_content = (
+        F.col("envelope.record.sec_archive.information_table_xml.content")
+        if include_document_content else F.lit(None).cast("string")
+    )
+    return envelope_df.select(
         F.col("envelope.source_id").alias("source_id"),
         F.col("envelope.batch_id").alias("batch_id"),
         F.to_timestamp("envelope.ingest_ts").alias("ingest_ts"),
@@ -351,8 +371,8 @@ raw = (
         F.col("envelope.record.form").alias("form"),
         F.col("envelope.record.matched_forms").alias("matched_forms"),
         F.col("envelope.record.filing_url").alias("filing_url"),
-        F.col("envelope.record.sec_archive.primary_document.content").alias("primary_document_content"),
-        F.col("envelope.record.sec_archive.information_table_xml.content").alias("information_table_content"),
+        primary_content.alias("primary_document_content"),
+        information_content.alias("information_table_content"),
         F.col("envelope.record.sec_archive.registrant_cik").alias("registrant_cik"),
         F.col("envelope.record.sec_archive.filer_cik").alias("filer_cik"),
         F.col("envelope.record.sec_archive.subject_issuer").alias("subject_issuer"),
@@ -363,14 +383,32 @@ raw = (
         F.sha2(F.col("raw_json"), 256).alias("source_record_hash"),
         F.col("raw_json").alias("raw_record"),
     )
+
+
+envelope_frames = []
+if content_paths:
+    envelope_frames.append(_read_envelopes(content_paths, True))
+if s1_paths:
+    envelope_frames.append(_read_envelopes(s1_paths, False))
+raw_envelopes = envelope_frames[0]
+for envelope_frame in envelope_frames[1:]:
+    raw_envelopes = raw_envelopes.unionByName(envelope_frame)
+
+raw = (
+    raw_envelopes
     .withColumn("filing_type", F.coalesce(F.col("form"), F.col("matched_forms")))
     .withColumn("filer_name", F.concat_ws("; ", F.col("display_names")))
     .withColumn("event_date", F.to_date(F.coalesce(F.col("period_of_report"), F.col("file_date"))))
     .withColumn("knowledge_date", F.to_date("file_date"))
     .withColumn(
         "primary_content_present",
-        F.col("primary_document_content").isNotNull()
-        & (F.length(F.trim("primary_document_content")) > 0),
+        F.when(
+            F.col("source_id") == "sec_s1",
+            F.col("archive_status") == "complete",
+        ).otherwise(
+            F.col("primary_document_content").isNotNull()
+            & (F.length(F.trim("primary_document_content")) > 0)
+        ),
     )
     .withColumn(
         "information_table_content_present",
@@ -387,7 +425,11 @@ raw = (
         "content_hash",
         F.when(
             F.col("content_present"),
-            F.sha2(F.concat_ws("|", "primary_document_content", "information_table_content"), 256),
+            F.when(
+                F.col("source_id") == "sec_s1", F.col("source_record_hash")
+            ).otherwise(
+                F.sha2(F.concat_ws("|", "primary_document_content", "information_table_content"), 256)
+            ),
         ),
     )
     .dropDuplicates(["source_id", "accession_no", "batch_id", "content_hash"])
