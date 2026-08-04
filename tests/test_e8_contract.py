@@ -240,6 +240,8 @@ class E8ContractTests(unittest.TestCase):
         self.assertIn('F.col("raw_content_present") & F.col("archive_complete")', sec_nb)
         self.assertIn('~F.col("raw_content_present")', sec_nb)
         self.assertIn("INCOMPLETE_ARCHIVE_EVIDENCE", sec_nb)
+        self.assertIn("mssparkutils.notebook.exit(json.dumps(run_summary, sort_keys=True))", sec_nb)
+        self.assertIn('"gold_without_silver": int(gold_without_silver)', sec_nb)
         self.assertIn("fact_contract_award", contracts_nb)
         self.assertIn("missing_pit", contracts_nb)
         self.assertIn('F.col("event_date") > F.col("knowledge_date")', contracts_nb)

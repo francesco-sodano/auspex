@@ -436,7 +436,8 @@ raw = (
     .dropDuplicates(["source_id", "accession_no", "batch_id", "content_hash"])
     .cache()
 )
-print(f"E8 SEC bronze filings: {raw.count()}")
+bronze_filing_count = raw.count()
+print(f"E8 SEC bronze filings: {bronze_filing_count}")
 processed_batch_ids = raw.select("batch_id").where(F.col("batch_id").isNotNull()).distinct()
 processed_13f_batch_ids = (
     raw.filter(F.col("source_id") == F.lit("sec_13f"))
@@ -2028,8 +2029,22 @@ if any([
         f"silver_invalid={silver_invalid}, silver_13f_duplicate_revisions={silver_13f_duplicate_revisions}, "
         f"gold_without_silver={gold_without_silver}, silver_without_gold={silver_without_gold}"
     )
-parsed_raw.unpersist()
-raw.unpersist()
+parsed_raw.unpersist(blocking=False)
+raw.unpersist(blocking=False)
+run_summary = {
+    "status": "succeeded",
+    "from_date": from_date,
+    "to_date": to_date,
+    "bronze_filings": bronze_filing_count,
+    "missing_pit": int(missing_pit),
+    "gold_missing_revision_hash": int(gold_missing_revision_hash),
+    "gold_13f_missing_lineage": int(gold_13f_missing_lineage),
+    "silver_invalid": int(silver_invalid),
+    "silver_13f_duplicate_revisions": int(silver_13f_duplicate_revisions),
+    "gold_without_silver": int(gold_without_silver),
+    "silver_without_gold": int(silver_without_gold),
+}
+mssparkutils.notebook.exit(json.dumps(run_summary, sort_keys=True))
 
 # METADATA ********************
 
