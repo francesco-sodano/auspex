@@ -21,6 +21,17 @@ class FakeContext:
 
 
 class DailyBuildOrchestratorTests(unittest.TestCase):
+    def test_ingestion_function_keeps_durable_group_ready(self):
+        function_module = (ROOT / "infra" / "modules" / "functionapp.bicep").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("alwaysReady: isIngestion", function_module)
+        self.assertIn("name: 'durable'", function_module)
+        self.assertIn("instanceCount: 1", function_module)
+        self.assertIn("maximumInstanceCount: isIngestion ? 2 : 100", function_module)
+        self.assertIn("param alphaVantageRequestsPerMinute string = '75'", function_module)
+
     def test_failed_resume_still_requests_capacity_suspension(self):
         orchestration = daily_build_orchestrator(
             FakeContext(),
@@ -61,7 +72,14 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
             (
                 "activity",
                 "run_scheduled_connector",
-                {"source_id": "sec_form4", "as_of_date": "2026-07-29"},
+                {
+                    "source_id": "sec_form4",
+                    "as_of_date": "2026-07-29",
+                    "run_namespace": None,
+                    "profiles": [None],
+                    "options": {},
+                    "single_page": False,
+                },
             ),
         )
         self.assertEqual(
@@ -80,6 +98,114 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
             ("activity", "suspend_fabric_capacity", None),
         )
         with self.assertRaisesRegex(RuntimeError, "sec_form4"):
+            orchestration.send({"status": "Suspended"})
+
+    def test_recovery_can_override_alpha_vantage_profiles(self):
+        orchestration = daily_build_orchestrator(
+            FakeContext(),
+            {
+                "as_of_date": "2026-08-03",
+                "source_ids": ["alpha_vantage"],
+                "source_profiles": {
+                    "alpha_vantage": ["themes_weekly", "fundamentals_quarterly"],
+                },
+                "source_options": {
+                    "alpha_vantage": {"since_date": "2026-07-29", "symbol_limit": 25},
+                },
+                "run_namespace": "freshness-20260803-v2",
+            },
+        )
+
+        next(orchestration)
+        self.assertEqual(
+            orchestration.send({"status": "Active"}),
+            (
+                "activity",
+                "run_scheduled_connector",
+                {
+                    "source_id": "alpha_vantage",
+                    "as_of_date": "2026-08-03",
+                    "run_namespace": "freshness-20260803-v2",
+                    "profiles": ["themes_weekly"],
+                    "options": {
+                        "since_date": "2026-07-29",
+                        "symbol_limit": 25,
+                        "symbol_offset": 0,
+                    },
+                    "single_page": True,
+                },
+            ),
+        )
+        self.assertEqual(
+            orchestration.throw(RuntimeError("stop test")),
+            (
+                "activity",
+                "record_daily_build_failure",
+                {"as_of_date": "2026-08-03", "error": "stop test"},
+            ),
+        )
+        self.assertEqual(
+            orchestration.send({"status": "recorded"}),
+            ("activity", "suspend_fabric_capacity", None),
+        )
+        with self.assertRaisesRegex(RuntimeError, "stop test"):
+            orchestration.send({"status": "Suspended"})
+
+    def test_paged_source_commits_watermark_only_after_terminal_page(self):
+        orchestration = daily_build_orchestrator(
+            FakeContext(),
+            {
+                "as_of_date": "2026-08-03",
+                "run_namespace": "freshness-test",
+                "source_ids": ["prices_eod"],
+                "source_options": {
+                    "prices_eod": {"since_date": "2026-07-15", "symbol_limit": 2},
+                },
+            },
+        )
+
+        next(orchestration)
+        first_page = orchestration.send({"status": "Active"})
+        self.assertEqual(first_page[1], "run_scheduled_connector")
+        self.assertEqual(first_page[2]["options"]["symbol_offset"], 0)
+        second_page = orchestration.send({
+            "status": "completed",
+            "has_more": True,
+            "last_event_ts": "2026-07-31",
+            "last_cursor": "2026-07-31",
+        })
+        self.assertEqual(second_page[1], "run_scheduled_connector")
+        self.assertEqual(second_page[2]["options"]["symbol_offset"], 2)
+        commit = orchestration.send({
+            "status": "completed",
+            "has_more": False,
+            "last_event_ts": "2026-07-31",
+            "last_cursor": "2026-07-31",
+        })
+        self.assertEqual(
+            commit,
+            (
+                "activity",
+                "commit_scheduled_watermark",
+                {
+                    "watermark_source_id": "prices_eod",
+                    "run_id": "freshness-test-prices_eod-watermark",
+                    "last_event_ts": "2026-07-31",
+                    "last_cursor": "2026-07-31",
+                },
+            ),
+        )
+        next_step = orchestration.send({"status": "committed"})
+        self.assertEqual(next_step[1], "start_fabric_daily_pipeline")
+        self.assertEqual(
+            orchestration.throw(RuntimeError("stop test"))[1],
+            "record_daily_build_failure",
+        )
+        self.assertEqual(
+            orchestration.send({"status": "recorded"}),
+            ("activity", "suspend_fabric_capacity", None),
+        )
+        with self.assertRaisesRegex(RuntimeError, "stop test"):
             orchestration.send({"status": "Suspended"})
 
     def test_failed_pipeline_still_suspends_capacity(self):
@@ -170,6 +296,12 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
             {"value": "@pipeline().parameters.as_of_date", "type": "Expression"},
         )
 
+        daily_build = (ROOT / "connectors" / "shared" / "daily_build.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('params={"jobType": "Pipeline"}', daily_build)
+        self.assertNotIn('params={"jobType": "DefaultJob"}', daily_build)
+
     def test_scheduler_settings_are_provisioned(self):
         module = (ROOT / "infra" / "modules" / "functionapp.bicep").read_text(encoding="utf-8")
         for setting in [
@@ -180,6 +312,23 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
             "DAILY_BUILD_SCHEDULE",
         ]:
             self.assertIn(setting, module)
+
+        host = json.loads((ROOT / "connectors" / "host.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            host["extensions"]["durableTask"]["storageProvider"]["maxQueuePollingInterval"],
+            "00:00:05",
+        )
+
+    def test_scheduled_profiles_consume_every_symbol_page(self):
+        function_app = (ROOT / "connectors" / "function_app.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("body[offset_field] = page_offset", function_app)
+        self.assertIn("body[page_field] = page_limit", function_app)
+        self.assertIn('not result.get("has_more")', function_app)
+        self.assertIn("page_offset += page_limit", function_app)
+        self.assertIn('run_id_parts.append(f"offset-{page_offset}")', function_app)
 
     def test_source_cadence_and_alpha_vantage_profiles_are_scoped(self):
         sources = [

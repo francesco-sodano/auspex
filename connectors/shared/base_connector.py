@@ -60,7 +60,11 @@ class BaseConnector(ABC):
             return RunResult.failed(_redact_error(exc))
 
         if not batch.records:
-            return RunResult.empty(has_more=batch.has_more)
+            return RunResult.empty(
+                has_more=batch.has_more,
+                last_event_ts=batch.new_wm.last_event_ts,
+                last_cursor=batch.new_wm.last_cursor,
+            )
 
         batch_id = deterministic_batch_id(
             self.source_id,
@@ -74,7 +78,11 @@ class BaseConnector(ABC):
                 self._advance_watermark(ctx, batch)
             except Exception as exc:
                 return RunResult.failed(_redact_error(exc))
-            return RunResult.skipped(has_more=batch.has_more)
+            return RunResult.skipped(
+                has_more=batch.has_more,
+                last_event_ts=batch.new_wm.last_event_ts,
+                last_cursor=batch.new_wm.last_cursor,
+            )
 
         wm_from = batch.watermark_from if ctx.mode == "backfill" else (wm.last_event_ts if wm else None)
         envelopes = [
@@ -100,7 +108,13 @@ class BaseConnector(ABC):
         except Exception as exc:
             return RunResult.failed(_redact_error(exc))
 
-        return RunResult.ok(records=len(batch.records), bytes_written=bytes_written, has_more=batch.has_more)
+        return RunResult.ok(
+            records=len(batch.records),
+            bytes_written=bytes_written,
+            has_more=batch.has_more,
+            last_event_ts=batch.new_wm.last_event_ts,
+            last_cursor=batch.new_wm.last_cursor,
+        )
 
     def after_bronze_write(self, batch: Batch) -> None:
         return None

@@ -49,7 +49,10 @@ class NewsConnector(BaseConnector):
         else:
             from_date = to_date - timedelta(days=_DEFAULT_LOOKBACK_DAYS)
         from_date = self._bounded_from_date(from_date, to_date)
-        symbols = self._symbols if self._symbols is not None else self._bw.read_universe()
+        symbols = self._symbols if self._symbols is not None else [
+            *self._bw.read_universe("alpha_vantage", "active"),
+            *self._bw.read_portfolio_universe(),
+        ]
         symbols = sorted({str(symbol).upper() for symbol in symbols if symbol})
         total_symbols = len(symbols)
         has_more = False

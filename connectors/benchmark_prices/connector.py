@@ -114,9 +114,23 @@ class BenchmarkPricesConnector(BaseConnector):
                     "split_coefficient": float(observation["8. split coefficient"]),
                 })
 
+        if not records:
+            return Batch(
+                records=[],
+                new_wm=new_wm,
+                window=window,
+                partition_date=to_date.isoformat(),
+                watermark_from=from_date.isoformat(),
+                has_more=has_more,
+            )
+        latest_event_date = max(record["date"] for record in records)
         return Batch(
             records=records,
-            new_wm=new_wm,
+            new_wm=Watermark(
+                source_id=self.source_id,
+                last_event_ts=latest_event_date,
+                last_cursor=latest_event_date,
+            ),
             window=window,
             partition_date=to_date.isoformat(),
             watermark_from=from_date.isoformat(),

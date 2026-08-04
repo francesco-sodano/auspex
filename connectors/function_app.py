@@ -299,6 +299,8 @@ def _execute_connector(body: dict) -> tuple[dict, int]:
 		"bytes_written": result.bytes_written,
 		"error": result.error,
 		"has_more": result.has_more,
+		"last_event_ts": result.last_event_ts,
+		"last_cursor": result.last_cursor,
 	}
 	return payload, 500 if result.status == "failed" else 200
 
@@ -524,28 +526,77 @@ def resume_fabric_capacity(payload):
 def run_scheduled_connector(payload: dict):
 	source_id = payload["source_id"]
 	profiles = (
-		alpha_vantage_profiles(payload["as_of_date"])
+		payload.get("profiles") or alpha_vantage_profiles(payload["as_of_date"])
 		if source_id == "alpha_vantage"
 		else [None]
 	)
 	results = []
 	for profile in profiles:
-		body = {
-			"source_id": source_id,
-			"run_id": "-".join(filter(None, [
-				f"daily-{payload['as_of_date']}-{source_id}",
-				profile,
-			])),
-			"to_date": payload["as_of_date"],
-		}
-		if profile:
-			body["profile"] = profile
-		result, _ = _execute_connector(body)
-		results.append(result)
+		options = dict(payload.get("options") or {})
+		configured_limit = (
+			((_SOURCE_SEEDS.get(source_id, {}).get("profiles") or {}).get(profile, {}) or {})
+			.get("symbol_limit")
+		)
+		page_field = "filing_limit" if options.get("filing_limit") else "symbol_limit"
+		offset_field = "filing_offset" if page_field == "filing_limit" else "symbol_offset"
+		page_limit = int(options.get(page_field) or configured_limit or 0)
+		page_offset = int(options.get(offset_field) or 0)
+		while True:
+			run_namespace = payload.get("run_namespace") or f"daily-{payload['as_of_date']}"
+			run_id_parts = [f"{run_namespace}-{source_id}", profile]
+			if page_limit:
+				run_id_parts.append(f"offset-{page_offset}")
+			body = {
+				**options,
+				"source_id": source_id,
+				"run_id": "-".join(filter(None, run_id_parts)),
+				"mode": "backfill",
+				"to_date": payload["as_of_date"],
+			}
+			if profile:
+				body["profile"] = profile
+			if page_limit:
+				body[offset_field] = page_offset
+				body[page_field] = page_limit
+			result, _ = _execute_connector(body)
+			results.append(result)
+			if (
+				payload.get("single_page")
+				or result.get("status") == "failed"
+				or not result.get("has_more")
+			):
+				break
+			if not page_limit:
+				raise RuntimeError(f"Connector {source_id} returned has_more without a page limit")
+			page_offset += page_limit
 	if any(result.get("status") == "failed" for result in results):
 		logging.error("RequiredConnectorFailed source_id=%s", source_id)
 		return {"status": "failed", "source_id": source_id, "results": results}
-	return {"status": "completed", "source_id": source_id, "results": results}
+	return {
+		"status": "completed",
+		"source_id": source_id,
+		"results": results,
+		"has_more": any(result.get("has_more") for result in results),
+		"last_event_ts": max(
+			(result.get("last_event_ts") for result in results if result.get("last_event_ts")),
+			default=None,
+		),
+		"last_cursor": max(
+			(result.get("last_cursor") for result in results if result.get("last_cursor")),
+			default=None,
+		),
+	}
+
+
+@app.activity_trigger(input_name="payload")
+def commit_scheduled_watermark(payload: dict):
+	get_control_plane().advance_watermark(
+		payload["watermark_source_id"],
+		payload["run_id"],
+		last_event_ts=payload.get("last_event_ts"),
+		last_cursor=payload.get("last_cursor"),
+	)
+	return {"status": "committed"}
 
 
 @app.activity_trigger(input_name="payload")

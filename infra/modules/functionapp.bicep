@@ -53,7 +53,7 @@ param aiSearchEndpoint string
 param azureOpenAiEndpoint string
 
 @description('Alpha Vantage request cap in requests per minute (ingestion only)')
-param alphaVantageRequestsPerMinute string = '5'
+param alphaVantageRequestsPerMinute string = '75'
 
 @description('Finnhub company-news maximum lookback in days for the free tier (ingestion only)')
 param finnhubMaxLookbackDays string = '365'
@@ -486,8 +486,14 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         }
       }
       scaleAndConcurrency: {
-        maximumInstanceCount: isIngestion ? 1 : 100
+        maximumInstanceCount: isIngestion ? 2 : 100
         instanceMemoryMB: 2048
+        alwaysReady: isIngestion ? [
+          {
+            name: 'durable'
+            instanceCount: 1
+          }
+        ] : []
       }
       runtime: {
         name: 'python'

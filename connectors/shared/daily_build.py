@@ -77,15 +77,68 @@ def daily_build_orchestrator(context, payload=None):
 	try:
 		yield context.call_activity("resume_fabric_capacity")
 		for source_id in payload.get("source_ids", []):
-			result = yield context.call_activity(
-				"run_scheduled_connector",
-				{
-					"source_id": source_id,
-					"as_of_date": payload["as_of_date"],
-				},
+			profile_override = (payload.get("source_profiles") or {}).get(source_id)
+			profiles = profile_override or (
+				alpha_vantage_profiles(payload["as_of_date"])
+				if source_id == "alpha_vantage"
+				else [None]
 			)
-			if result.get("status") == "failed":
-				connector_failures.append(source_id)
+			for profile in profiles:
+				options = dict((payload.get("source_options") or {}).get(source_id) or {})
+				page_field = "filing_limit" if options.get("filing_limit") else "symbol_limit"
+				offset_field = "filing_offset" if page_field == "filing_limit" else "symbol_offset"
+				page_limit = int(options.get(page_field) or 0)
+				page_offset = int(options.get(offset_field) or 0)
+				last_event_ts = None
+				last_cursor = None
+				while True:
+					page_options = dict(options)
+					if page_limit:
+						page_options[page_field] = page_limit
+						page_options[offset_field] = page_offset
+					activity_payload = {
+						"source_id": source_id,
+						"as_of_date": payload["as_of_date"],
+						"run_namespace": payload.get("run_namespace"),
+						"profiles": [profile] if profile else [None],
+						"options": page_options,
+						"single_page": bool(page_limit),
+					}
+					result = yield context.call_activity(
+						"run_scheduled_connector",
+						activity_payload,
+					)
+					if result.get("status") == "failed":
+						connector_failures.append(source_id)
+						break
+					if result.get("last_event_ts"):
+						last_event_ts = max(last_event_ts or "", result["last_event_ts"])
+					if result.get("last_cursor"):
+						last_cursor = max(last_cursor or "", result["last_cursor"])
+					if not result.get("has_more"):
+						break
+					if not page_limit:
+						raise RuntimeError(
+							f"Connector {source_id} returned has_more without a page limit"
+						)
+					page_offset += page_limit
+				if source_id in connector_failures:
+					break
+				if last_event_ts or last_cursor:
+					watermark_source_id = (
+						f"{source_id}:{profile}"
+						if source_id == "alpha_vantage" and profile and profile != "combined"
+						else source_id
+					)
+					yield context.call_activity(
+						"commit_scheduled_watermark",
+						{
+							"watermark_source_id": watermark_source_id,
+							"run_id": f"{payload.get('run_namespace') or 'daily-' + payload['as_of_date']}-{watermark_source_id}-watermark",
+							"last_event_ts": last_event_ts,
+							"last_cursor": last_cursor,
+						},
+					)
 		if connector_failures:
 			raise RuntimeError(
 				"Required connectors failed: " + ", ".join(connector_failures)
@@ -392,7 +445,7 @@ class FabricDailyBuildClient:
 		response = self.http.post(
 			f"{self._workspace_url}/items/{pipeline_id}/jobs/instances",
 			headers=self._headers(_FABRIC_SCOPE),
-			params={"jobType": "DefaultJob"},
+			params={"jobType": "Pipeline"},
 			json={
 				"executionData": {
 					"parameters": {

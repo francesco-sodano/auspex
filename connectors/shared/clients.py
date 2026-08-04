@@ -26,5 +26,8 @@ def get_bronze_writer() -> BronzeWriter:
             universe_container=control_plane.container(
                 os.environ.get("INGESTION_UNIVERSE_CONTAINER", "ingestion_universe")
             ),
+            portfolio_container=control_plane.container(
+                os.environ.get("PORTFOLIO_TRANSACTIONS_CONTAINER", "portfolio_transactions")
+            ),
         )
     return _bw

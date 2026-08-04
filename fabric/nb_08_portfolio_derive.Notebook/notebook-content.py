@@ -38,6 +38,7 @@
 
 from datetime import date, timedelta
 from decimal import Decimal
+import json
 from delta.tables import DeltaTable
 from pyspark.sql import functions as F
 from pyspark.sql import Window
@@ -105,7 +106,7 @@ def _merge_all(table_name: str, source_df, condition: str) -> None:
 
 for required_table in [
     "dim_security", "fact_market_daily", "fact_fx_rate",
-    "fact_theme_opportunity_score", "security_daily_features",
+    "fact_theme_membership", "fact_theme_opportunity_score", "security_daily_features",
 ]:
     _require_table(required_table)
 
@@ -754,6 +755,63 @@ positions = (
         F.max("knowledge_date").alias("knowledge_date"),
     )
     .filter(F.col("quantity") != 0)
+)
+
+# Keep ingestion coverage aligned with every held security and every constituent
+# of the themes represented by current positions.
+portfolio_security_keys = positions.select("security_sk").distinct()
+portfolio_theme_ids = (
+    spark.table("fact_theme_membership")
+    .join(portfolio_security_keys, "security_sk", "inner")
+    .select("theme_id")
+    .distinct()
+)
+required_coverage_symbols = (
+    spark.table("fact_theme_membership")
+    .join(portfolio_theme_ids, "theme_id", "inner")
+    .select("security_sk")
+    .unionByName(portfolio_security_keys)
+    .distinct()
+    .join(current_securities.select("security_sk", "ticker"), "security_sk", "inner")
+    .select("ticker")
+    .distinct()
+)
+universe_path = "Files/config/alpha_vantage_universe.json"
+try:
+    alpha_vantage_universe = json.loads(mssparkutils.fs.head(universe_path))
+except Exception:
+    alpha_vantage_universe = {
+        "schema_version": 1,
+        "policy": {"active_max_symbols": 1000},
+        "tiers": {"active": [], "coverage": []},
+    }
+universe_tiers = alpha_vantage_universe.setdefault("tiers", {})
+existing_active = {
+    str(symbol).strip().upper()
+    for symbol in universe_tiers.get("active", [])
+    if str(symbol).strip()
+}
+existing_coverage = {
+    str(symbol).strip().upper()
+    for symbol in universe_tiers.get("coverage", [])
+    if str(symbol).strip()
+}
+required_coverage = {row.ticker for row in required_coverage_symbols.collect()}
+active_symbols = sorted(existing_active | required_coverage)
+coverage_symbols = sorted(existing_coverage | set(active_symbols))
+active_max_symbols = int(
+    (alpha_vantage_universe.get("policy") or {}).get("active_max_symbols", 1000)
+)
+if len(active_symbols) > active_max_symbols:
+    raise RuntimeError("Portfolio theme universe exceeds configured active maximum")
+alpha_vantage_universe["schema_version"] = 1
+alpha_vantage_universe["generated_at"] = f"{to_date}T00:00:00Z"
+universe_tiers["active"] = active_symbols
+universe_tiers["coverage"] = coverage_symbols
+mssparkutils.fs.put(
+    universe_path,
+    json.dumps(alpha_vantage_universe, sort_keys=True, separators=(",", ":")),
+    True,
 )
 
 # METADATA ********************

@@ -3,6 +3,7 @@ import json
 import re
 import time
 from datetime import date
+from decimal import Decimal
 
 from azure.identity import DefaultAzureCredential
 from azure.storage.filedatalake import DataLakeServiceClient
@@ -25,6 +26,17 @@ def _is_transient_onelake_error(exc: Exception) -> bool:
     return any(marker.lower() in message.lower() for marker in _TRANSIENT_ERROR_MARKERS)
 
 
+def _is_missing_onelake_path(exc: Exception) -> bool:
+    if getattr(exc, "status_code", None) != 404:
+        return False
+    error_code = str(getattr(exc, "error_code", "") or "")
+    message = str(exc).lower()
+    return error_code in {"PathNotFound", "BlobNotFound"} or any(
+        marker in message
+        for marker in ("specified path does not exist", "specified blob does not exist")
+    )
+
+
 def _with_onelake_retries(operation):
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
@@ -41,6 +53,7 @@ class BronzeWriter:
         workspace_id: str,
         lakehouse_name: str = "auspex_bronze",
         universe_container=None,
+        portfolio_container=None,
     ) -> None:
         self._fs = DataLakeServiceClient(
             _ONELAKE_BASE, DefaultAzureCredential()
@@ -52,6 +65,7 @@ class BronzeWriter:
         else:
             self._lakehouse_root = f"{lakehouse_name}.Lakehouse"
         self._universe_container = universe_container
+        self._portfolio_container = portfolio_container
 
     def _bronze_path(self, source_id: str, batch_id: str, partition_date: str) -> str:
         day = date.fromisoformat(partition_date)
@@ -89,22 +103,54 @@ class BronzeWriter:
                 raise ValueError(f"active universe exceeds configured maximum of {active_max} symbols")
             return normalized.get(tier, [])
         except Exception as exc:
-            if getattr(exc, "status_code", None) == 404:
+            if _is_missing_onelake_path(exc):
                 return []
             raise
 
     def read_portfolio_universe(self) -> list[str]:
-        if self._universe_container is None:
-            return []
-        documents = self._universe_container.query_items(
+        universe_container = getattr(self, "_universe_container", None)
+        documents = universe_container.query_items(
             query="SELECT c.symbol FROM c WHERE c.active = true",
             enable_cross_partition_query=True,
-        )
-        return sorted({
+        ) if universe_container is not None else []
+        symbols = {
             str(document["symbol"]).strip().upper()
             for document in documents
             if document.get("symbol")
-        })
+        }
+        portfolio_container = getattr(self, "_portfolio_container", None)
+        if portfolio_container is None:
+            return sorted(symbols)
+        transactions = list(portfolio_container.query_items(
+            query=(
+                "SELECT c.transaction_id, c.transaction_type, c.security_code, "
+                "c.quantity, c.corrects_transaction_id, c.linked_transaction_id "
+                "FROM c WHERE c.id != '_ledger_revision'"
+            ),
+            enable_cross_partition_query=True,
+        ))
+        corrected_ids = {
+            transaction["corrects_transaction_id"]
+            for transaction in transactions
+            if transaction.get("corrects_transaction_id")
+        }
+        quantities: dict[str, Decimal] = {}
+        for transaction in transactions:
+            if (
+                transaction.get("transaction_id") in corrected_ids
+                or transaction.get("linked_transaction_id") in corrected_ids
+            ):
+                continue
+            transaction_type = transaction.get("transaction_type")
+            symbol = str(transaction.get("security_code") or "").strip().upper()
+            if not symbol or transaction_type not in {"OPENING_POSITION", "BUY", "SELL"}:
+                continue
+            quantity = Decimal(str(transaction.get("quantity") or "0"))
+            quantities[symbol] = quantities.get(symbol, Decimal("0")) + (
+                -quantity if transaction_type == "SELL" else quantity
+            )
+        symbols.update(symbol for symbol, quantity in quantities.items() if quantity != 0)
+        return sorted(symbols)
 
     def read_serving_projection(self, name: str) -> list[dict]:
         root = f"{self._lakehouse_root}/Files/serving/{name}"

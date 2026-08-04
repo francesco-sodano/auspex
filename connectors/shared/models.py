@@ -34,18 +34,20 @@ class RunResult:
     bytes_written: int = 0
     error: Optional[str] = None
     has_more: Optional[bool] = None
+    last_event_ts: Optional[str] = None
+    last_cursor: Optional[str] = None
 
     @classmethod
-    def ok(cls, records: int, bytes_written: int = 0, has_more: Optional[bool] = None) -> "RunResult":
-        return cls(status="ok", records_in=records, bytes_written=bytes_written, has_more=has_more)
+    def ok(cls, records: int, bytes_written: int = 0, has_more: Optional[bool] = None, last_event_ts: Optional[str] = None, last_cursor: Optional[str] = None) -> "RunResult":
+        return cls(status="ok", records_in=records, bytes_written=bytes_written, has_more=has_more, last_event_ts=last_event_ts, last_cursor=last_cursor)
 
     @classmethod
-    def empty(cls, has_more: Optional[bool] = None) -> "RunResult":
-        return cls(status="empty", has_more=has_more)
+    def empty(cls, has_more: Optional[bool] = None, last_event_ts: Optional[str] = None, last_cursor: Optional[str] = None) -> "RunResult":
+        return cls(status="empty", has_more=has_more, last_event_ts=last_event_ts, last_cursor=last_cursor)
 
     @classmethod
-    def skipped(cls, has_more: Optional[bool] = None) -> "RunResult":
-        return cls(status="skipped", has_more=has_more)
+    def skipped(cls, has_more: Optional[bool] = None, last_event_ts: Optional[str] = None, last_cursor: Optional[str] = None) -> "RunResult":
+        return cls(status="skipped", has_more=has_more, last_event_ts=last_event_ts, last_cursor=last_cursor)
 
     @classmethod
     def failed(cls, error: str) -> "RunResult":

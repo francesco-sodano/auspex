@@ -70,6 +70,7 @@ from shared.control_plane import CosmosControlPlane
 from shared.envelope import deterministic_batch_id
 from shared.models import Batch, RunContext, Watermark
 from alpha_vantage.connector import AlphaVantageConnector
+from benchmark_prices.connector import BenchmarkPricesConnector
 from contracts.connector import ContractsConnector
 from etf_holdings.connector import EtfHoldingsConnector, _validate_theme_catalog
 from news.connector import NewsConnector
@@ -372,6 +373,27 @@ class BaseConnectorTests(unittest.TestCase):
 
 
 class BronzeWriterTests(unittest.TestCase):
+    def test_portfolio_universe_includes_effective_ledger_positions(self):
+        class FakeContainer:
+            def __init__(self, documents):
+                self.documents = documents
+
+            def query_items(self, **kwargs):
+                return self.documents
+
+        writer = object.__new__(BronzeWriter)
+        writer._universe_container = FakeContainer([{"symbol": "CAMT"}])
+        writer._portfolio_container = FakeContainer([
+            {"transaction_id": "amd-1", "transaction_type": "OPENING_POSITION", "security_code": "AMD", "quantity": "40"},
+            {"transaction_id": "amd-2", "transaction_type": "OPENING_POSITION", "security_code": "AMD", "quantity": "42", "corrects_transaction_id": "amd-1"},
+            {"transaction_id": "rgti-1", "transaction_type": "BUY", "security_code": "RGTI", "quantity": "173"},
+            {"transaction_id": "closed-1", "transaction_type": "BUY", "security_code": "CLOSED", "quantity": "5"},
+            {"transaction_id": "closed-2", "transaction_type": "SELL", "security_code": "CLOSED", "quantity": "5"},
+            {"transaction_id": "fee-1", "transaction_type": "FEE", "security_code": "RGTI", "linked_transaction_id": "rgti-1"},
+        ])
+
+        self.assertEqual(writer.read_portfolio_universe(), ["AMD", "CAMT", "RGTI"])
+
     def test_serving_projection_reader_combines_json_parts(self):
         class Download:
             def __init__(self, data):
@@ -443,8 +465,8 @@ class BronzeWriterTests(unittest.TestCase):
         writer._lakehouse_root = "lakehouse-id"
 
         class DownloadFailure(Exception):
-            def __init__(self, status_code):
-                super().__init__(f"download failed: {status_code}")
+            def __init__(self, status_code, message=""):
+                super().__init__(message or f"download failed: {status_code}")
                 self.status_code = status_code
 
             def download_file(self):
@@ -458,7 +480,16 @@ class BronzeWriterTests(unittest.TestCase):
                 return DownloadFailure(self.status_code)
 
         writer._fs = FakeFileSystem(404)
+        writer._fs.get_file_client = lambda path: DownloadFailure(
+            404, "The specified path does not exist"
+        )
         self.assertEqual(writer.read_universe(), [])
+
+        writer._fs.get_file_client = lambda path: DownloadFailure(
+            404, "Fabric capacity is currently not available"
+        )
+        with self.assertRaises(DownloadFailure):
+            writer.read_universe()
 
         writer._fs = FakeFileSystem(503)
         with self.assertRaises(DownloadFailure):
@@ -593,6 +624,25 @@ class BackfillRunnerContractTests(unittest.TestCase):
 
 
 class PricesEodConnectorTests(unittest.TestCase):
+    def test_watermark_stops_at_latest_landed_trading_session(self):
+        os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
+        os.environ["AV_RPM"] = "100000"
+
+        with patch("prices_eod.connector.http_get", return_value=FakeHttpResponse({
+            "Time Series (Daily)": {
+                "2026-07-31": {"1. open": "10", "2. high": "11", "3. low": "9", "4. close": "10.5", "5. volume": "100"},
+            }
+        })):
+            batch = PricesEodConnector(
+                FakeControlPlane(),
+                FakeUniverseBronzeWriter(["AMD"]),
+                since_date="2026-07-31",
+                to_date="2026-08-03",
+            ).fetch(None)
+
+        self.assertEqual(batch.new_wm.last_event_ts, "2026-07-31")
+        self.assertEqual(batch.new_wm.last_cursor, "2026-07-31")
+
     def test_older_backfill_does_not_replace_newer_quote_projection(self):
         control_plane = VersionedMarketControlPlane({
             "quote:MSFT": {"id": "quote:MSFT", "as_of": "2026-07-21", "price": "420.000000"},
@@ -660,6 +710,7 @@ class PricesEodConnectorTests(unittest.TestCase):
             ).fetch(None)
 
         self.assertEqual(requested_symbols, ["AAPL", "MSFT", "NVDA"])
+        self.assertEqual(writer.requested_universes, [("alpha_vantage", "coverage")])
 
     def test_chunked_universe_uses_symbol_aware_window(self):
         os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
@@ -735,6 +786,31 @@ class PricesEodConnectorTests(unittest.TestCase):
 
         self.assertEqual(captured_params[0]["outputsize"], "full")
         self.assertIn("outputsize-full", batch.window)
+
+
+class BenchmarkPricesConnectorTests(unittest.TestCase):
+    def test_watermark_stops_at_latest_landed_trading_session(self):
+        os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
+        os.environ["AV_RPM"] = "100000"
+        payload = {"Time Series (Daily)": {
+            "2026-07-31": {
+                "1. open": "10", "2. high": "11", "3. low": "9", "4. close": "10.5",
+                "5. adjusted close": "10.4", "6. volume": "100",
+                "7. dividend amount": "0", "8. split coefficient": "1",
+            }
+        }}
+
+        with patch("benchmark_prices.connector.http_get", return_value=FakeHttpResponse(payload)):
+            batch = BenchmarkPricesConnector(
+                FakeControlPlane(),
+                FakeUniverseBronzeWriter([]),
+                etf_symbols=["SMH"],
+                since_date="2026-07-31",
+                to_date="2026-08-03",
+            ).fetch(None)
+
+        self.assertEqual(batch.new_wm.last_event_ts, "2026-07-31")
+        self.assertEqual(batch.new_wm.last_cursor, "2026-07-31")
 
     def test_historical_backfill_accepts_to_date_override(self):
         os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
@@ -1380,15 +1456,17 @@ class E8ConnectorTests(unittest.TestCase):
             self.assertEqual(params["symbol"], "AAPL")
             return FakeHttpResponse([{"id": 1, "headline": "Apple headline", "datetime": 1782518400}])
 
+        writer = FakeUniverseBronzeWriter(["AAPL"], portfolio_symbols=["AAPL"])
         with patch("news.connector.http_get", side_effect=fake_http_get):
             batch = NewsConnector(
                 FakeControlPlane(),
-                FakeUniverseBronzeWriter(["AAPL"]),
+                writer,
                 since_date=date.today().isoformat(),
                 source_config={"rate_limit": {"requests_per_minute": 100000}},
             ).fetch(None)
 
         self.assertEqual(batch.records[0]["symbol"], "AAPL")
+        self.assertEqual(writer.requested_universes, [("alpha_vantage", "active")])
 
     def test_news_connector_clips_since_date_to_free_tier_lookback(self):
         os.environ["FINNHUB_API_KEY"] = "test-key"

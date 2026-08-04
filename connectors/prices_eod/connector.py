@@ -46,7 +46,7 @@ class PricesEodConnector(BaseConnector):
 
     def fetch(self, since: Optional[Watermark]) -> Batch:
         symbols = self._symbols if self._symbols is not None else [
-            *self._bw.read_universe(),
+            *self._bw.read_universe("alpha_vantage", "coverage"),
             *self._bw.read_portfolio_universe(),
         ]
         symbols = sorted({str(symbol).upper() for symbol in symbols if symbol})
@@ -66,7 +66,7 @@ class PricesEodConnector(BaseConnector):
 
         to_date = date.fromisoformat(self._to_date) if self._to_date else date.today()
 
-        new_wm = Watermark(source_id=self.source_id, last_event_ts=to_date.isoformat(), last_cursor=to_date.isoformat())
+        new_wm = Watermark(source_id=self.source_id)
         window = self._window_id(from_date, to_date, symbols, total_symbols)
 
         if not symbols:
@@ -125,9 +125,23 @@ class PricesEodConnector(BaseConnector):
                     "adj_close": float(ohlcv["4. close"]),  # AV free tier: no adj_close; use close
                 })
 
+        if not records:
+            return Batch(
+                records=[],
+                new_wm=new_wm,
+                window=window,
+                partition_date=to_date.isoformat(),
+                watermark_from=from_date.isoformat(),
+                has_more=has_more,
+            )
+        latest_event_date = max(record["date"] for record in records)
         return Batch(
             records=records,
-            new_wm=new_wm,
+            new_wm=Watermark(
+                source_id=self.source_id,
+                last_event_ts=latest_event_date,
+                last_cursor=latest_event_date,
+            ),
             window=window,
             partition_date=to_date.isoformat(),
             watermark_from=from_date.isoformat(),

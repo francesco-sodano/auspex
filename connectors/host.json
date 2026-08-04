@@ -13,6 +13,11 @@
     "snapshotPersistenceEnabled": false
   },
   "extensions": {
+    "durableTask": {
+      "storageProvider": {
+        "maxQueuePollingInterval": "00:00:05"
+      }
+    },
     "http": {
       "maxConcurrentRequests": 1,
       "maxOutstandingRequests": 1
