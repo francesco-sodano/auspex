@@ -287,10 +287,11 @@ for required in [
 content_paths = _existing_paths(
     _date_paths("sec_13f")
     + _date_paths("sec_13dg")
-    + _date_paths("sec_8k")
 )
-s1_paths = _existing_paths(_date_paths("sec_s1"))
-if not content_paths and not s1_paths:
+metadata_only_paths = _existing_paths(
+    _date_paths("sec_8k") + _date_paths("sec_s1")
+)
+if not content_paths and not metadata_only_paths:
     raise RuntimeError("No E8 SEC bronze files found in window")
 
 def _envelope_schema(include_document_content):
@@ -388,8 +389,8 @@ def _read_envelopes(source_paths, include_document_content):
 envelope_frames = []
 if content_paths:
     envelope_frames.append(_read_envelopes(content_paths, True))
-if s1_paths:
-    envelope_frames.append(_read_envelopes(s1_paths, False))
+if metadata_only_paths:
+    envelope_frames.append(_read_envelopes(metadata_only_paths, False))
 raw_envelopes = envelope_frames[0]
 for envelope_frame in envelope_frames[1:]:
     raw_envelopes = raw_envelopes.unionByName(envelope_frame)
@@ -403,7 +404,7 @@ raw = (
     .withColumn(
         "primary_content_present",
         F.when(
-            F.col("source_id") == "sec_s1",
+            F.col("source_id").isin("sec_8k", "sec_s1"),
             F.col("archive_status") == "complete",
         ).otherwise(
             F.col("primary_document_content").isNotNull()
@@ -426,7 +427,7 @@ raw = (
         F.when(
             F.col("content_present"),
             F.when(
-                F.col("source_id") == "sec_s1", F.col("source_record_hash")
+                F.col("source_id").isin("sec_8k", "sec_s1"), F.col("source_record_hash")
             ).otherwise(
                 F.sha2(F.concat_ws("|", "primary_document_content", "information_table_content"), 256)
             ),
@@ -833,7 +834,7 @@ parsed_raw = raw.withColumn(
     "parsed_content",
     parse_sec_content(
         F.when(
-            F.col("source_id") == "sec_s1", F.lit(None).cast("string")
+            F.col("source_id").isin("sec_8k", "sec_s1"), F.lit(None).cast("string")
         ).otherwise(F.col("primary_document_content")),
         F.when(
             F.col("source_id") == "sec_13f", F.lit(None).cast("string")
@@ -1435,18 +1436,17 @@ _merge_canonical_silver(
 
 parsed_material_rows = (
     filing_pass.filter(F.col("source_id") == "sec_8k")
-    .withColumn("material", F.explode_outer("parsed_content.material_events"))
+    .withColumn("item_code", F.explode_outer("item_codes"))
     .select(
         "source_id", "accession_no", "filing_type", "batch_id", "ingest_ts", "raw_record",
-        F.coalesce(F.col("material.issuer_cik"), F.col("parsed_content.issuer_cik")).alias("issuer_cik"),
-        F.coalesce(F.col("material.issuer_ticker"), F.col("parsed_content.issuer_ticker")).alias("issuer_ticker"),
-        F.coalesce(F.col("material.issuer_exchange"), F.col("parsed_content.issuer_exchange")).alias("issuer_exchange"),
-        F.coalesce(F.col("material.issuer_isin"), F.col("parsed_content.issuer_isin")).alias("issuer_isin"),
-        F.col("material").isNotNull().alias("detail_present"),
-        F.col("material.item_code").alias("item_code"),
-        F.col("material.description").alias("description"),
-        F.coalesce(F.to_date("material.event_date"), F.col("event_date")).alias("event_date"),
-        "knowledge_date",
+        F.col("parsed_content.issuer_cik").alias("issuer_cik"),
+        F.col("parsed_content.issuer_ticker").alias("issuer_ticker"),
+        F.col("parsed_content.issuer_exchange").alias("issuer_exchange"),
+        F.col("parsed_content.issuer_isin").alias("issuer_isin"),
+        F.col("item_code").isNotNull().alias("detail_present"),
+        "item_code",
+        F.concat(F.lit("SEC Item "), F.col("item_code")).alias("description"),
+        "event_date", "knowledge_date",
     )
 )
 s1_material_rows = filing_pass.filter(F.col("source_id") == "sec_s1").select(
@@ -1577,7 +1577,7 @@ unparsed_ownership = filing_pass.filter(
 unparsed_material = filing_pass.filter(
     (F.col("source_id") == "sec_8k")
     & F.col("content_present")
-    & (F.size(F.col("parsed_content.material_events")) == 0)
+    & (F.size(F.col("item_codes")) == 0)
     & F.col("parsed_content.parse_error").isNull()
 )
 
