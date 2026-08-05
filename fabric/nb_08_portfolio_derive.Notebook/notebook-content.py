@@ -298,8 +298,6 @@ latest_fx = (
 )
 score_window = Window.partitionBy("security_sk").orderBy(
     F.col("as_of").desc(),
-    F.col("opportunity_score").desc(),
-    F.col("theme_id"),
 )
 score_attribution = F.array(*[
     F.struct(
@@ -319,12 +317,24 @@ score_attribution = F.array(*[
         ("crowding_positioning", "crowding_positioning_contribution"),
     )
 ])
-latest_scores = (
-    spark.table("fact_theme_opportunity_score").alias("s")
+eligible_scores = (
+    spark.table("fact_theme_opportunity_score")
     .filter(
-        (F.col("s.as_of") <= F.to_date(F.lit(to_date)))
-        & F.col("s.coverage_status").isin("READY", "PARTIAL")
+        (F.col("as_of") <= F.to_date(F.lit(to_date)))
+        & F.col("coverage_status").isin("READY", "PARTIAL")
+        & (F.col("model_version") == F.lit("opportunity_v1"))
+        & (F.col("weight_version") == F.lit("balanced_v1"))
     )
+)
+duplicate_effective_scores = (
+    eligible_scores.groupBy("security_sk", "date_sk")
+    .count()
+    .filter(F.col("count") > 1)
+)
+if not duplicate_effective_scores.isEmpty():
+    raise RuntimeError("Opportunity Score projection has duplicate effective security/date rows")
+latest_scores = (
+    eligible_scores.alias("s")
     .withColumn("row_number", F.row_number().over(score_window))
     .filter(F.col("row_number") == 1)
     .join(
@@ -338,6 +348,17 @@ latest_scores = (
         ).alias("f"),
         (F.col("s.security_sk") == F.col("f.security_sk"))
         & (F.col("s.date_sk") == F.col("f.date_sk")),
+        "left",
+    )
+    .join(
+        spark.table("fact_financing_risk").select(
+            "security_sk", "date_sk", "diluted_share_growth_yoy",
+            "cash_runway_years", "is_burning_cash",
+            "days_since_shelf_filing", "shelf_form", "shelf_accession",
+            "financing_coverage_status", "financing_coverage_reasons_json",
+        ).alias("r"),
+        (F.col("s.security_sk") == F.col("r.security_sk"))
+        & (F.col("s.date_sk") == F.col("r.date_sk")),
         "left",
     )
     .withColumn("id", F.concat(F.lit("score:security:"), F.col("s.security_sk")))
@@ -363,8 +384,23 @@ latest_scores = (
         "ticker", "country", F.col("s.theme_id").alias("theme_id"),
         F.col("s.as_of").cast(StringType()).alias("as_of"),
         F.col("s.opportunity_score").cast(StringType()).alias("opportunity_score"),
+        F.col("s.opportunity_score_raw").cast(StringType()).alias("opportunity_score_raw"),
         F.col("s.coverage_status").alias("coverage_status"),
         "coverage_reasons", "attribution", "spread_bps",
+        F.col("s.classification_provenance").alias("classification_provenance"),
+        F.col("s.classification_id").alias("classification_id"),
+        F.col("s.classification_updated_at").cast(StringType()).alias("classification_updated_at"),
+        F.col("s.candidate_count").alias("candidate_count"),
+        F.col("r.diluted_share_growth_yoy").cast(StringType()).alias("diluted_share_growth_yoy"),
+        F.col("r.cash_runway_years").cast(StringType()).alias("cash_runway_years"),
+        F.col("r.is_burning_cash").alias("is_burning_cash"),
+        F.col("r.days_since_shelf_filing").alias("days_since_shelf_filing"),
+        F.col("r.shelf_form").alias("shelf_form"),
+        F.col("r.shelf_accession").alias("shelf_accession"),
+        F.col("r.financing_coverage_status").alias("financing_coverage_status"),
+        F.from_json(
+            F.col("r.financing_coverage_reasons_json"), "ARRAY<STRING>",
+        ).alias("financing_coverage_reasons"),
         F.col("s.model_version").alias("score_model_version"),
         F.col("s.weight_version").alias("score_weight_version"),
         F.lit("fabric").alias("source_id"),

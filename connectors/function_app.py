@@ -773,7 +773,16 @@ def promote_daily_warehouse(payload: dict):
 
 @app.activity_trigger(input_name="payload")
 def record_daily_build_completion(payload: dict):
-	logging.info("DailyBuildCompleted as_of_date=%s", payload["as_of_date"])
+	diagnostics = payload.get("diagnostics") or {}
+	logging.info(
+		"DailyBuildCompleted as_of_date=%s financing_ready=%s "
+		"financing_partial=%s max_pc1_variance_share=%s score_movement_rows=%s",
+		payload["as_of_date"],
+		diagnostics.get("financing_ready"),
+		diagnostics.get("financing_partial"),
+		diagnostics.get("max_pc1_variance_share"),
+		diagnostics.get("score_movement_rows"),
+	)
 	return {"status": "recorded"}
 
 

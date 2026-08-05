@@ -11,9 +11,10 @@ from statistics import fmean, stdev
 from typing import Callable, Iterable, Optional
 
 
-MODEL_VERSION = "e6b_v2"
-WEIGHT_VERSION = "e6b_balanced_v1"
+MODEL_VERSION = "opportunity_v1"
+WEIGHT_VERSION = "balanced_v1"
 MIN_THEME_COHORT = 8
+MIN_COMPONENT_WEIGHT = 0.50
 WINSOR_LOWER = 0.01
 WINSOR_UPPER = 0.99
 
@@ -26,19 +27,33 @@ LEG_WEIGHTS = {
     "crowding_positioning": 0.10,
 }
 
-LEG_INPUTS = {
-    "thesis_linkage": ("membership_weight",),
-    "attention_acceleration": ("news_volume_z_30d",),
-    "smart_money": (
-        "insider_net_buy_ratio_90d", "insider_cluster_buy_30d",
-        "inst_net_flow_qoq", "inst_new_initiations",
-        "contract_award_usd_trailing_90d", "activist_13d_flag",
-    ),
-    "fundamental_health": (
-        "profit_margin", "rev_growth_yoy", "fcf_yield", "net_debt_to_ebitda",
-    ),
-    "valuation_brake": ("fundamental_anchor_z",),
-    "crowding_positioning": ("news_count_30d", "institutional_holder_count_120d"),
+LEG_COMPONENT_WEIGHTS = {
+    "thesis_linkage": {"theme_linkage": 1.0},
+    "attention_acceleration": {"attention_change_30d": 1.0},
+    "smart_money": {
+        "insider_net_buy_ratio_90d": 1 / 6,
+        "insider_cluster_buy_30d": 1 / 6,
+        "inst_net_flow_qoq": 1 / 6,
+        "inst_new_initiations": 1 / 6,
+        "contract_award_usd_trailing_90d": 1 / 6,
+        "activist_13d_flag": 1 / 6,
+    },
+    "fundamental_health": {
+        "profit_margin": 0.25,
+        "rev_growth_yoy": 0.25,
+        "fcf_yield": 0.25,
+        "net_debt_to_ebitda": 0.25,
+    },
+    "valuation_brake": {"fundamental_anchor_z": 1.0},
+    "crowding_positioning": {"institutional_holder_count_change_qoq": 1.0},
+}
+LEG_RESULT_FIELDS = {
+    "thesis_linkage": "thesis_linkage_z",
+    "attention_acceleration": "attention_acceleration_z",
+    "smart_money": "smart_money_z",
+    "fundamental_health": "fundamental_health_z",
+    "valuation_brake": "valuation_brake_z",
+    "crowding_positioning": "crowding_positioning_z",
 }
 
 
@@ -48,11 +63,12 @@ class OpportunityObservation:
     security_sk: int
     date_sk: int
     as_of: date
-    candidate_source: str
-    candidate_snapshot_id: str
-    candidate_snapshot_ingest_ts: datetime
-    membership_weight: Optional[float]
-    news_volume_z_30d: Optional[float]
+    classification_provenance: str
+    classification_id: str
+    classification_updated_at: datetime
+    theme_proxy_weight: Optional[float]
+    broad_market_weight: Optional[float]
+    attention_change_30d: Optional[float]
     insider_net_buy_ratio_90d: Optional[float]
     insider_cluster_buy_30d: Optional[float]
     inst_net_flow_qoq: Optional[float]
@@ -64,8 +80,7 @@ class OpportunityObservation:
     fcf_yield: Optional[float]
     net_debt_to_ebitda: Optional[float]
     fundamental_anchor_z: Optional[float]
-    news_count_30d: Optional[float]
-    institutional_holder_count_120d: Optional[float]
+    institutional_holder_count_change_qoq: Optional[float]
     max_knowledge_date: date
 
 
@@ -77,9 +92,9 @@ class OpportunityResult:
     security_sk: int
     date_sk: int
     as_of: date
-    candidate_source: str
-    candidate_snapshot_id: str
-    candidate_snapshot_ingest_ts: datetime
+    classification_provenance: str
+    classification_id: str
+    classification_updated_at: datetime
     candidate_count: int
     thesis_linkage_z: Optional[float]
     attention_acceleration_z: Optional[float]
@@ -130,6 +145,17 @@ def _nonnegative_log1p(value: Optional[float]) -> Optional[float]:
     return math.log1p(max(numeric, 0.0))
 
 
+def _positive_log_ratio(
+    numerator: Optional[float],
+    denominator: Optional[float],
+) -> Optional[float]:
+    left = _finite(numerator)
+    right = _finite(denominator)
+    if left is None or right is None or left <= 0.0 or right <= 0.0:
+        return None
+    return math.log(left / right)
+
+
 def _percentile(sorted_values: list[float], quantile: float) -> float:
     if len(sorted_values) == 1:
         return sorted_values[0]
@@ -142,10 +168,10 @@ def _percentile(sorted_values: list[float], quantile: float) -> float:
     return sorted_values[lower] + (sorted_values[upper] - sorted_values[lower]) * fraction
 
 
-def _winsorized_z(values: dict[int, Optional[float]]) -> dict[int, float]:
+def _winsorized_z(values: dict[int, Optional[float]]) -> dict[int, Optional[float]]:
     valid = sorted(value for value in values.values() if value is not None)
     if not valid:
-        return {security_sk: 0.0 for security_sk in values}
+        return {security_sk: None for security_sk in values}
     lower = _percentile(valid, WINSOR_LOWER)
     upper = _percentile(valid, WINSOR_UPPER)
     winsorized = {
@@ -154,13 +180,19 @@ def _winsorized_z(values: dict[int, Optional[float]]) -> dict[int, float]:
     }
     observed = [value for value in winsorized.values() if value is not None]
     if len(observed) < 2:
-        return {security_sk: 0.0 for security_sk in values}
+        return {
+            security_sk: None if value is None else 0.0
+            for security_sk, value in winsorized.items()
+        }
     mean = fmean(observed)
     deviation = stdev(observed)
     if deviation <= 0.0:
-        return {security_sk: 0.0 for security_sk in values}
+        return {
+            security_sk: None if value is None else 0.0
+            for security_sk, value in winsorized.items()
+        }
     return {
-        security_sk: 0.0 if value is None else (value - mean) / deviation
+        security_sk: None if value is None else (value - mean) / deviation
         for security_sk, value in winsorized.items()
     }
 
@@ -170,7 +202,7 @@ def _component_z(
     field_name: str,
     direction: int = 1,
     transform: Callable[[Optional[float]], Optional[float]] = _identity,
-) -> dict[int, float]:
+) -> dict[int, Optional[float]]:
     values: dict[int, Optional[float]] = {}
     for observation in observations:
         raw_value = getattr(observation, field_name)
@@ -183,23 +215,33 @@ def _component_z(
     return _winsorized_z(values)
 
 
-def _average_components(
+def _weighted_components(
     observations: list[OpportunityObservation],
-    components: Iterable[dict[int, float]],
-) -> dict[int, float]:
-    component_list = list(components)
-    return {
-        observation.security_sk: fmean(
-            component[observation.security_sk] for component in component_list
+    component_z: dict[str, dict[int, Optional[float]]],
+    component_weights: dict[str, float],
+) -> dict[int, Optional[float]]:
+    values = {}
+    for observation in observations:
+        security_sk = observation.security_sk
+        observed = [
+            (component_z[name][security_sk], weight)
+            for name, weight in component_weights.items()
+            if component_z[name][security_sk] is not None
+        ]
+        available_weight = sum(weight for _, weight in observed)
+        values[security_sk] = (
+            None
+            if available_weight + 1e-12 < MIN_COMPONENT_WEIGHT
+            else sum(float(value) * weight for value, weight in observed) / available_weight
         )
-        for observation in observations
-    }
+    return values
 
 
 def _coverage_reasons(observation: OpportunityObservation) -> tuple[str, ...]:
     required_fields = (
-        "membership_weight",
-        "news_volume_z_30d",
+        "theme_proxy_weight",
+        "broad_market_weight",
+        "attention_change_30d",
         "insider_net_buy_ratio_90d",
         "insider_cluster_buy_30d",
         "inst_net_flow_qoq",
@@ -211,20 +253,14 @@ def _coverage_reasons(observation: OpportunityObservation) -> tuple[str, ...]:
         "fcf_yield",
         "net_debt_to_ebitda",
         "fundamental_anchor_z",
-        "news_count_30d",
-        "institutional_holder_count_120d",
+        "institutional_holder_count_change_qoq",
     )
     missing_reasons = tuple(
         f"missing:{field_name}"
         for field_name in required_fields
         if getattr(observation, field_name) is None
     )
-    classification_reasons = (
-        ("classification:llm",)
-        if observation.candidate_source == "LLM"
-        else ()
-    )
-    return tuple(sorted((*missing_reasons, *classification_reasons)))
+    return tuple(sorted(missing_reasons))
 
 
 def _validate(observations: list[OpportunityObservation]) -> None:
@@ -239,11 +275,11 @@ def _validate(observations: list[OpportunityObservation]) -> None:
     for observation in observations:
         if (
             not observation.theme_id
-            or not observation.candidate_source
-            or not observation.candidate_snapshot_id
+            or not observation.classification_provenance
+            or not observation.classification_id
         ):
             raise ValueError(
-                "theme_id, candidate_source, and candidate_snapshot_id are required"
+                "theme_id, classification_provenance, and classification_id are required"
             )
         if (observation.theme_id, observation.date_sk, observation.as_of) != expected:
             raise ValueError("score_theme requires one theme and as_of cohort")
@@ -255,8 +291,8 @@ def _validate(observations: list[OpportunityObservation]) -> None:
         for field_name, value in asdict(observation).items():
             if field_name in {
                 "theme_id", "security_sk", "date_sk", "as_of",
-                "candidate_source", "candidate_snapshot_id",
-                "candidate_snapshot_ingest_ts", "max_knowledge_date",
+                "classification_provenance", "classification_id",
+                "classification_updated_at", "max_knowledge_date",
             }:
                 continue
             if value is not None and not isinstance(value, bool):
@@ -274,14 +310,6 @@ def _validate_leg_weights(leg_weights: dict[str, float]) -> dict[str, float]:
     return validated
 
 
-def _available_legs(observation: OpportunityObservation) -> tuple[str, ...]:
-    return tuple(
-        leg_name
-        for leg_name, field_names in LEG_INPUTS.items()
-        if all(getattr(observation, field_name) is not None for field_name in field_names)
-    )
-
-
 def _cohort_snapshot_hash(
     observations: list[OpportunityObservation],
     leg_weights: dict[str, float],
@@ -294,6 +322,145 @@ def _cohort_snapshot_hash(
         "winsor": [WINSOR_LOWER, WINSOR_UPPER],
         "observations": [asdict(observation) for observation in observations],
     })
+
+
+def _pearson(pairs: list[tuple[float, float]]) -> Optional[float]:
+    if len(pairs) < 2:
+        return None
+    left_mean = fmean(left for left, _ in pairs)
+    right_mean = fmean(right for _, right in pairs)
+    numerator = sum(
+        (left - left_mean) * (right - right_mean)
+        for left, right in pairs
+    )
+    denominator = math.sqrt(
+        sum((left - left_mean) ** 2 for left, _ in pairs)
+        * sum((right - right_mean) ** 2 for _, right in pairs)
+    )
+    return None if denominator <= 0.0 else numerator / denominator
+
+
+def _pc1_variance_share(rows: list[list[float]]) -> Optional[float]:
+    if len(rows) < 2:
+        return None
+    columns = list(zip(*rows))
+    deviations = [stdev(column) for column in columns]
+    if any(deviation <= 0.0 for deviation in deviations):
+        return None
+    standardized = [
+        [
+            (value - fmean(columns[index])) / deviations[index]
+            for index, value in enumerate(row)
+        ]
+        for row in rows
+    ]
+    size = len(columns)
+    matrix = [
+        [
+            sum(row[left] * row[right] for row in standardized) / (len(rows) - 1)
+            for right in range(size)
+        ]
+        for left in range(size)
+    ]
+    vector = [1.0 / math.sqrt(size)] * size
+    for _ in range(100):
+        product = [sum(matrix[row][column] * vector[column] for column in range(size)) for row in range(size)]
+        norm = math.sqrt(sum(value * value for value in product))
+        if norm <= 0.0:
+            return None
+        next_vector = [value / norm for value in product]
+        if max(abs(left - right) for left, right in zip(vector, next_vector)) < 1e-12:
+            vector = next_vector
+            break
+        vector = next_vector
+    eigenvalue = sum(
+        vector[row] * matrix[row][column] * vector[column]
+        for row in range(size)
+        for column in range(size)
+    )
+    trace = sum(matrix[index][index] for index in range(size))
+    return None if trace <= 0.0 else eigenvalue / trace
+
+
+def cohort_leg_diagnostics(results: Iterable[OpportunityResult]) -> dict:
+    rows = list(results)
+    leg_names = tuple(LEG_RESULT_FIELDS)
+    correlations = []
+    for left in leg_names:
+        for right in leg_names:
+            pairs = [
+                (float(getattr(row, LEG_RESULT_FIELDS[left])), float(getattr(row, LEG_RESULT_FIELDS[right])))
+                for row in rows
+                if getattr(row, LEG_RESULT_FIELDS[left]) is not None
+                and getattr(row, LEG_RESULT_FIELDS[right]) is not None
+            ]
+            correlations.append({
+                "leg_x": left,
+                "leg_y": right,
+                "pair_count": len(pairs),
+                "correlation": _pearson(pairs),
+            })
+    complete_rows = [
+        [float(getattr(row, field_name)) for field_name in LEG_RESULT_FIELDS.values()]
+        for row in rows
+        if all(getattr(row, field_name) is not None for field_name in LEG_RESULT_FIELDS.values())
+    ]
+    return {
+        "correlations": correlations,
+        "complete_case_count": len(complete_rows),
+        "pc1_variance_share": _pc1_variance_share(complete_rows),
+    }
+
+
+def _blom_score(value: float, distribution: list[float]) -> float:
+    if not distribution or len(set(distribution)) == 1:
+        return 50.0
+    sorted_values = sorted(distribution)
+    equal_positions = [
+        index
+        for index, candidate in enumerate(sorted_values, start=1)
+        if candidate == value
+    ]
+    rank = (
+        fmean(equal_positions)
+        if equal_positions
+        else 1 + sum(candidate < value for candidate in sorted_values)
+    )
+    return 100.0 * (rank - 3 / 8) / (len(distribution) + 1 / 4)
+
+
+def score_movement_attribution(
+    previous: Iterable[OpportunityResult],
+    current: Iterable[OpportunityResult],
+) -> list[dict]:
+    previous_rows = {row.security_sk: row for row in previous if row.opportunity_score_raw is not None}
+    current_rows = {row.security_sk: row for row in current if row.opportunity_score_raw is not None}
+    movements = []
+    for security_sk in sorted(previous_rows.keys() & current_rows.keys()):
+        prior = previous_rows[security_sk]
+        latest = current_rows[security_sk]
+        counterfactual_distribution = [
+            float(latest.opportunity_score_raw)
+            if row.security_sk == security_sk
+            else float(row.opportunity_score_raw)
+            for row in previous_rows.values()
+        ]
+        counterfactual = _blom_score(
+            float(latest.opportunity_score_raw),
+            counterfactual_distribution,
+        )
+        own_effect = counterfactual - float(prior.opportunity_score)
+        cohort_effect = float(latest.opportunity_score) - counterfactual
+        movements.append({
+            "security_sk": security_sk,
+            "previous_score": float(prior.opportunity_score),
+            "current_score": float(latest.opportunity_score),
+            "counterfactual_score": counterfactual,
+            "score_delta": float(latest.opportunity_score) - float(prior.opportunity_score),
+            "own_composite_effect": own_effect,
+            "cohort_effect": cohort_effect,
+        })
+    return movements
 
 
 def score_theme(
@@ -321,9 +488,9 @@ def score_theme(
                 security_sk=observation.security_sk,
                 date_sk=observation.date_sk,
                 as_of=observation.as_of,
-                candidate_source=observation.candidate_source,
-                candidate_snapshot_id=observation.candidate_snapshot_id,
-                candidate_snapshot_ingest_ts=observation.candidate_snapshot_ingest_ts,
+                classification_provenance=observation.classification_provenance,
+                classification_id=observation.classification_id,
+                classification_updated_at=observation.classification_updated_at,
                 candidate_count=candidate_count,
                 thesis_linkage_z=None,
                 attention_acceleration_z=None,
@@ -349,8 +516,14 @@ def score_theme(
         ]
 
     component_z = {
-        "membership_weight": _component_z(ordered, "membership_weight"),
-        "news_volume_z_30d": _component_z(ordered, "news_volume_z_30d"),
+        "theme_linkage": _winsorized_z({
+            observation.security_sk: _positive_log_ratio(
+                observation.theme_proxy_weight,
+                observation.broad_market_weight,
+            )
+            for observation in ordered
+        }),
+        "attention_change_30d": _component_z(ordered, "attention_change_30d"),
         "insider_net_buy_ratio_90d": _component_z(ordered, "insider_net_buy_ratio_90d"),
         "insider_cluster_buy_30d": _component_z(ordered, "insider_cluster_buy_30d"),
         "inst_net_flow_qoq": _component_z(ordered, "inst_net_flow_qoq"),
@@ -366,50 +539,23 @@ def score_theme(
         "fcf_yield": _component_z(ordered, "fcf_yield"),
         "net_debt_to_ebitda": _component_z(ordered, "net_debt_to_ebitda", direction=-1),
         "fundamental_anchor_z": _component_z(ordered, "fundamental_anchor_z", direction=-1),
-        "news_count_30d": _component_z(ordered, "news_count_30d", direction=-1),
-        "institutional_holder_count_120d": _component_z(
+        "institutional_holder_count_change_qoq": _component_z(
             ordered,
-            "institutional_holder_count_120d",
+            "institutional_holder_count_change_qoq",
             direction=-1,
         ),
     }
     leg_raw = {
-        "thesis_linkage": component_z["membership_weight"],
-        "attention_acceleration": component_z["news_volume_z_30d"],
-        "smart_money": _average_components(ordered, (
-            component_z["insider_net_buy_ratio_90d"],
-            component_z["insider_cluster_buy_30d"],
-            component_z["inst_net_flow_qoq"],
-            component_z["inst_new_initiations"],
-            component_z["contract_award_usd_trailing_90d"],
-            component_z["activist_13d_flag"],
-        )),
-        "fundamental_health": _average_components(ordered, (
-            component_z["profit_margin"],
-            component_z["rev_growth_yoy"],
-            component_z["fcf_yield"],
-            component_z["net_debt_to_ebitda"],
-        )),
-        "valuation_brake": component_z["fundamental_anchor_z"],
-        "crowding_positioning": _average_components(ordered, (
-            component_z["news_count_30d"],
-            component_z["institutional_holder_count_120d"],
-        )),
+        leg_name: _weighted_components(ordered, component_z, component_weights)
+        for leg_name, component_weights in LEG_COMPONENT_WEIGHTS.items()
     }
     available_legs = {
-        observation.security_sk: _available_legs(observation)
+        observation.security_sk: tuple(
+            leg_name
+            for leg_name, values in leg_raw.items()
+            if values[observation.security_sk] is not None
+        )
         for observation in ordered
-    }
-    leg_raw = {
-        leg_name: {
-            security_sk: value if leg_name in available_legs[security_sk] else None
-            for security_sk, value in values.items()
-        }
-        for leg_name, values in leg_raw.items()
-    }
-    leg_z = {
-        leg_name: _winsorized_z(values)
-        for leg_name, values in leg_raw.items()
     }
     full_variance = sum(weight * weight for weight in active_weights.values())
     variance_scales = {}
@@ -422,18 +568,25 @@ def score_theme(
             raise ValueError("Opportunity Score requires at least one complete leg")
         variance_scales[security_sk] = math.sqrt(full_variance / available_variance)
         raw_scores[security_sk] = variance_scales[security_sk] * sum(
-            active_weights[leg_name] * leg_z[leg_name][security_sk]
+            active_weights[leg_name] * float(leg_raw[leg_name][security_sk])
             for leg_name in available
         )
-    unique_scores = sorted(set(raw_scores.values()))
-    if len(unique_scores) == 1:
+    sorted_scores = sorted(raw_scores.values())
+    if len(set(sorted_scores)) == 1:
         percentile_scores = {observation.security_sk: 50.0 for observation in ordered}
     else:
-        first_rank: dict[float, int] = {}
-        for index, value in enumerate(sorted(raw_scores.values())):
-            first_rank.setdefault(value, index)
+        rank_positions: dict[float, list[int]] = {}
+        for rank, value in enumerate(sorted_scores, start=1):
+            rank_positions.setdefault(value, []).append(rank)
+        average_rank = {
+            value: fmean(positions)
+            for value, positions in rank_positions.items()
+        }
         percentile_scores = {
-            security_sk: round(first_rank[value] / (candidate_count - 1) * 100.0, 4)
+            security_sk: round(
+                100.0 * (average_rank[value] - 3 / 8) / (candidate_count + 1 / 4),
+                4,
+            )
             for security_sk, value in raw_scores.items()
         }
 
@@ -445,7 +598,7 @@ def score_theme(
             leg_name: (
                 variance_scales[security_sk]
                 * active_weights[leg_name]
-                * leg_z[leg_name][security_sk]
+                * float(leg_raw[leg_name][security_sk])
                 if leg_name in available_legs[security_sk]
                 else 0.0
             )
@@ -453,9 +606,9 @@ def score_theme(
         }
         effective_leg_z = {
             leg_name: (
-                leg_z[leg_name][security_sk]
+                float(leg_raw[leg_name][security_sk])
                 if leg_name in available_legs[security_sk]
-                else 0.0
+                else None
             )
             for leg_name in active_weights
         }
@@ -466,9 +619,9 @@ def score_theme(
             security_sk=security_sk,
             date_sk=observation.date_sk,
             as_of=observation.as_of,
-            candidate_source=observation.candidate_source,
-            candidate_snapshot_id=observation.candidate_snapshot_id,
-            candidate_snapshot_ingest_ts=observation.candidate_snapshot_ingest_ts,
+            classification_provenance=observation.classification_provenance,
+            classification_id=observation.classification_id,
+            classification_updated_at=observation.classification_updated_at,
             candidate_count=candidate_count,
             thesis_linkage_z=effective_leg_z["thesis_linkage"],
             attention_acceleration_z=effective_leg_z["attention_acceleration"],
@@ -484,7 +637,11 @@ def score_theme(
             crowding_positioning_contribution=contributions["crowding_positioning"],
             opportunity_score_raw=raw_scores[security_sk],
             opportunity_score=percentile_scores[security_sk],
-            coverage_status="PARTIAL" if reasons else "READY",
+            coverage_status=(
+                "PARTIAL"
+                if len(available_legs[security_sk]) < len(LEG_WEIGHTS)
+                else "READY"
+            ),
             coverage_reasons=reasons,
             max_knowledge_date=observation.max_knowledge_date,
             model_version=MODEL_VERSION,

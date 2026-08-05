@@ -15,6 +15,9 @@
     "AI_SEARCH_EVIDENCE_INDEX": "idx-news-filings",
     "AZURE_OPENAI_ENDPOINT": "https://auspex-dev-openai.openai.azure.com/",
     "AZURE_OPENAI_CHAT_DEPLOYMENT": "gpt-4o",
-    "AZURE_OPENAI_CHAT_MODEL_VERSION": "gpt-4o:2024-11-20"
+    "AZURE_OPENAI_CHAT_MODEL_VERSION": "gpt-4o:2024-11-20",
+    "FINANCING_MAX_DILUTED_SHARE_GROWTH": "",
+    "FINANCING_MIN_CASH_RUNWAY_YEARS": "",
+    "FINANCING_MAX_SHELF_AGE_DAYS": ""
   }
 }

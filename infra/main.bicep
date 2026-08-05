@@ -75,6 +75,15 @@ param fabricWarehouseServer string
 @description('Fabric Warehouse database used by daily promotion')
 param fabricWarehouseDatabase string = 'auspex_gold'
 
+@description('Calibrated maximum diluted-share growth; empty keeps score-driven increases fail-closed')
+param financingMaxDilutedShareGrowth string = ''
+
+@description('Calibrated minimum cash runway in years; empty keeps score-driven increases fail-closed')
+param financingMinCashRunwayYears string = ''
+
+@description('Calibrated maximum shelf filing age in days; empty keeps score-driven increases fail-closed')
+param financingMaxShelfAgeDays string = ''
+
 @description('Application client ID for the Microsoft personal-account SWA auth registration')
 @minLength(1)
 param microsoftAuthClientId string
@@ -208,6 +217,9 @@ module webApiFunc 'modules/functionapp.bicep' = {
     cosmosEndpoint: cosmosEndpoint
     aiSearchEndpoint: aiSearchEndpoint
     azureOpenAiEndpoint: azureOpenAiEndpoint
+    financingMaxDilutedShareGrowth: financingMaxDilutedShareGrowth
+    financingMinCashRunwayYears: financingMinCashRunwayYears
+    financingMaxShelfAgeDays: financingMaxShelfAgeDays
     vnetIntegrationSubnetId: networkVnet.outputs.wapiSubnetId
     logAnalyticsWorkspaceId: monitor.outputs.workspaceId
   }

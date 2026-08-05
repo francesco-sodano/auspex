@@ -60,14 +60,14 @@ from pyspark.sql.types import (
     StringType, StructField, StructType, TimestampType,
 )
 
-OPPORTUNITY_ENGINE_LAKEHOUSE_PATH = "Files/config/e14/d861397782bbb25849db40eb22bb76c574bf76c8be344d8d1328d3c18b559ad2.py"
-OPPORTUNITY_ENGINE_SHA256 = "d861397782bbb25849db40eb22bb76c574bf76c8be344d8d1328d3c18b559ad2"
+OPPORTUNITY_ENGINE_LAKEHOUSE_PATH = "Files/config/engine/e4c60debd1986f7894d2504326837a0b9da85c2e287e7a3ca5292ab28465b417.py"
+OPPORTUNITY_ENGINE_SHA256 = "e4c60debd1986f7894d2504326837a0b9da85c2e287e7a3ca5292ab28465b417"
 
 opportunity_engine_source = mssparkutils.fs.head(OPPORTUNITY_ENGINE_LAKEHOUSE_PATH, 1024 * 1024)
 opportunity_engine_bytes = opportunity_engine_source.encode("utf-8")
 if hashlib.sha256(opportunity_engine_bytes).hexdigest() != OPPORTUNITY_ENGINE_SHA256:
     raise RuntimeError("E14/E6b engine resource hash mismatch")
-opportunity_engine_path = os.path.join(tempfile.gettempdir(), "thesis_e6b_v2.py")
+opportunity_engine_path = os.path.join(tempfile.gettempdir(), "thesis_opportunity_v1.py")
 with open(opportunity_engine_path, "wb") as opportunity_engine_file:
     opportunity_engine_file.write(opportunity_engine_bytes)
 opportunity_engine_spec = importlib.util.spec_from_file_location("thesis", opportunity_engine_path)
@@ -81,6 +81,9 @@ OPPORTUNITY_MODEL_VERSION = opportunity_engine.MODEL_VERSION
 OPPORTUNITY_WEIGHT_VERSION = opportunity_engine.WEIGHT_VERSION
 OPPORTUNITY_LEG_WEIGHTS = opportunity_engine.LEG_WEIGHTS
 OpportunityObservation = opportunity_engine.OpportunityObservation
+OpportunityResult = opportunity_engine.OpportunityResult
+cohort_leg_diagnostics = opportunity_engine.cohort_leg_diagnostics
+score_movement_attribution = opportunity_engine.score_movement_attribution
 score_theme = opportunity_engine.score_theme
 
 # METADATA ********************
@@ -154,8 +157,9 @@ def _replace_delta_projection(table_name: str, select_sql: str) -> None:
 
 for required in [
     "dim_security", "dim_date", "fact_market_daily", "fact_insider_txn",
-    "silver_theme_membership", "fact_theme_membership",
+    "silver_theme_membership", "fact_theme_membership", "fact_broad_market_membership",
     "security_theme_classification",
+    "silver_companyfacts", "fact_material_event",
     "fact_fundamental_anchor", "fact_narrative_intensity", "narrative_snapshot_manifest",
     "fundamental_anchor_snapshot_manifest", "fact_narrative_premium",
     "narrative_premium_snapshot_manifest",
@@ -465,6 +469,7 @@ spark.sql("""
         fundamental_anchor_method     STRING,
         fundamental_anchor_imputed_flags STRING,
         institutional_holder_count_120d INT,
+        institutional_holder_count_change_qoq DOUBLE,
         narrative_intensity           DOUBLE,
         narrative_coverage_status      STRING,
         narrative_coverage_reasons_json STRING,
@@ -503,6 +508,7 @@ _ensure_columns("security_daily_features", {
     "fundamental_anchor_method": "fundamental_anchor_method STRING",
     "fundamental_anchor_imputed_flags": "fundamental_anchor_imputed_flags STRING",
     "institutional_holder_count_120d": "institutional_holder_count_120d INT",
+    "institutional_holder_count_change_qoq": "institutional_holder_count_change_qoq DOUBLE",
     "narrative_coverage_status": "narrative_coverage_status STRING",
     "narrative_coverage_reasons_json": "narrative_coverage_reasons_json STRING",
     "narrative_premium_coverage_status": "narrative_premium_coverage_status STRING",
@@ -521,6 +527,24 @@ spark.sql("""
        OR score_status <> 'THEME_CONTEXT_REQUIRED'
 """)
 
+previous_opportunity_results = []
+if spark.catalog.tableExists("fact_theme_opportunity_score"):
+    previous_score_rows = (
+        spark.table("fact_theme_opportunity_score")
+        .filter(
+            (F.col("model_version") == F.lit(OPPORTUNITY_MODEL_VERSION))
+            & (F.col("weight_version") == F.lit(OPPORTUNITY_WEIGHT_VERSION))
+        )
+        .collect()
+    )
+    for previous_row in previous_score_rows:
+        payload = previous_row.asDict()
+        payload.pop("generation", None)
+        payload.pop("coverage_reasons_json", None)
+        payload.pop("created_at", None)
+        payload["coverage_reasons"] = tuple(json.loads(previous_row.coverage_reasons_json))
+        previous_opportunity_results.append(OpportunityResult(**payload))
+spark.sql("DROP TABLE IF EXISTS fact_theme_opportunity_score")
 spark.sql("""
     CREATE TABLE IF NOT EXISTS fact_theme_opportunity_score (
         score_id STRING NOT NULL,
@@ -530,9 +554,9 @@ spark.sql("""
         security_sk BIGINT NOT NULL,
         date_sk INT NOT NULL,
         as_of DATE NOT NULL,
-        candidate_source STRING NOT NULL,
-        candidate_snapshot_id STRING,
-        candidate_snapshot_ingest_ts TIMESTAMP,
+        classification_provenance STRING NOT NULL,
+        classification_id STRING NOT NULL,
+        classification_updated_at TIMESTAMP NOT NULL,
         candidate_count INT NOT NULL,
         thesis_linkage_z DOUBLE,
         attention_acceleration_z DOUBLE,
@@ -556,10 +580,7 @@ spark.sql("""
         created_at TIMESTAMP NOT NULL
     ) USING DELTA
 """)
-_ensure_columns("fact_theme_opportunity_score", {
-    "candidate_snapshot_id": "candidate_snapshot_id STRING",
-    "candidate_snapshot_ingest_ts": "candidate_snapshot_ingest_ts TIMESTAMP",
-})
+spark.sql("DROP TABLE IF EXISTS opportunity_score_snapshot_manifest")
 spark.sql("""
     CREATE TABLE IF NOT EXISTS opportunity_score_snapshot_manifest (
         generation STRING NOT NULL,
@@ -576,8 +597,6 @@ spark.sql("""
         completed_at TIMESTAMP
     ) USING DELTA
 """)
-DeltaTable.forName(spark, "fact_theme_opportunity_score").delete()
-DeltaTable.forName(spark, "opportunity_score_snapshot_manifest").delete()
 
 # METADATA ********************
 
@@ -1186,6 +1205,8 @@ fact_fundamentals = spark.table("fact_fundamentals") if spark.catalog.tableExist
     ("pe_ratio", DoubleType()), ("peg_ratio", DoubleType()), ("ps_ratio", DoubleType()),
     ("ev_ebitda", DoubleType()), ("profit_margin", DoubleType()), ("rev_growth_yoy", DoubleType()),
     ("fcf_yield", DoubleType()), ("net_debt_to_ebitda", DoubleType()),
+    ("cash_and_equivalents", DoubleType()), ("operating_cashflow", DoubleType()),
+    ("fundamentals_kind", StringType()),
 ])
 fundamental_metric_names = [
     "pe_ratio", "peg_ratio", "ps_ratio", "ev_ebitda", "profit_margin",
@@ -1236,6 +1257,234 @@ fundamentals_latest = fundamentals_latest.withColumn(
 ).drop(*[
     f"{metric_name}_knowledge_date" for metric_name in fundamental_metric_names
 ])
+
+# --- PIT financing-risk record; policy thresholds are supplied outside the engine. ---
+diluted_facts = (
+    asof_df.alias("d")
+    .join(
+        spark.table("silver_companyfacts").alias("x"),
+        (F.col("d.security_sk") == F.col("x.security_sk"))
+        & (F.col("x.event_date") <= F.col("d.as_of"))
+        & (F.col("x.knowledge_date") <= F.col("d.as_of"))
+        & (F.col("x.concept") == F.lit("WeightedAverageDilutedSharesOutstanding"))
+        & F.col("x.period_start_date").isNotNull()
+        & (F.col("x.fact_value") > 0),
+        "inner",
+    )
+    .select(
+        F.col("d.security_sk").alias("security_sk"),
+        F.col("d.date_sk").alias("date_sk"),
+        F.col("d.as_of").alias("as_of"),
+        F.col("x.fact_value").cast(DoubleType()).alias("diluted_shares"),
+        F.to_date("x.period_start_date").alias("period_start_date"),
+        F.to_date("x.period_end_date").alias("period_end_date"),
+        F.datediff(F.to_date("x.period_end_date"), F.to_date("x.period_start_date")).alias("duration_days"),
+        F.col("x.knowledge_date").alias("diluted_knowledge_date"),
+        F.col("x.companyfact_revision_id").alias("companyfact_revision_id"),
+    )
+)
+diluted_revision_window = Window.partitionBy(
+    "security_sk", "date_sk", "period_end_date", "duration_days",
+).orderBy(
+    F.col("diluted_knowledge_date").desc(),
+    F.col("companyfact_revision_id").desc(),
+)
+diluted_revisions = (
+    diluted_facts
+    .withColumn("revision_row_number", F.row_number().over(diluted_revision_window))
+    .filter(F.col("revision_row_number") == 1)
+    .drop("revision_row_number")
+)
+latest_diluted_window = Window.partitionBy("security_sk", "date_sk").orderBy(
+    F.col("period_end_date").desc(),
+    F.col("diluted_knowledge_date").desc(),
+    F.col("companyfact_revision_id").desc(),
+)
+latest_diluted = (
+    diluted_revisions
+    .withColumn("current_row_number", F.row_number().over(latest_diluted_window))
+    .filter(F.col("current_row_number") == 1)
+    .drop("current_row_number")
+)
+prior_diluted_window = Window.partitionBy(
+    F.col("c.security_sk"), F.col("c.date_sk"),
+).orderBy(
+    F.abs(F.datediff(F.col("c.period_end_date"), F.col("p.period_end_date")) - F.lit(365)),
+    F.col("p.diluted_knowledge_date").desc(),
+    F.col("p.companyfact_revision_id").desc(),
+)
+diluted_growth = (
+    latest_diluted.alias("c")
+    .join(
+        diluted_revisions.alias("p"),
+        (F.col("c.security_sk") == F.col("p.security_sk"))
+        & (F.col("c.date_sk") == F.col("p.date_sk"))
+        & (F.col("p.period_end_date") <= F.date_sub(F.col("c.period_end_date"), 330))
+        & (F.col("p.period_end_date") >= F.date_sub(F.col("c.period_end_date"), 400))
+        & (F.abs(F.col("c.duration_days") - F.col("p.duration_days")) <= 7),
+        "left",
+    )
+    .withColumn("prior_row_number", F.row_number().over(prior_diluted_window))
+    .filter(F.col("prior_row_number") == 1)
+    .select(
+        F.col("c.security_sk").alias("security_sk"),
+        F.col("c.date_sk").alias("date_sk"),
+        F.col("c.diluted_shares").alias("diluted_shares_current"),
+        F.col("p.diluted_shares").alias("diluted_shares_prior_year"),
+        F.when(
+            F.col("p.diluted_shares") > 0,
+            F.col("c.diluted_shares") / F.col("p.diluted_shares") - F.lit(1.0),
+        ).alias("diluted_share_growth_yoy"),
+        F.greatest(
+            F.col("c.diluted_knowledge_date"),
+            F.col("p.diluted_knowledge_date"),
+        ).alias("diluted_knowledge_date"),
+    )
+)
+
+statement_revision_window = Window.partitionBy(
+    F.col("d.security_sk"), F.col("d.date_sk"), F.col("f.event_date"),
+).orderBy(
+    F.col("f.knowledge_date").desc(),
+    F.col("f.silver_loaded_at").desc_nulls_last(),
+    F.col("f.fundamentals_revision_hash").desc_nulls_last(),
+)
+statement_revisions = (
+    asof_df.alias("d")
+    .join(
+        fact_fundamentals.alias("f"),
+        (F.col("d.security_sk") == F.col("f.security_sk"))
+        & (F.col("f.event_date") <= F.col("d.as_of"))
+        & (F.col("f.knowledge_date") <= F.col("d.as_of"))
+        & (F.col("f.fundamentals_kind") == F.lit("STATEMENT")),
+        "left",
+    )
+    .withColumn("statement_revision_row_number", F.row_number().over(statement_revision_window))
+    .filter(F.col("statement_revision_row_number") == 1)
+    .select(
+        F.col("d.security_sk").alias("security_sk"),
+        F.col("d.date_sk").alias("date_sk"),
+        F.col("f.cash_and_equivalents").cast(DoubleType()).alias("cash_and_equivalents"),
+        F.col("f.operating_cashflow").cast(DoubleType()).alias("operating_cashflow"),
+        F.col("f.event_date").alias("statement_event_date"),
+        F.col("f.knowledge_date").alias("statement_knowledge_date"),
+    )
+)
+statement_quarter_window = Window.partitionBy("security_sk", "date_sk").orderBy(
+    F.col("statement_event_date").desc_nulls_last(),
+    F.col("statement_knowledge_date").desc_nulls_last(),
+)
+statement_quarters = statement_revisions.withColumn(
+    "statement_quarter_number", F.row_number().over(statement_quarter_window),
+)
+latest_cash = statement_quarters.filter(F.col("statement_quarter_number") == 1).select(
+    "security_sk", "date_sk", "cash_and_equivalents",
+    F.col("statement_knowledge_date").alias("cash_knowledge_date"),
+)
+ttm_operating_cashflow = (
+    statement_quarters.filter(F.col("statement_quarter_number") <= 4)
+    .groupBy("security_sk", "date_sk")
+    .agg(
+        F.countDistinct("statement_event_date").alias("ttm_statement_quarters"),
+        F.count("operating_cashflow").alias("ttm_cashflow_quarters"),
+        F.sum("operating_cashflow").alias("ttm_operating_cashflow_raw"),
+        F.max("statement_knowledge_date").alias("cashflow_knowledge_date"),
+    )
+    .withColumn(
+        "ttm_operating_cashflow",
+        F.when(
+            (F.col("ttm_statement_quarters") == 4)
+            & (F.col("ttm_cashflow_quarters") == 4),
+            F.col("ttm_operating_cashflow_raw"),
+        ),
+    )
+)
+
+shelf_window = Window.partitionBy(F.col("d.security_sk"), F.col("d.date_sk")).orderBy(
+    F.col("s.event_date").desc_nulls_last(),
+    F.col("s.knowledge_date").desc_nulls_last(),
+    F.col("s.accession_no").desc_nulls_last(),
+)
+latest_shelf = (
+    asof_df.alias("d")
+    .join(
+        spark.table("fact_material_event").alias("s"),
+        (F.col("d.security_sk") == F.col("s.security_sk"))
+        & (F.col("s.event_date") <= F.col("d.as_of"))
+        & (F.col("s.knowledge_date") <= F.col("d.as_of"))
+        & (
+            F.upper(F.col("s.filing_type")).isin("S-3", "S-3/A", "S-3ASR")
+            | F.upper(F.col("s.filing_type")).startswith("424B")
+        ),
+        "left",
+    )
+    .withColumn("shelf_row_number", F.row_number().over(shelf_window))
+    .filter(F.col("shelf_row_number") == 1)
+    .select(
+        F.col("d.security_sk").alias("security_sk"),
+        F.col("d.date_sk").alias("date_sk"),
+        F.col("s.filing_type").alias("shelf_form"),
+        F.col("s.accession_no").alias("shelf_accession"),
+        F.datediff(F.col("d.as_of"), F.col("s.event_date")).alias("days_since_shelf_filing"),
+        F.col("s.knowledge_date").alias("shelf_knowledge_date"),
+    )
+)
+
+financing_risk = (
+    asof_df.select("security_sk", "date_sk", "as_of")
+    .join(diluted_growth, ["security_sk", "date_sk"], "left")
+    .join(latest_cash, ["security_sk", "date_sk"], "left")
+    .join(ttm_operating_cashflow, ["security_sk", "date_sk"], "left")
+    .join(latest_shelf, ["security_sk", "date_sk"], "left")
+    .withColumn(
+        "is_burning_cash",
+        F.when(F.col("ttm_operating_cashflow").isNotNull(), F.col("ttm_operating_cashflow") < 0),
+    )
+    .withColumn(
+        "cash_runway_years",
+        F.when(
+            (F.col("ttm_operating_cashflow") < 0)
+            & F.col("cash_and_equivalents").isNotNull(),
+            F.col("cash_and_equivalents") / F.abs(F.col("ttm_operating_cashflow")),
+        ),
+    )
+    .withColumn(
+        "financing_coverage_status",
+        F.when(
+            F.col("diluted_share_growth_yoy").isNotNull()
+            & F.col("cash_and_equivalents").isNotNull()
+            & F.col("ttm_operating_cashflow").isNotNull(),
+            F.lit("READY"),
+        ).otherwise(F.lit("PARTIAL")),
+    )
+    .withColumn(
+        "financing_coverage_reasons_json",
+        F.to_json(F.array_compact(F.array(
+            F.when(F.col("diluted_share_growth_yoy").isNull(), F.lit("missing:diluted_share_growth_yoy")),
+            F.when(F.col("cash_and_equivalents").isNull(), F.lit("missing:cash_and_equivalents")),
+            F.when(F.col("ttm_operating_cashflow").isNull(), F.lit("missing:ttm_operating_cashflow")),
+        ))),
+    )
+    .withColumn(
+        "max_knowledge_date",
+        F.greatest(
+            "diluted_knowledge_date", "cash_knowledge_date",
+            "cashflow_knowledge_date", "shelf_knowledge_date",
+        ),
+    )
+    .withColumn("created_at", F.current_timestamp())
+    .select(
+        "security_sk", "date_sk", "as_of",
+        "diluted_share_growth_yoy", "cash_runway_years", "is_burning_cash",
+        "days_since_shelf_filing", "shelf_form", "shelf_accession",
+        "financing_coverage_status", "financing_coverage_reasons_json",
+        "max_knowledge_date", "created_at",
+    )
+)
+(
+    financing_risk.write.format("delta").mode("overwrite")
+    .option("overwriteSchema", "true").saveAsTable("fact_financing_risk")
+)
 
 fundamental_anchor = (
     spark.table("fact_fundamental_anchor").alias("f")
@@ -1487,6 +1736,37 @@ inst_with_delta = (
     .withColumn("shares_delta_calc", F.col("shares").cast(DoubleType()) - F.col("prev_shares"))
     .withColumn("value_delta_calc", F.col("value_usd").cast(DoubleType()) - F.col("prev_value_usd"))
 )
+holder_counts_by_period = (
+    latest_holding_revisions
+    .filter(F.col("event_date").isNotNull())
+    .groupBy("security_sk", "date_sk", "event_date")
+    .agg(
+        F.countDistinct(
+            F.when(F.col("shares").cast(DoubleType()) > 0, F.col("entity_sk"))
+        ).cast(DoubleType()).alias("holder_count"),
+    )
+)
+holder_period_window = Window.partitionBy("security_sk", "date_sk").orderBy(
+    F.col("event_date").desc(),
+)
+holder_count_change = (
+    holder_counts_by_period
+    .withColumn("period_number", F.row_number().over(holder_period_window))
+    .filter(F.col("period_number") <= 2)
+    .groupBy("security_sk", "date_sk")
+    .agg(
+        F.max(F.when(F.col("period_number") == 1, F.col("holder_count"))).alias("current_holder_count"),
+        F.max(F.when(F.col("period_number") == 2, F.col("holder_count"))).alias("prior_holder_count"),
+    )
+    .withColumn(
+        "institutional_holder_count_change_qoq",
+        F.when(
+            F.col("prior_holder_count").isNotNull(),
+            F.col("current_holder_count") - F.col("prior_holder_count"),
+        ),
+    )
+    .select("security_sk", "date_sk", "institutional_holder_count_change_qoq")
+)
 institutional_metrics = (
     inst_with_delta
     .filter(F.col("event_date").isNull() | (F.col("event_date") >= F.date_sub(F.col("as_of"), 120)))
@@ -1497,6 +1777,7 @@ institutional_metrics = (
         F.countDistinct(F.when(F.col("shares").cast(DoubleType()) > 0, F.col("entity_sk"))).cast(IntegerType()).alias("institutional_holder_count_120d"),
         F.max(F.col("knowledge_date")).alias("institutional_knowledge_date"),
     )
+    .join(holder_count_change, ["security_sk", "date_sk"], "left")
 )
 
 fact_ownership_event = spark.table("fact_ownership_event") if spark.catalog.tableExists("fact_ownership_event") else _empty_metric_df([
@@ -1571,15 +1852,15 @@ raw_features = (
     .join(ownership_metrics, ["security_sk", "date_sk"], "left")
     .withColumn("beta_252d", F.lit(None).cast(DoubleType()))
     .withColumn("info_ratio_252d", F.lit(None).cast(DoubleType()))
-    .withColumn("insider_net_buy_ratio_90d", F.coalesce(F.col("insider_net_buy_ratio_90d"), F.lit(0.0)).cast(DoubleType()))
-    .withColumn("insider_cluster_buy_30d", F.coalesce(F.col("insider_cluster_buy_30d"), F.lit(0)).cast(IntegerType()))
-    .withColumn("inst_net_flow_qoq", F.coalesce(F.col("inst_net_flow_qoq"), F.lit(0.0)).cast(DoubleType()))
-    .withColumn("inst_new_initiations", F.coalesce(F.col("inst_new_initiations"), F.lit(0)).cast(IntegerType()))
-    .withColumn("institutional_holder_count_120d", F.coalesce(F.col("institutional_holder_count_120d"), F.lit(0)).cast(IntegerType()))
-    .withColumn("activist_13d_flag", F.coalesce(F.col("activist_13d_flag"), F.lit(False)).cast(BooleanType()))
-    .withColumn("news_count_30d", F.coalesce(F.col("news_count_30d"), F.lit(0.0)).cast(DoubleType()))
-    .withColumn("news_volume_z_30d", F.coalesce(F.col("news_volume_z_30d"), F.lit(0.0)).cast(DoubleType()))
-    .withColumn("contract_award_usd_trailing_90d", F.coalesce(F.col("contract_award_usd_trailing_90d"), F.lit(0.0)).cast(DoubleType()))
+    .withColumn("insider_net_buy_ratio_90d", F.col("insider_net_buy_ratio_90d").cast(DoubleType()))
+    .withColumn("insider_cluster_buy_30d", F.col("insider_cluster_buy_30d").cast(IntegerType()))
+    .withColumn("inst_net_flow_qoq", F.col("inst_net_flow_qoq").cast(DoubleType()))
+    .withColumn("inst_new_initiations", F.col("inst_new_initiations").cast(IntegerType()))
+    .withColumn("institutional_holder_count_120d", F.col("institutional_holder_count_120d").cast(IntegerType()))
+    .withColumn("activist_13d_flag", F.col("activist_13d_flag").cast(BooleanType()))
+    .withColumn("news_count_30d", F.col("news_count_30d").cast(DoubleType()))
+    .withColumn("news_volume_z_30d", F.col("news_volume_z_30d").cast(DoubleType()))
+    .withColumn("contract_award_usd_trailing_90d", F.col("contract_award_usd_trailing_90d").cast(DoubleType()))
     .withColumn(
         "max_knowledge_date",
         F.greatest(
@@ -1700,7 +1981,8 @@ features_df = (
         "pe_ratio", "peg_ratio", "ps_ratio", "ev_ebitda", "profit_margin", "rev_growth_yoy",
         "fcf_yield", "net_debt_to_ebitda",
         "fundamental_anchor_z", "fundamental_anchor_method", "fundamental_anchor_imputed_flags",
-        "institutional_holder_count_120d", "narrative_intensity", "narrative_coverage_status",
+        "institutional_holder_count_120d", "institutional_holder_count_change_qoq",
+        "narrative_intensity", "narrative_coverage_status",
         "narrative_coverage_reasons_json", "narrative_premium",
         "narrative_premium_coverage_status", "narrative_premium_coverage_reasons_json",
         "narrative_decision_id", "anchor_support_z", "divergence_state",
@@ -1810,6 +2092,50 @@ latest_theme_memberships = (
     )
     .withColumn("classification_source", F.lit("TRS"))
 )
+broad_snapshot_window = Window.partitionBy("date_sk").orderBy(
+    F.col("snapshot_ingest_ts").desc(),
+    F.col("snapshot_batch_id").desc(),
+)
+eligible_broad_market_memberships = (
+    theme_dates.alias("d")
+    .join(
+        spark.table("fact_broad_market_membership").alias("b"),
+        F.col("b.knowledge_date") <= F.col("d.as_of"),
+        "inner",
+    )
+    .select(
+        F.col("d.date_sk").alias("date_sk"),
+        F.col("b.security_sk").alias("security_sk"),
+        F.col("b.broad_market_weight").cast(DoubleType()).alias("broad_market_weight"),
+        F.col("b.snapshot_batch_id").alias("snapshot_batch_id"),
+        F.col("b.snapshot_ingest_ts").alias("snapshot_ingest_ts"),
+        F.col("b.knowledge_date").alias("broad_market_knowledge_date"),
+    )
+)
+latest_broad_snapshot_keys = (
+    eligible_broad_market_memberships
+    .select("date_sk", "snapshot_batch_id", "snapshot_ingest_ts")
+    .distinct()
+    .withColumn("snapshot_row_number", F.row_number().over(broad_snapshot_window))
+    .filter(F.col("snapshot_row_number") == 1)
+    .drop("snapshot_row_number")
+)
+latest_broad_market_memberships = (
+    eligible_broad_market_memberships.alias("b")
+    .join(
+        latest_broad_snapshot_keys.alias("s"),
+        (F.col("b.date_sk") == F.col("s.date_sk"))
+        & (F.col("b.snapshot_batch_id") == F.col("s.snapshot_batch_id"))
+        & (F.col("b.snapshot_ingest_ts") == F.col("s.snapshot_ingest_ts")),
+        "inner",
+    )
+    .select(
+        F.col("b.date_sk").alias("date_sk"),
+        F.col("b.security_sk").alias("security_sk"),
+        F.col("b.broad_market_weight").alias("broad_market_weight"),
+        F.col("b.broad_market_knowledge_date").alias("broad_market_knowledge_date"),
+    )
+)
 classification_window = Window.partitionBy("date_sk", "security_sk").orderBy(
     F.when(F.col("provenance") == F.lit("manual"), F.lit(0)).otherwise(F.lit(1)),
     F.col("confidence").desc(),
@@ -1821,7 +2147,8 @@ resolved_theme_classifications = (
     .join(
         spark.table("security_theme_classification").alias("c"),
         (F.col("c.effective_from") <= F.col("d.as_of"))
-        & (F.col("c.effective_to").isNull() | (F.col("d.as_of") < F.col("c.effective_to")))
+        & (F.col("c.effective_to").isNull() | (F.col("c.effective_to") > F.col("d.as_of")))
+        & (F.to_date(F.col("c.updated_at")) <= F.col("d.as_of"))
         & F.col("c.provenance").isin("manual", "llm"),
         "inner",
     )
@@ -1841,42 +2168,73 @@ resolved_theme_classifications = (
     .filter(F.col("classification_row_number") == 1)
     .drop("classification_row_number")
 )
-classified_theme_memberships = (
-    latest_theme_memberships.alias("m")
+trs_classification_window = Window.partitionBy("date_sk", "security_sk").orderBy(
+    F.col("membership_weight").desc(),
+    F.col("theme_id").asc(),
+)
+trs_theme_classifications = (
+    latest_theme_memberships
+    .withColumn("classification_row_number", F.row_number().over(trs_classification_window))
+    .filter(F.col("classification_row_number") == 1)
+    .drop("classification_row_number")
+    .select(
+        "date_sk", "as_of", "security_sk", "theme_id",
+        F.lit("trs").alias("classification_provenance"),
+        F.concat_ws(":", F.lit("trs"), "theme_id", "snapshot_batch_id").alias("classification_id"),
+        F.col("snapshot_ingest_ts").alias("classification_updated_at"),
+        F.col("membership_knowledge_date").alias("classification_knowledge_date"),
+    )
+)
+explicit_theme_classifications = resolved_theme_classifications.select(
+    "date_sk", "as_of", "security_sk", "theme_id",
+    F.col("provenance").alias("classification_provenance"),
+    "classification_id",
+    F.col("updated_at").alias("classification_updated_at"),
+    F.col("effective_from").alias("classification_knowledge_date"),
+)
+effective_theme_classifications = explicit_theme_classifications.unionByName(
+    trs_theme_classifications.alias("t")
     .join(
-        resolved_theme_classifications.select("date_sk", "security_sk").alias("c"),
+        explicit_theme_classifications.select("date_sk", "security_sk").alias("c"),
         ["date_sk", "security_sk"],
         "left_anti",
     )
-    .unionByName(
-        resolved_theme_classifications.select(
-            "date_sk", "as_of", "theme_id", "security_sk",
-            F.lit(None).cast(DoubleType()).alias("membership_weight"),
-            F.col("effective_from").alias("membership_knowledge_date"),
-            F.col("classification_id").alias("snapshot_batch_id"),
-            F.col("updated_at").alias("snapshot_ingest_ts"),
-            F.upper("provenance").alias("classification_source"),
-        )
-    )
 )
 opportunity_candidates = (
-    classified_theme_memberships.alias("m")
+    effective_theme_classifications.alias("c")
+    .join(
+        latest_theme_memberships.select(
+            "date_sk", "theme_id", "security_sk", "membership_weight",
+            "membership_knowledge_date",
+        ).alias("m"),
+        (F.col("c.date_sk") == F.col("m.date_sk"))
+        & (F.col("c.theme_id") == F.col("m.theme_id"))
+        & (F.col("c.security_sk") == F.col("m.security_sk")),
+        "left",
+    )
+    .join(
+        latest_broad_market_memberships.alias("b"),
+        (F.col("c.date_sk") == F.col("b.date_sk"))
+        & (F.col("c.security_sk") == F.col("b.security_sk")),
+        "left",
+    )
     .join(
         spark.table("security_daily_features").alias("f"),
-        (F.col("m.security_sk") == F.col("f.security_sk"))
-        & (F.col("m.date_sk") == F.col("f.date_sk")),
+        (F.col("c.security_sk") == F.col("f.security_sk"))
+        & (F.col("c.date_sk") == F.col("f.date_sk")),
         "left",
     )
     .select(
-        F.col("m.theme_id").alias("theme_id"),
-        F.col("m.security_sk").alias("security_sk"),
-        F.col("m.date_sk").alias("date_sk"),
-        F.col("m.as_of").alias("as_of"),
-        F.col("m.classification_source").alias("candidate_source"),
-        F.col("m.snapshot_batch_id").alias("candidate_snapshot_id"),
-        F.col("m.snapshot_ingest_ts").alias("candidate_snapshot_ingest_ts"),
-        F.col("m.membership_weight").alias("membership_weight"),
-        F.col("f.news_volume_z_30d").alias("news_volume_z_30d"),
+        F.col("c.theme_id").alias("theme_id"),
+        F.col("c.security_sk").alias("security_sk"),
+        F.col("c.date_sk").alias("date_sk"),
+        F.col("c.as_of").alias("as_of"),
+        F.col("c.classification_provenance").alias("classification_provenance"),
+        F.col("c.classification_id").alias("classification_id"),
+        F.col("c.classification_updated_at").alias("classification_updated_at"),
+        F.col("m.membership_weight").alias("theme_proxy_weight"),
+        F.col("b.broad_market_weight").alias("broad_market_weight"),
+        F.col("f.news_volume_z_30d").alias("attention_change_30d"),
         F.col("f.insider_net_buy_ratio_90d").alias("insider_net_buy_ratio_90d"),
         F.col("f.insider_cluster_buy_30d").alias("insider_cluster_buy_30d"),
         F.col("f.inst_net_flow_qoq").alias("inst_net_flow_qoq"),
@@ -1888,11 +2246,12 @@ opportunity_candidates = (
         F.col("f.fcf_yield").alias("fcf_yield"),
         F.col("f.net_debt_to_ebitda").alias("net_debt_to_ebitda"),
         F.col("f.fundamental_anchor_z").alias("fundamental_anchor_z"),
-        F.col("f.news_count_30d").alias("news_count_30d"),
-        F.col("f.institutional_holder_count_120d").alias("institutional_holder_count_120d"),
+        F.col("f.institutional_holder_count_change_qoq").alias("institutional_holder_count_change_qoq"),
         F.greatest(
             F.col("f.max_knowledge_date"),
+            F.col("c.classification_knowledge_date"),
             F.col("m.membership_knowledge_date"),
+            F.col("b.broad_market_knowledge_date"),
         ).alias("max_knowledge_date"),
     )
     .filter(F.col("max_knowledge_date") <= F.col("as_of"))
@@ -1906,11 +2265,12 @@ for candidate in opportunity_candidates.orderBy("date_sk", "theme_id", "security
         security_sk=candidate.security_sk,
         date_sk=candidate.date_sk,
         as_of=candidate.as_of,
-        candidate_source=candidate.candidate_source,
-        candidate_snapshot_id=candidate.candidate_snapshot_id,
-        candidate_snapshot_ingest_ts=candidate.candidate_snapshot_ingest_ts,
-        membership_weight=candidate.membership_weight,
-        news_volume_z_30d=candidate.news_volume_z_30d,
+        classification_provenance=candidate.classification_provenance,
+        classification_id=candidate.classification_id,
+        classification_updated_at=candidate.classification_updated_at,
+        theme_proxy_weight=candidate.theme_proxy_weight,
+        broad_market_weight=candidate.broad_market_weight,
+        attention_change_30d=candidate.attention_change_30d,
         insider_net_buy_ratio_90d=candidate.insider_net_buy_ratio_90d,
         insider_cluster_buy_30d=candidate.insider_cluster_buy_30d,
         inst_net_flow_qoq=candidate.inst_net_flow_qoq,
@@ -1922,8 +2282,7 @@ for candidate in opportunity_candidates.orderBy("date_sk", "theme_id", "security
         fcf_yield=candidate.fcf_yield,
         net_debt_to_ebitda=candidate.net_debt_to_ebitda,
         fundamental_anchor_z=candidate.fundamental_anchor_z,
-        news_count_30d=candidate.news_count_30d,
-        institutional_holder_count_120d=candidate.institutional_holder_count_120d,
+        institutional_holder_count_change_qoq=candidate.institutional_holder_count_change_qoq,
         max_knowledge_date=candidate.max_knowledge_date,
     ))
 
@@ -1934,6 +2293,97 @@ for cohort_key in sorted(opportunity_observations):
         opportunity_active_weights,
     ))
 
+diagnostic_records = []
+movement_records = []
+previous_by_theme = {}
+for previous_result in previous_opportunity_results:
+    previous_by_theme.setdefault(previous_result.theme_id, {}).setdefault(
+        previous_result.as_of, [],
+    ).append(previous_result)
+diagnostics_built_at = datetime.now(timezone.utc)
+for (theme_id, date_sk), cohort_results in sorted(
+    {
+        key: [result for result in opportunity_results if (result.theme_id, result.date_sk) == key]
+        for key in opportunity_observations
+    }.items()
+):
+    diagnostics = cohort_leg_diagnostics(cohort_results)
+    as_of_value = cohort_results[0].as_of
+    for correlation in diagnostics["correlations"]:
+        diagnostic_records.append({
+            "theme_id": theme_id,
+            "date_sk": date_sk,
+            "as_of": as_of_value,
+            **correlation,
+            "complete_case_count": diagnostics["complete_case_count"],
+            "pc1_variance_share": diagnostics["pc1_variance_share"],
+            "model_version": OPPORTUNITY_MODEL_VERSION,
+            "weight_version": OPPORTUNITY_WEIGHT_VERSION,
+            "created_at": diagnostics_built_at,
+        })
+    prior_dates = [
+        candidate_date
+        for candidate_date in previous_by_theme.get(theme_id, {})
+        if candidate_date < as_of_value
+    ]
+    if prior_dates:
+        prior_date = max(prior_dates)
+        for movement in score_movement_attribution(
+            previous_by_theme[theme_id][prior_date], cohort_results,
+        ):
+            movement_records.append({
+                "theme_id": theme_id,
+                "security_sk": movement["security_sk"],
+                "date_sk": date_sk,
+                "as_of": as_of_value,
+                "previous_as_of": prior_date,
+                **{key: value for key, value in movement.items() if key != "security_sk"},
+                "model_version": OPPORTUNITY_MODEL_VERSION,
+                "weight_version": OPPORTUNITY_WEIGHT_VERSION,
+                "created_at": diagnostics_built_at,
+            })
+
+diagnostic_schema = StructType([
+    StructField("theme_id", StringType(), False),
+    StructField("date_sk", IntegerType(), False),
+    StructField("as_of", DateType(), False),
+    StructField("leg_x", StringType(), False),
+    StructField("leg_y", StringType(), False),
+    StructField("pair_count", IntegerType(), False),
+    StructField("correlation", DoubleType(), True),
+    StructField("complete_case_count", IntegerType(), False),
+    StructField("pc1_variance_share", DoubleType(), True),
+    StructField("model_version", StringType(), False),
+    StructField("weight_version", StringType(), False),
+    StructField("created_at", TimestampType(), False),
+])
+movement_schema = StructType([
+    StructField("theme_id", StringType(), False),
+    StructField("security_sk", LongType(), False),
+    StructField("date_sk", IntegerType(), False),
+    StructField("as_of", DateType(), False),
+    StructField("previous_as_of", DateType(), False),
+    StructField("previous_score", DoubleType(), False),
+    StructField("current_score", DoubleType(), False),
+    StructField("counterfactual_score", DoubleType(), False),
+    StructField("score_delta", DoubleType(), False),
+    StructField("own_composite_effect", DoubleType(), False),
+    StructField("cohort_effect", DoubleType(), False),
+    StructField("model_version", StringType(), False),
+    StructField("weight_version", StringType(), False),
+    StructField("created_at", TimestampType(), False),
+])
+(
+    spark.createDataFrame(diagnostic_records, diagnostic_schema)
+    .write.format("delta").mode("overwrite").option("overwriteSchema", "true")
+    .saveAsTable("opportunity_leg_diagnostics")
+)
+(
+    spark.createDataFrame(movement_records, movement_schema)
+    .write.format("delta").mode("overwrite").option("overwriteSchema", "true")
+    .saveAsTable("opportunity_score_movement")
+)
+
 score_schema = StructType([
     StructField("score_id", StringType(), False),
     StructField("generation", StringType(), False),
@@ -1942,9 +2392,9 @@ score_schema = StructType([
     StructField("security_sk", LongType(), False),
     StructField("date_sk", IntegerType(), False),
     StructField("as_of", DateType(), False),
-    StructField("candidate_source", StringType(), False),
-    StructField("candidate_snapshot_id", StringType(), False),
-    StructField("candidate_snapshot_ingest_ts", TimestampType(), False),
+    StructField("classification_provenance", StringType(), False),
+    StructField("classification_id", StringType(), False),
+    StructField("classification_updated_at", TimestampType(), False),
     StructField("candidate_count", IntegerType(), False),
     *[StructField(column_name, DoubleType(), True) for column_name in (
         "thesis_linkage_z", "attention_acceleration_z", "smart_money_z",
@@ -1991,7 +2441,7 @@ for as_of_value in sorted({row.as_of for row in processing_dates.collect()}):
     fingerprint = hashlib.sha256(
         "|".join(score_ids).encode("ascii")
     ).hexdigest()
-    generation = f"e6b-{fingerprint[:32]}"
+    generation = f"opportunity-{fingerprint[:32]}"
     for result in date_results:
         record = asdict(result)
         coverage_reasons = record.pop("coverage_reasons")
@@ -2176,8 +2626,8 @@ _replace_delta_projection("v_smart_money", """
 
 _replace_delta_projection("v_opportunity_legs", """
         SELECT s.score_id, s.generation, s.theme_id, s.security_sk, s.date_sk, s.as_of,
-                     s.candidate_source, s.candidate_count,
-                       s.candidate_snapshot_id, s.candidate_snapshot_ingest_ts,
+                                         s.classification_provenance, s.candidate_count,
+                                             s.classification_id, s.classification_updated_at,
                      s.thesis_linkage_z, s.attention_acceleration_z, s.smart_money_z,
                      s.fundamental_health_z, s.valuation_brake_z, s.crowding_positioning_z,
                      s.coverage_status, s.coverage_reasons_json, s.cohort_snapshot_hash,
@@ -2190,15 +2640,15 @@ _replace_delta_projection("v_opportunity_legs", """
          AND m.weight_version = s.weight_version
          AND m.status = 'completed'
         WHERE s.max_knowledge_date <= s.as_of
-            AND s.model_version = 'e6b_v2'
-            AND s.weight_version = 'e6b_balanced_v1'
+            AND s.model_version = 'opportunity_v1'
+            AND s.weight_version = 'balanced_v1'
 """)
 
 _replace_delta_projection("v_opportunity_score", """
         SELECT s.score_id, s.generation, s.theme_id, s.security_sk,
              d.ticker, d.company_name, s.date_sk, s.as_of,
-                     s.candidate_source, s.candidate_count,
-                       s.candidate_snapshot_id, s.candidate_snapshot_ingest_ts,
+                                         s.classification_provenance, s.candidate_count,
+                                             s.classification_id, s.classification_updated_at,
                      s.opportunity_score, s.coverage_status, s.coverage_reasons_json,
                      s.model_version, s.weight_version, s.max_knowledge_date,
                      f.narrative_premium, f.divergence_state, f.narrative_decision_id
@@ -2214,8 +2664,8 @@ _replace_delta_projection("v_opportunity_score", """
         LEFT JOIN security_daily_features f
             ON f.security_sk = s.security_sk AND f.date_sk = s.date_sk
         WHERE s.max_knowledge_date <= s.as_of
-            AND s.model_version = 'e6b_v2'
-            AND s.weight_version = 'e6b_balanced_v1'
+            AND s.model_version = 'opportunity_v1'
+            AND s.weight_version = 'balanced_v1'
 """)
 
 attribution_selects = []
@@ -2252,8 +2702,8 @@ for attribution_leg in OPPORTUNITY_LEG_WEIGHTS:
                  AND w.version = s.weight_version
                  AND w.is_active = true
                 WHERE s.max_knowledge_date <= s.as_of
-                    AND s.model_version = 'e6b_v2'
-                    AND s.weight_version = 'e6b_balanced_v1'
+                    AND s.model_version = 'opportunity_v1'
+                    AND s.weight_version = 'balanced_v1'
         """)
 _replace_delta_projection(
         "v_security_score_attribution",
@@ -2327,23 +2777,23 @@ invalid_score_projection_count = int(theme_score_count != theme_score_fact_count
 duplicate_theme_scores = spark.sql("""
     SELECT COUNT(*) AS n
     FROM (
-        SELECT theme_id, security_sk, date_sk, model_version, weight_version, COUNT(*) AS duplicate_count
+        SELECT security_sk, date_sk, model_version, weight_version, COUNT(*) AS duplicate_count
         FROM fact_theme_opportunity_score
-        GROUP BY theme_id, security_sk, date_sk, model_version, weight_version
+        GROUP BY security_sk, date_sk, model_version, weight_version
         HAVING COUNT(*) > 1
     ) d
 """).collect()[0].n
 invalid_theme_score_contract = spark.sql("""
     SELECT COUNT(*) AS n
     FROM fact_theme_opportunity_score
-    WHERE model_version <> 'e6b_v2'
-       OR weight_version <> 'e6b_balanced_v1'
+     WHERE model_version <> 'opportunity_v1'
+         OR weight_version <> 'balanced_v1'
        OR coverage_status NOT IN ('READY', 'PARTIAL', 'WITHHELD')
        OR coverage_reasons_json IS NULL
        OR LENGTH(score_id) <> 64
        OR LENGTH(cohort_snapshot_hash) <> 64
-    OR candidate_snapshot_id IS NULL
-    OR candidate_snapshot_ingest_ts IS NULL
+    OR classification_id IS NULL
+    OR classification_updated_at IS NULL
        OR max_knowledge_date > as_of
        OR candidate_count < 1
        OR (
@@ -2353,18 +2803,23 @@ invalid_theme_score_contract = spark.sql("""
                OR opportunity_score IS NULL
                OR opportunity_score NOT BETWEEN 0 AND 100
                OR opportunity_score_raw IS NULL
-               OR thesis_linkage_z IS NULL
-               OR attention_acceleration_z IS NULL
-               OR smart_money_z IS NULL
-               OR fundamental_health_z IS NULL
-               OR valuation_brake_z IS NULL
-               OR crowding_positioning_z IS NULL
                OR thesis_linkage_contribution IS NULL
                OR attention_acceleration_contribution IS NULL
                OR smart_money_contribution IS NULL
                OR fundamental_health_contribution IS NULL
                OR valuation_brake_contribution IS NULL
                OR crowding_positioning_contribution IS NULL
+           )
+       )
+       OR (
+           coverage_status = 'READY'
+           AND (
+               thesis_linkage_z IS NULL
+               OR attention_acceleration_z IS NULL
+               OR smart_money_z IS NULL
+               OR fundamental_health_z IS NULL
+               OR valuation_brake_z IS NULL
+               OR crowding_positioning_z IS NULL
            )
        )
        OR (
@@ -2393,7 +2848,7 @@ opportunity_weight_validation = spark.sql("""
     FROM metric_weights
     WHERE metric_group = 'opportunity_score'
       AND is_active = true
-      AND version = 'e6b_balanced_v1'
+    AND version = 'balanced_v1'
 """).collect()[0].weight_sum
 invalid_attribution_count = int(theme_attribution_count != theme_score_fact_count * 6)
 invalid_narrative_premium_contract = spark.sql("""

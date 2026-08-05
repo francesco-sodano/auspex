@@ -104,8 +104,8 @@ class E12FabricContractTests(unittest.TestCase):
         notebook = notebook_code("nb_04_metrics")
 
         validation = notebook.index("priority_as_of_date has no market session on or before it")
-        score_delete = notebook.index('DeltaTable.forName(spark, "fact_theme_opportunity_score").delete()')
-        self.assertLess(validation, score_delete)
+        score_rebuild = notebook.index('spark.sql("DROP TABLE IF EXISTS fact_theme_opportunity_score")')
+        self.assertLess(validation, score_rebuild)
         self.assertIn(
             '.filter(F.col("event_date") <= F.lit(parsed_priority_as_of_date))',
             notebook,

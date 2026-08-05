@@ -2,13 +2,21 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal, ROUND_HALF_UP
 import hashlib
 import json
+import os
 
 from .costs import estimate_costs
 from .risk_profile import policy_for_profile
 
 
-MODEL_VERSION = "e15_v1"
+MODEL_VERSION = "policy_v2"
 _CENT = Decimal("0.01")
+
+
+@dataclass(frozen=True)
+class FinancingPolicy:
+    max_diluted_share_growth: Decimal
+    min_cash_runway_years: Decimal
+    max_shelf_age_days: int
 
 
 @dataclass(frozen=True)
@@ -23,6 +31,13 @@ class CandidateSignal:
     spread_bps: Decimal = Decimal("5")
     theme_id: str | None = None
     coverage_reasons: tuple[str, ...] = ()
+    opportunity_score_raw: Decimal | None = None
+    financing_record_available: bool = False
+    diluted_share_growth_yoy: Decimal | None = None
+    cash_runway_years: Decimal | None = None
+    is_burning_cash: bool | None = None
+    days_since_shelf_filing: int | None = None
+    shelf_form: str | None = None
 
 
 @dataclass(frozen=True)
@@ -32,6 +47,7 @@ class PortfolioContext:
     risk_profile: str
     base_currency: str
     annual_trade_count: int = 0
+    financing_policy: FinancingPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +93,53 @@ def _edge_rate(action: str, score: Decimal, overweight: bool) -> Decimal:
     return max(Decimal("0"), (Decimal("50") - score) / Decimal("100"))
 
 
+def financing_policy_from_environment(environment=None) -> FinancingPolicy | None:
+    environment = environment or os.environ
+    names = (
+        "FINANCING_MAX_DILUTED_SHARE_GROWTH",
+        "FINANCING_MIN_CASH_RUNWAY_YEARS",
+        "FINANCING_MAX_SHELF_AGE_DAYS",
+    )
+    values = [str(environment.get(name) or "").strip() for name in names]
+    if not all(values):
+        return None
+    policy = FinancingPolicy(
+        max_diluted_share_growth=Decimal(values[0]),
+        min_cash_runway_years=Decimal(values[1]),
+        max_shelf_age_days=int(values[2]),
+    )
+    if (
+        policy.max_diluted_share_growth < 0
+        or policy.min_cash_runway_years < 0
+        or policy.max_shelf_age_days < 0
+    ):
+        raise ValueError("financing policy thresholds must be nonnegative")
+    return policy
+
+
+def _financing_veto(candidate: CandidateSignal, policy: FinancingPolicy | None) -> bool:
+    if policy is None or not candidate.financing_record_available:
+        return True
+    if candidate.diluted_share_growth_yoy is None or candidate.is_burning_cash is None:
+        return True
+    if candidate.diluted_share_growth_yoy > policy.max_diluted_share_growth:
+        return True
+    if candidate.is_burning_cash and (
+        candidate.cash_runway_years is None
+        or candidate.cash_runway_years < policy.min_cash_runway_years
+    ):
+        return True
+    if candidate.days_since_shelf_filing is None:
+        return False
+    normalized_form = str(candidate.shelf_form or "").upper()
+    if not (
+        normalized_form in {"S-3", "S-3/A", "S-3ASR"}
+        or normalized_form.startswith("424B")
+    ):
+        return True
+    return candidate.days_since_shelf_filing <= policy.max_shelf_age_days
+
+
 def build_recommendations(
     portfolio: PortfolioContext,
     candidates: list[CandidateSignal],
@@ -115,10 +178,20 @@ def build_recommendations(
         elif candidate.current_value_base > 0 and candidate.opportunity_score < 45:
             proposed_target = Decimal("0")
         else:
-            proposed_target = max(
+            score_target = max(
                 candidate.current_weight,
                 _target_weight(candidate.opportunity_score, policy.max_position_weight),
             )
+            if score_target > candidate.current_weight:
+                if (
+                    candidate.opportunity_score_raw is None
+                    or candidate.opportunity_score_raw <= 0
+                ):
+                    suppression_reasons.append("absolute_floor")
+                elif _financing_veto(candidate, portfolio.financing_policy):
+                    suppression_reasons.append("financing")
+                else:
+                    proposed_target = score_target
 
         delta = (proposed_target - candidate.current_weight) * portfolio.total_value_base
         action = "HOLD"

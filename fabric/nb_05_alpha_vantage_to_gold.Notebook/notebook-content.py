@@ -360,7 +360,13 @@ theme_component_df = spark.createDataFrame([
     ("data_center_buildout", "Data Center Buildout", "DTCR", "DTCR", Decimal("0.5")),
     ("data_center_buildout", "Data Center Buildout", "DTCR", "PAVE", Decimal("0.25")),
     ("data_center_buildout", "Data Center Buildout", "DTCR", "GRID", Decimal("0.25")),
+    ("quantum_computing", "Quantum Computing", "QTUM", "QTUM", Decimal("1.0")),
 ], theme_component_schema).cache()
+
+broad_market_component_df = spark.createDataFrame([
+    ("broad_market_reference", "Broad Market Reference", "VTI", "VTI", Decimal("1.0")),
+], theme_component_schema).cache()
+membership_component_df = theme_component_df.unionByName(broad_market_component_df).cache()
 
 spark.sql("""
     CREATE TABLE IF NOT EXISTS dim_theme (
@@ -371,10 +377,6 @@ spark.sql("""
 """)
 theme_dimension_df = (
     theme_component_df.select("theme_id", "theme_name", "benchmark_symbol").distinct()
-    .unionByName(spark.createDataFrame(
-        [("quantum_computing", "Quantum Computing", "QTUM")],
-        "theme_id STRING, theme_name STRING, benchmark_symbol STRING",
-    ))
     .withColumn("is_active", F.lit(True))
     .withColumn("catalog_version", F.lit(1))
     .withColumn("updated_at", F.current_timestamp())
@@ -708,7 +710,7 @@ theme_rows = (
         F.element_at("holding", "description").alias("holding_description"),
         F.element_at("holding", "weight").alias("raw_weight"),
     )
-    .join(F.broadcast(theme_component_df), "etf_symbol", "inner")
+    .join(F.broadcast(membership_component_df), "etf_symbol", "inner")
     .withColumn("event_date", F.to_date("fetched_at"))
     .withColumn("knowledge_date", F.to_date("fetched_at"))
     .withColumn("weight", F.regexp_replace(F.col("raw_weight"), "%", "").cast(DecimalType(9, 6)))
@@ -870,9 +872,9 @@ observed_theme_components = (
         F.upper(F.trim(F.col("symbol"))).alias("etf_symbol"),
         F.to_date("fetched_at").alias("event_date"),
     )
-    .join(F.broadcast(theme_component_df), "etf_symbol", "inner")
+    .join(F.broadcast(membership_component_df), "etf_symbol", "inner")
 )
-expected_theme_components = theme_component_df.groupBy("theme_id").agg(
+expected_theme_components = membership_component_df.groupBy("theme_id").agg(
     F.countDistinct("etf_symbol").alias("expected_component_count"),
 )
 missing_theme_components = (
@@ -2307,7 +2309,7 @@ _merge_insert_only(
     "AND t.event_date = s.event_date AND t.holding_revision_hash = s.holding_revision_hash",
 )
 
-theme_df = (
+all_membership_df = (
     spark.table("silver_theme_membership")
     .join(processed_batch_ids, "batch_id", "inner")
     .withColumn("source_sk", F.lit(5))
@@ -2318,9 +2320,25 @@ theme_df = (
         "source_sk", "event_date", "knowledge_date",
     )
 )
+theme_df = all_membership_df.filter(
+    F.col("theme_id") != F.lit("broad_market_reference")
+)
 (
     theme_df.write.format("delta").mode("overwrite")
     .option("overwriteSchema", "true").saveAsTable("fact_theme_membership")
+)
+broad_market_df = (
+    all_membership_df
+    .filter(F.col("theme_id") == F.lit("broad_market_reference"))
+    .select(
+        "security_sk", F.col("weight").alias("broad_market_weight"),
+        "theme_revision_hash", "snapshot_batch_id", "snapshot_ingest_ts",
+        "source_sk", "event_date", "knowledge_date",
+    )
+)
+(
+    broad_market_df.write.format("delta").mode("overwrite")
+    .option("overwriteSchema", "true").saveAsTable("fact_broad_market_membership")
 )
 
 # METADATA ********************
@@ -2336,6 +2354,7 @@ theme_df = (
 e8_fact_tables = [
     "fact_fundamentals", "fact_company_news", "fact_news_sentiment", "fact_macro",
     "fact_fx_rate", "fact_institutional_holding", "fact_theme_membership",
+    "fact_broad_market_membership",
 ]
 e8_date_keyed_fact_tables = [
     "fact_fundamentals", "fact_company_news", "fact_news_sentiment", "fact_macro",
@@ -2407,6 +2426,7 @@ missing_pit = spark.sql("""
         UNION ALL SELECT COUNT(*) AS n FROM fact_institutional_holding
             WHERE source_sk = 3 AND (event_date IS NULL OR knowledge_date IS NULL OR event_date > knowledge_date)
         UNION ALL SELECT COUNT(*) AS n FROM fact_theme_membership WHERE event_date IS NULL OR knowledge_date IS NULL OR event_date > knowledge_date
+        UNION ALL SELECT COUNT(*) AS n FROM fact_broad_market_membership WHERE event_date IS NULL OR knowledge_date IS NULL OR event_date > knowledge_date
     ) x
 """).collect()[0].n
 
@@ -2515,6 +2535,8 @@ gold_missing_revision_hash = spark.sql("""
         UNION ALL SELECT COUNT(*) AS n FROM fact_fx_rate WHERE fx_revision_hash IS NULL
         UNION ALL SELECT COUNT(*) AS n FROM fact_theme_membership
         WHERE theme_revision_hash IS NULL OR snapshot_batch_id IS NULL OR snapshot_ingest_ts IS NULL
+        UNION ALL SELECT COUNT(*) AS n FROM fact_broad_market_membership
+        WHERE theme_revision_hash IS NULL OR snapshot_batch_id IS NULL OR snapshot_ingest_ts IS NULL
     ) x
 """).collect()[0].n
 
@@ -2564,6 +2586,12 @@ gold_duplicate_revisions = spark.sql("""
             GROUP BY snapshot_batch_id, theme_id, security_sk, event_date, theme_revision_hash
             HAVING COUNT(*) > 1
         ) theme_dupes
+        UNION ALL SELECT COUNT(*) AS n FROM (
+            SELECT snapshot_batch_id, security_sk, event_date, theme_revision_hash
+            FROM fact_broad_market_membership
+            GROUP BY snapshot_batch_id, security_sk, event_date, theme_revision_hash
+            HAVING COUNT(*) > 1
+        ) broad_market_dupes
     ) x
 """).collect()[0].n
 
@@ -2732,6 +2760,21 @@ gold_theme_without_silver = (
     )
     .count()
 )
+gold_broad_market_without_silver = (
+    spark.table("fact_broad_market_membership").alias("g")
+    .join(
+        spark.table("silver_theme_membership")
+        .filter(F.col("theme_id") == F.lit("broad_market_reference")).alias("s"),
+        (F.col("g.snapshot_batch_id") == F.col("s.batch_id"))
+        & (F.col("g.security_sk") == F.col("s.security_sk"))
+        & (F.col("g.event_date") == F.col("s.event_date"))
+        & (F.col("g.theme_revision_hash") == F.col("s.theme_revision_hash"))
+        & F.col("g.broad_market_weight").eqNullSafe(F.col("s.weight"))
+        & (F.col("g.knowledge_date") == F.col("s.knowledge_date")),
+        "left_anti",
+    )
+    .count()
+)
 gold_without_silver = (
     gold_fundamentals_without_silver
     + gold_company_news_without_silver
@@ -2740,6 +2783,7 @@ gold_without_silver = (
     + gold_macro_without_silver
     + gold_fx_without_silver
     + gold_theme_without_silver
+    + gold_broad_market_without_silver
 )
 silver_fundamentals_without_gold = (
     spark.table("silver_fundamentals").alias("s")
@@ -2800,11 +2844,24 @@ silver_fx_without_gold = (
     ).count()
 )
 silver_theme_without_gold = (
-    spark.table("silver_theme_membership").alias("s")
+    spark.table("silver_theme_membership")
+    .filter(F.col("theme_id") != F.lit("broad_market_reference")).alias("s")
     .join(
         spark.table("fact_theme_membership").alias("g"),
         (F.col("s.theme_id") == F.col("g.theme_id"))
         & (F.col("s.batch_id") == F.col("g.snapshot_batch_id"))
+        & (F.col("s.security_sk") == F.col("g.security_sk"))
+        & (F.col("s.event_date") == F.col("g.event_date"))
+        & (F.col("s.theme_revision_hash") == F.col("g.theme_revision_hash")),
+        "left_anti",
+    ).count()
+)
+silver_broad_market_without_gold = (
+    spark.table("silver_theme_membership")
+    .filter(F.col("theme_id") == F.lit("broad_market_reference")).alias("s")
+    .join(
+        spark.table("fact_broad_market_membership").alias("g"),
+        (F.col("s.batch_id") == F.col("g.snapshot_batch_id"))
         & (F.col("s.security_sk") == F.col("g.security_sk"))
         & (F.col("s.event_date") == F.col("g.event_date"))
         & (F.col("s.theme_revision_hash") == F.col("g.theme_revision_hash")),
@@ -2819,6 +2876,7 @@ silver_without_gold = (
     + silver_macro_without_gold
     + silver_fx_without_gold
     + silver_theme_without_gold
+    + silver_broad_market_without_gold
 )
 date_orphans = 0
 for fact_table in e8_date_keyed_fact_tables:

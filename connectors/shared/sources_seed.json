@@ -146,7 +146,7 @@
     "rate_limit": {
       "requests_per_minute": 75
     },
-    "etf_symbols": ["SMH", "XLK", "XLE", "XLV", "DTCR", "PAVE", "GRID"],
+    "etf_symbols": ["SMH", "XLK", "XLE", "XLV", "DTCR", "PAVE", "GRID", "QTUM", "VTI"],
     "profiles": {
       "news_daily": {"schedule": "daily", "universe_tier": "active", "symbol_limit": 200},
       "macro_daily": {"schedule": "daily"},
@@ -226,7 +226,7 @@
     "rate_limit": {
       "requests_per_minute": 75
     },
-    "etf_symbols": ["SMH", "XLK", "XLE", "XLV", "DTCR", "PAVE", "GRID"],
+    "etf_symbols": ["SMH", "XLK", "XLE", "XLV", "DTCR", "PAVE", "GRID", "QTUM", "VTI"],
     "implementation_status": "implemented",
     "enabled": true,
     "schema_version": 1
@@ -242,7 +242,7 @@
     "latency_class": "daily",
     "reliability_weight": 0.9,
     "rate_limit": {"requests_per_minute": 75},
-    "etf_symbols": ["SMH", "XLK", "XLE", "XLV", "DTCR", "PAVE", "GRID"],
+    "etf_symbols": ["SMH", "XLK", "XLE", "XLV", "DTCR", "PAVE", "GRID", "QTUM", "VTI"],
     "implementation_status": "implemented",
     "enabled": true,
     "schema_version": 1

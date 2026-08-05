@@ -266,6 +266,19 @@ BEGIN
 END;
 GO
 
+DROP TABLE IF EXISTS dbo.fact_broad_market_membership;
+CREATE TABLE dbo.fact_broad_market_membership (
+    security_sk          BIGINT        NOT NULL,
+    broad_market_weight  DECIMAL(9,6)  NULL,
+    theme_revision_hash  CHAR(64)      NOT NULL,
+    snapshot_batch_id    VARCHAR(256)  NOT NULL,
+    snapshot_ingest_ts   DATETIME2(6)  NOT NULL,
+    source_sk            INT           NULL,
+    event_date           DATE          NOT NULL,
+    knowledge_date       DATE          NOT NULL
+);
+GO
+
 DECLARE @fact_material_event_existed BIT =
     CASE WHEN OBJECT_ID('dbo.fact_material_event', 'U') IS NULL THEN 0 ELSE 1 END;
 

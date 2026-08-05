@@ -86,7 +86,13 @@ class E8ContractTests(unittest.TestCase):
         self.assertIn("knowledge_date", nb)
         self.assertIn("spark.read.text(paths)", nb)
         self.assertNotIn("spark.read.json(paths)", nb)
-        self.assertIn('(\"quantum_computing\", \"Quantum Computing\", \"QTUM\")', nb)
+        self.assertIn(
+            '(\"quantum_computing\", \"Quantum Computing\", \"QTUM\", \"QTUM\", Decimal(\"1.0\"))',
+            nb,
+        )
+        self.assertIn('saveAsTable("fact_broad_market_membership")', nb)
+        self.assertIn("gold_broad_market_without_silver", nb)
+        self.assertIn("silver_broad_market_without_gold", nb)
         self.assertIn("CREATE TABLE IF NOT EXISTS security_theme_classification", nb)
         self.assertIn('(\"VRT\", \"data_center_buildout\"', nb)
         self.assertIn('(\"COHR\", \"data_center_buildout\"', nb)

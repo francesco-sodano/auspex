@@ -271,6 +271,7 @@ def daily_build_orchestrator(context, payload=None):
 				"as_of_date": payload["as_of_date"],
 				"core_notebook_job_ids": [job["job_id"] for job in core_job["jobs"]],
 				"publish_notebook_job_ids": [job["job_id"] for job in publish_job["jobs"]],
+				"diagnostics": warehouse.get("diagnostics", {}),
 			},
 		)
 		yield context.call_activity("suspend_fabric_capacity")
@@ -371,6 +372,17 @@ def promote_daily_warehouse_snapshot(
 			raise RuntimeError(
 				f"Daily Warehouse promotion left {open_transactions} transactions open"
 			)
+		cursor.execute(
+			"""
+			SELECT
+				(SELECT COUNT_BIG(*) FROM dbo.fact_financing_risk WHERE as_of = ? AND financing_coverage_status = 'READY'),
+				(SELECT COUNT_BIG(*) FROM dbo.fact_financing_risk WHERE as_of = ? AND financing_coverage_status = 'PARTIAL'),
+				(SELECT MAX(pc1_variance_share) FROM dbo.opportunity_leg_diagnostics WHERE as_of = ?),
+				(SELECT COUNT_BIG(*) FROM dbo.opportunity_score_movement WHERE as_of = ?)
+			""",
+			(as_of_date, as_of_date, as_of_date, as_of_date),
+		)
+		financing_ready, financing_partial, max_pc1, movement_rows = cursor.fetchone()
 		return {
 			"status": "promoted",
 			"release": release,
@@ -378,6 +390,14 @@ def promote_daily_warehouse_snapshot(
 				"transactions": int(transactions),
 				"positions": int(positions),
 				"valuations": int(valuations),
+			},
+			"diagnostics": {
+				"financing_ready": int(financing_ready),
+				"financing_partial": int(financing_partial),
+				"max_pc1_variance_share": (
+					float(max_pc1) if max_pc1 is not None else None
+				),
+				"score_movement_rows": int(movement_rows),
 			},
 		}
 	finally:

@@ -38,11 +38,15 @@ BEGIN
 
     DELETE FROM dbo.opportunity_score_snapshot_manifest;
     DELETE FROM dbo.fact_theme_opportunity_score;
+    DELETE FROM dbo.fact_financing_risk;
+    DELETE FROM dbo.opportunity_leg_diagnostics;
+    DELETE FROM dbo.opportunity_score_movement;
     DELETE FROM dbo.security_daily_features;
     DELETE FROM dbo.fact_fundamental_anchor;
     DELETE FROM dbo.metric_weights;
     DELETE FROM dbo.fact_sec_filing_event;
     DELETE FROM dbo.fact_material_event;
+    DELETE FROM dbo.fact_broad_market_membership;
     DELETE FROM dbo.fact_theme_membership;
     DELETE FROM dbo.fact_company_news;
     DELETE FROM dbo.fact_fundamentals;
@@ -238,6 +242,46 @@ BEGIN
            source_sk, event_date, knowledge_date
     FROM auspex_bronze.dbo.fact_theme_membership;
 
+    INSERT INTO dbo.fact_broad_market_membership (
+        security_sk, broad_market_weight, theme_revision_hash,
+        snapshot_batch_id, snapshot_ingest_ts, source_sk, event_date, knowledge_date
+    )
+    SELECT security_sk, broad_market_weight, theme_revision_hash,
+           snapshot_batch_id, snapshot_ingest_ts, source_sk, event_date, knowledge_date
+    FROM auspex_bronze.dbo.fact_broad_market_membership;
+
+    INSERT INTO dbo.fact_financing_risk (
+        security_sk, date_sk, as_of, diluted_share_growth_yoy,
+        cash_runway_years, is_burning_cash, days_since_shelf_filing,
+        shelf_form, shelf_accession, financing_coverage_status,
+        financing_coverage_reasons_json, max_knowledge_date, created_at
+    )
+    SELECT security_sk, date_sk, as_of, diluted_share_growth_yoy,
+           cash_runway_years, is_burning_cash, days_since_shelf_filing,
+           shelf_form, shelf_accession, financing_coverage_status,
+           financing_coverage_reasons_json, max_knowledge_date, created_at
+    FROM auspex_bronze.dbo.fact_financing_risk;
+
+    INSERT INTO dbo.opportunity_leg_diagnostics (
+        theme_id, date_sk, as_of, leg_x, leg_y, pair_count, correlation,
+        complete_case_count, pc1_variance_share, model_version,
+        weight_version, created_at
+    )
+    SELECT theme_id, date_sk, as_of, leg_x, leg_y, pair_count, correlation,
+           complete_case_count, pc1_variance_share, model_version,
+           weight_version, created_at
+    FROM auspex_bronze.dbo.opportunity_leg_diagnostics;
+
+    INSERT INTO dbo.opportunity_score_movement (
+        theme_id, security_sk, date_sk, as_of, previous_as_of,
+        previous_score, current_score, counterfactual_score, score_delta,
+        own_composite_effect, cohort_effect, model_version, weight_version, created_at
+    )
+    SELECT theme_id, security_sk, date_sk, as_of, previous_as_of,
+           previous_score, current_score, counterfactual_score, score_delta,
+           own_composite_effect, cohort_effect, model_version, weight_version, created_at
+    FROM auspex_bronze.dbo.opportunity_score_movement;
+
     INSERT INTO dbo.fact_material_event (
         event_sk, security_sk, date_sk, accession_no, filing_type, description,
         material_event_revision_hash, source_sk, event_date, knowledge_date
@@ -319,8 +363,8 @@ BEGIN
 
     INSERT INTO dbo.fact_theme_opportunity_score (
         score_id, generation, cohort_snapshot_hash, theme_id, security_sk,
-        date_sk, as_of, candidate_source, candidate_snapshot_id,
-        candidate_snapshot_ingest_ts, candidate_count,
+        date_sk, as_of, classification_provenance, classification_id,
+        classification_updated_at, candidate_count,
         thesis_linkage_z, attention_acceleration_z, smart_money_z,
         fundamental_health_z, valuation_brake_z, crowding_positioning_z,
         thesis_linkage_contribution, attention_acceleration_contribution,
@@ -332,8 +376,8 @@ BEGIN
     )
     SELECT
         score_id, generation, cohort_snapshot_hash, theme_id, security_sk,
-        date_sk, as_of, candidate_source, candidate_snapshot_id,
-        candidate_snapshot_ingest_ts, candidate_count,
+        date_sk, as_of, classification_provenance, classification_id,
+        classification_updated_at, candidate_count,
         thesis_linkage_z, attention_acceleration_z, smart_money_z,
         fundamental_health_z, valuation_brake_z, crowding_positioning_z,
         thesis_linkage_contribution, attention_acceleration_contribution,
@@ -375,6 +419,10 @@ BEGIN
         UNION ALL SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_fundamentals
         UNION ALL SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_company_news
         UNION ALL SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_theme_membership
+        UNION ALL SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_broad_market_membership
+        UNION ALL SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_financing_risk
+        UNION ALL SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.opportunity_leg_diagnostics
+        UNION ALL SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.opportunity_score_movement
         UNION ALL SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_material_event
         UNION ALL SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_sec_filing_event
         UNION ALL SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_fundamental_anchor
@@ -411,6 +459,10 @@ BEGIN
         ('fact_fundamentals', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_fundamentals)),
         ('fact_company_news', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_company_news)),
         ('fact_theme_membership', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_theme_membership)),
+        ('fact_broad_market_membership', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_broad_market_membership)),
+        ('fact_financing_risk', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_financing_risk)),
+        ('opportunity_leg_diagnostics', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.opportunity_leg_diagnostics)),
+        ('opportunity_score_movement', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.opportunity_score_movement)),
         ('fact_material_event', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_material_event)),
         ('fact_sec_filing_event', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_sec_filing_event)),
         ('fact_fundamental_anchor', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_fundamental_anchor)),
@@ -440,6 +492,10 @@ BEGIN
         UNION ALL SELECT COUNT_BIG(*) FROM dbo.fact_fundamentals
         UNION ALL SELECT COUNT_BIG(*) FROM dbo.fact_company_news
         UNION ALL SELECT COUNT_BIG(*) FROM dbo.fact_theme_membership
+        UNION ALL SELECT COUNT_BIG(*) FROM dbo.fact_broad_market_membership
+        UNION ALL SELECT COUNT_BIG(*) FROM dbo.fact_financing_risk
+        UNION ALL SELECT COUNT_BIG(*) FROM dbo.opportunity_leg_diagnostics
+        UNION ALL SELECT COUNT_BIG(*) FROM dbo.opportunity_score_movement
         UNION ALL SELECT COUNT_BIG(*) FROM dbo.fact_material_event
         UNION ALL SELECT COUNT_BIG(*) FROM dbo.fact_sec_filing_event
         UNION ALL SELECT COUNT_BIG(*) FROM dbo.fact_fundamental_anchor
@@ -473,6 +529,10 @@ BEGIN
             ('fact_fundamentals', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_fundamentals), (SELECT COUNT_BIG(*) FROM dbo.fact_fundamentals)),
             ('fact_company_news', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_company_news), (SELECT COUNT_BIG(*) FROM dbo.fact_company_news)),
             ('fact_theme_membership', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_theme_membership), (SELECT COUNT_BIG(*) FROM dbo.fact_theme_membership)),
+            ('fact_broad_market_membership', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_broad_market_membership), (SELECT COUNT_BIG(*) FROM dbo.fact_broad_market_membership)),
+            ('fact_financing_risk', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_financing_risk), (SELECT COUNT_BIG(*) FROM dbo.fact_financing_risk)),
+            ('opportunity_leg_diagnostics', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.opportunity_leg_diagnostics), (SELECT COUNT_BIG(*) FROM dbo.opportunity_leg_diagnostics)),
+            ('opportunity_score_movement', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.opportunity_score_movement), (SELECT COUNT_BIG(*) FROM dbo.opportunity_score_movement)),
             ('fact_material_event', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_material_event), (SELECT COUNT_BIG(*) FROM dbo.fact_material_event)),
             ('fact_sec_filing_event', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_sec_filing_event), (SELECT COUNT_BIG(*) FROM dbo.fact_sec_filing_event)),
             ('fact_fundamental_anchor', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.fact_fundamental_anchor), (SELECT COUNT_BIG(*) FROM dbo.fact_fundamental_anchor)),
@@ -566,15 +626,43 @@ BEGIN
         THROW 50204, 'Warehouse feature PIT validation failed.', 1;
 
     IF EXISTS (
+        SELECT 1 FROM dbo.fact_financing_risk
+        WHERE financing_coverage_status NOT IN ('READY', 'PARTIAL')
+           OR financing_coverage_reasons_json IS NULL
+           OR (max_knowledge_date IS NOT NULL AND max_knowledge_date > as_of)
+    )
+        THROW 50220, 'Warehouse financing-risk PIT/coverage validation failed.', 1;
+
+    IF EXISTS (
+        SELECT 1 FROM dbo.opportunity_leg_diagnostics
+        WHERE model_version <> 'opportunity_v1'
+           OR weight_version <> 'balanced_v1'
+           OR pair_count < 0
+           OR complete_case_count < 0
+           OR (correlation IS NOT NULL AND correlation NOT BETWEEN -1 AND 1)
+           OR (pc1_variance_share IS NOT NULL AND pc1_variance_share NOT BETWEEN 0 AND 1)
+    )
+        THROW 50221, 'Warehouse Opportunity Score diagnostics validation failed.', 1;
+
+    IF EXISTS (
+        SELECT 1 FROM dbo.opportunity_score_movement
+        WHERE model_version <> 'opportunity_v1'
+           OR weight_version <> 'balanced_v1'
+           OR ABS(score_delta - own_composite_effect - cohort_effect) > 1e-8
+    )
+        THROW 50222, 'Warehouse Opportunity Score movement reconciliation failed.', 1;
+
+    IF EXISTS (
         SELECT 1 FROM dbo.fact_theme_opportunity_score
-        WHERE model_version <> 'e6b_v2'
-           OR weight_version <> 'e6b_balanced_v1'
+          WHERE model_version <> 'opportunity_v1'
+              OR weight_version <> 'balanced_v1'
            OR coverage_status NOT IN ('READY', 'PARTIAL', 'WITHHELD')
            OR coverage_reasons_json IS NULL
            OR LEN(score_id) <> 64
            OR LEN(cohort_snapshot_hash) <> 64
-           OR candidate_snapshot_id IS NULL
-           OR candidate_snapshot_ingest_ts IS NULL
+           OR classification_provenance NOT IN ('manual', 'llm', 'trs')
+           OR classification_id IS NULL
+           OR classification_updated_at IS NULL
            OR max_knowledge_date > as_of
            OR candidate_count < 1
            OR (
@@ -584,18 +672,23 @@ BEGIN
                    OR opportunity_score IS NULL
                    OR opportunity_score NOT BETWEEN 0 AND 100
                    OR opportunity_score_raw IS NULL
-                   OR thesis_linkage_z IS NULL
-                   OR attention_acceleration_z IS NULL
-                   OR smart_money_z IS NULL
-                   OR fundamental_health_z IS NULL
-                   OR valuation_brake_z IS NULL
-                   OR crowding_positioning_z IS NULL
                    OR thesis_linkage_contribution IS NULL
                    OR attention_acceleration_contribution IS NULL
                    OR smart_money_contribution IS NULL
                    OR fundamental_health_contribution IS NULL
                    OR valuation_brake_contribution IS NULL
                    OR crowding_positioning_contribution IS NULL
+               )
+           )
+           OR (
+               coverage_status = 'READY'
+               AND (
+                   thesis_linkage_z IS NULL
+                   OR attention_acceleration_z IS NULL
+                   OR smart_money_z IS NULL
+                   OR fundamental_health_z IS NULL
+                   OR valuation_brake_z IS NULL
+                   OR crowding_positioning_z IS NULL
                )
            )
            OR (
@@ -616,6 +709,13 @@ BEGIN
            )
     )
         THROW 50213, 'Warehouse Opportunity Score contract validation failed.', 1;
+
+    IF EXISTS (
+        SELECT 1 FROM dbo.fact_theme_opportunity_score
+        GROUP BY security_sk, date_sk
+        HAVING COUNT_BIG(*) > 1
+    )
+        THROW 50219, 'Warehouse Opportunity Score has duplicate effective security/date rows.', 1;
 
     IF EXISTS (
         SELECT 1
@@ -652,8 +752,8 @@ BEGIN
          AND f.model_version = m.model_version
          AND f.weight_version = m.weight_version
         WHERE m.status <> 'completed'
-           OR m.model_version <> 'e6b_v2'
-           OR m.weight_version <> 'e6b_balanced_v1'
+           OR m.model_version <> 'opportunity_v1'
+           OR m.weight_version <> 'balanced_v1'
            OR LEN(m.fingerprint) <> 64
            OR COALESCE(f.row_count, 0) <> m.row_count
            OR COALESCE(f.ready_count, 0) <> m.ready_count
@@ -676,8 +776,8 @@ BEGIN
          AND m.weight_version = f.weight_version
          AND m.status = 'completed'
         WHERE f.max_knowledge_date <= f.as_of
-          AND f.model_version = 'e6b_v2'
-          AND f.weight_version = 'e6b_balanced_v1'
+          AND f.model_version = 'opportunity_v1'
+          AND f.weight_version = 'balanced_v1'
     );
 
     IF (SELECT COUNT_BIG(*) FROM dbo.v_opportunity_score) <> @active_opportunity_score_count
@@ -709,6 +809,7 @@ BEGIN
             UNION ALL SELECT event_date, knowledge_date FROM dbo.fact_fundamentals
             UNION ALL SELECT event_date, knowledge_date FROM dbo.fact_company_news
             UNION ALL SELECT event_date, knowledge_date FROM dbo.fact_theme_membership
+            UNION ALL SELECT event_date, knowledge_date FROM dbo.fact_broad_market_membership
             UNION ALL SELECT event_date, knowledge_date FROM dbo.fact_material_event
             UNION ALL SELECT event_date, knowledge_date FROM dbo.fact_sec_filing_event
             UNION ALL SELECT event_date, knowledge_date FROM dbo.fact_fundamental_anchor
@@ -732,6 +833,14 @@ BEGIN
            OR snapshot_ingest_ts IS NULL
     )
         THROW 50215, 'Warehouse theme snapshot provenance validation failed.', 1;
+
+    IF EXISTS (
+        SELECT 1 FROM dbo.fact_broad_market_membership
+        WHERE theme_revision_hash IS NULL
+           OR snapshot_batch_id IS NULL
+           OR snapshot_ingest_ts IS NULL
+    )
+        THROW 50223, 'Warehouse broad-market snapshot provenance validation failed.', 1;
 
     IF EXISTS (
         SELECT 1
@@ -771,6 +880,18 @@ BEGIN
         WHERE f.security_sk IS NULL OR d.security_sk IS NULL
         UNION ALL
         SELECT 1 FROM dbo.fact_theme_membership f
+        LEFT JOIN dbo.dim_security d ON d.security_sk = f.security_sk
+        WHERE f.security_sk IS NULL OR d.security_sk IS NULL
+        UNION ALL
+        SELECT 1 FROM dbo.fact_broad_market_membership f
+        LEFT JOIN dbo.dim_security d ON d.security_sk = f.security_sk
+        WHERE f.security_sk IS NULL OR d.security_sk IS NULL
+        UNION ALL
+        SELECT 1 FROM dbo.fact_financing_risk f
+        LEFT JOIN dbo.dim_security d ON d.security_sk = f.security_sk
+        WHERE f.security_sk IS NULL OR d.security_sk IS NULL
+        UNION ALL
+        SELECT 1 FROM dbo.opportunity_score_movement f
         LEFT JOIN dbo.dim_security d ON d.security_sk = f.security_sk
         WHERE f.security_sk IS NULL OR d.security_sk IS NULL
         UNION ALL
@@ -824,6 +945,7 @@ BEGIN
             UNION ALL SELECT source_sk FROM dbo.fact_fundamentals
             UNION ALL SELECT source_sk FROM dbo.fact_company_news
             UNION ALL SELECT source_sk FROM dbo.fact_theme_membership
+            UNION ALL SELECT source_sk FROM dbo.fact_broad_market_membership
             UNION ALL SELECT source_sk FROM dbo.fact_material_event
             UNION ALL SELECT source_sk FROM dbo.fact_sec_filing_event
             UNION ALL SELECT source_sk FROM dbo.fact_fundamental_anchor
@@ -849,6 +971,9 @@ BEGIN
             UNION ALL SELECT date_sk FROM dbo.fact_fundamental_anchor
             UNION ALL SELECT date_sk FROM dbo.security_daily_features
             UNION ALL SELECT date_sk FROM dbo.fact_theme_opportunity_score
+            UNION ALL SELECT date_sk FROM dbo.fact_financing_risk
+            UNION ALL SELECT date_sk FROM dbo.opportunity_leg_diagnostics
+            UNION ALL SELECT date_sk FROM dbo.opportunity_score_movement
         ) f
         LEFT JOIN dbo.dim_date d ON d.date_sk = f.date_sk
         WHERE f.date_sk IS NULL OR d.date_sk IS NULL

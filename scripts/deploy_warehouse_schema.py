@@ -22,6 +22,8 @@ SQL_FILES = [
     WAREHOUSE / "metrics" / "18_promote_narrative_premium_snapshot.sql",
     WAREHOUSE / "metrics" / "12b_opportunity_legs.sql",
     WAREHOUSE / "metrics" / "13_opportunity_score.sql",
+    WAREHOUSE / "metrics" / "20_financing_risk.sql",
+    WAREHOUSE / "metrics" / "21_opportunity_diagnostics.sql",
     WAREHOUSE / "metrics" / "19_metric_metadata.sql",
     WAREHOUSE / "05_promote_lakehouse_snapshot.sql",
     WAREHOUSE / "06_portfolio_dims.sql",

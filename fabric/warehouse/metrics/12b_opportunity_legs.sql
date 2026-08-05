@@ -1,8 +1,15 @@
--- Auspex E14/E6b per-theme opportunity leg contract.
+-- Auspex target Opportunity Score leg contract. Analytical tables are rebuildable.
 
-IF OBJECT_ID('dbo.fact_theme_opportunity_score', 'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.fact_theme_opportunity_score (
+DROP VIEW IF EXISTS dbo.v_security_score_attribution;
+DROP VIEW IF EXISTS dbo.v_opportunity_score;
+DROP VIEW IF EXISTS dbo.v_opportunity_legs;
+DROP VIEW IF EXISTS dbo.v_portfolio_positions_with_features;
+DROP VIEW IF EXISTS dbo.v_rebalance_inputs;
+DROP TABLE IF EXISTS dbo.fact_theme_opportunity_score;
+DROP TABLE IF EXISTS dbo.opportunity_score_snapshot_manifest;
+GO
+
+CREATE TABLE dbo.fact_theme_opportunity_score (
         score_id VARCHAR(64) NOT NULL,
         generation VARCHAR(64) NOT NULL,
         cohort_snapshot_hash VARCHAR(64) NOT NULL,
@@ -10,9 +17,9 @@ BEGIN
         security_sk BIGINT NOT NULL,
         date_sk INT NOT NULL,
         as_of DATE NOT NULL,
-        candidate_source VARCHAR(16) NOT NULL,
-        candidate_snapshot_id VARCHAR(256) NULL,
-        candidate_snapshot_ingest_ts DATETIME2(6) NULL,
+        classification_provenance VARCHAR(16) NOT NULL,
+        classification_id VARCHAR(256) NOT NULL,
+        classification_updated_at DATETIME2(6) NOT NULL,
         candidate_count INT NOT NULL,
         thesis_linkage_z FLOAT NULL,
         attention_acceleration_z FLOAT NULL,
@@ -34,17 +41,9 @@ BEGIN
         model_version VARCHAR(32) NOT NULL,
         weight_version VARCHAR(32) NOT NULL,
         created_at DATETIME2(6) NOT NULL
-    );
-END;
+);
 
-IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.fact_theme_opportunity_score') AND name = 'candidate_snapshot_id')
-    ALTER TABLE dbo.fact_theme_opportunity_score ADD candidate_snapshot_id VARCHAR(256) NULL;
-IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.fact_theme_opportunity_score') AND name = 'candidate_snapshot_ingest_ts')
-    ALTER TABLE dbo.fact_theme_opportunity_score ADD candidate_snapshot_ingest_ts DATETIME2(6) NULL;
-
-IF OBJECT_ID('dbo.opportunity_score_snapshot_manifest', 'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.opportunity_score_snapshot_manifest (
+CREATE TABLE dbo.opportunity_score_snapshot_manifest (
         generation VARCHAR(64) NOT NULL,
         as_of_date DATE NOT NULL,
         model_version VARCHAR(32) NOT NULL,
@@ -57,8 +56,7 @@ BEGIN
         fingerprint VARCHAR(64) NOT NULL,
         created_at DATETIME2(6) NOT NULL,
         completed_at DATETIME2(6) NULL
-    );
-END;
+);
 GO
 
 CREATE OR ALTER VIEW dbo.v_opportunity_legs AS
@@ -69,9 +67,9 @@ SELECT
     s.security_sk,
     s.date_sk,
     s.as_of,
-    s.candidate_source,
-    s.candidate_snapshot_id,
-    s.candidate_snapshot_ingest_ts,
+    s.classification_provenance,
+    s.classification_id,
+    s.classification_updated_at,
     s.candidate_count,
     s.thesis_linkage_z,
     s.attention_acceleration_z,
@@ -93,6 +91,6 @@ JOIN dbo.opportunity_score_snapshot_manifest m
  AND m.weight_version = s.weight_version
  AND m.status = 'completed'
 WHERE s.max_knowledge_date <= s.as_of
-    AND s.model_version = 'e6b_v2'
-  AND s.weight_version = 'e6b_balanced_v1';
+        AND s.model_version = 'opportunity_v1'
+    AND s.weight_version = 'balanced_v1';
 GO

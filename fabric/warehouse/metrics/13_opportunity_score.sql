@@ -11,10 +11,11 @@ SELECT
     d.company_name,
     s.date_sk,
     s.as_of,
-    s.candidate_source,
-    s.candidate_snapshot_id,
-    s.candidate_snapshot_ingest_ts,
+    s.classification_provenance,
+    s.classification_id,
+    s.classification_updated_at,
     s.candidate_count,
+    s.opportunity_score_raw,
     s.opportunity_score,
     s.coverage_status,
     s.coverage_reasons_json,
@@ -36,8 +37,8 @@ JOIN dbo.dim_security d
 LEFT JOIN dbo.security_daily_features f
   ON f.security_sk = s.security_sk AND f.date_sk = s.date_sk
 WHERE s.max_knowledge_date <= s.as_of
-    AND s.model_version = 'e6b_v2'
-  AND s.weight_version = 'e6b_balanced_v1';
+        AND s.model_version = 'opportunity_v1'
+    AND s.weight_version = 'balanced_v1';
 GO
 
 CREATE OR ALTER VIEW dbo.v_security_score_attribution AS
@@ -56,8 +57,8 @@ WITH active_scores AS (
         LEFT JOIN dbo.security_daily_features f
       ON f.security_sk = s.security_sk AND f.date_sk = s.date_sk
     WHERE s.max_knowledge_date <= s.as_of
-    AND s.model_version = 'e6b_v2'
-      AND s.weight_version = 'e6b_balanced_v1'
+        AND s.model_version = 'opportunity_v1'
+            AND s.weight_version = 'balanced_v1'
 ), attribution AS (
     SELECT score_id, generation, theme_id, security_sk, ticker, company_name,
         date_sk, as_of, 'thesis_linkage' AS leg_name,

@@ -20,6 +20,17 @@ class FakeChat:
 
 
 class ThemeClassificationTests(unittest.TestCase):
+    def test_quantum_and_broad_market_holdings_are_governed_sources(self):
+        root = Path(__file__).resolve().parents[1]
+        sources = json.loads((root / "connectors" / "shared" / "sources_seed.json").read_text(encoding="utf-8"))
+        themes = json.loads((root / "connectors" / "shared" / "themes_seed.json").read_text(encoding="utf-8"))
+        etf_source = next(source for source in sources if source["source_id"] == "etf_holdings")
+        quantum = next(theme for theme in themes["themes"] if theme["theme_id"] == "quantum_computing")
+
+        self.assertIn("QTUM", etf_source["etf_symbols"])
+        self.assertIn("VTI", etf_source["etf_symbols"])
+        self.assertEqual(quantum["components"], [{"etf_symbol": "QTUM", "blend_weight": 1.0}])
+
     def test_connector_does_not_request_forced_sec_compression(self):
         source = (Path(__file__).resolve().parents[1] / "connectors" / "theme_classifier" / "connector.py").read_text(encoding="utf-8")
 
@@ -87,7 +98,7 @@ class ThemeClassificationTests(unittest.TestCase):
                 business_description="Short",
             )
 
-    def test_llm_classification_forces_partial_score_coverage(self):
+    def test_llm_classification_with_measured_linkage_can_be_ready(self):
         from datetime import date, datetime, timezone
 
         observations = [OpportunityObservation(
@@ -95,11 +106,12 @@ class ThemeClassificationTests(unittest.TestCase):
             security_sk=index,
             date_sk=20260804,
             as_of=date(2026, 8, 4),
-            candidate_source="LLM" if index == 1 else "TRS",
-            candidate_snapshot_id=f"snapshot-{index}",
-            candidate_snapshot_ingest_ts=datetime(2026, 8, 4, tzinfo=timezone.utc),
-            membership_weight=float(index),
-            news_volume_z_30d=float(index),
+            classification_provenance="llm" if index == 1 else "trs",
+            classification_id=f"snapshot-{index}",
+            classification_updated_at=datetime(2026, 8, 4, tzinfo=timezone.utc),
+            theme_proxy_weight=float(index),
+            broad_market_weight=float(index) / 2,
+            attention_change_30d=float(index),
             insider_net_buy_ratio_90d=float(index),
             insider_cluster_buy_30d=float(index),
             inst_net_flow_qoq=float(index),
@@ -111,15 +123,14 @@ class ThemeClassificationTests(unittest.TestCase):
             fcf_yield=float(index),
             net_debt_to_ebitda=float(index),
             fundamental_anchor_z=float(index),
-            news_count_30d=float(index),
-            institutional_holder_count_120d=float(index),
+            institutional_holder_count_change_qoq=float(index),
             max_knowledge_date=date(2026, 8, 4),
         ) for index in range(1, 9)]
 
         result = {row.security_sk: row for row in score_theme(observations, LEG_WEIGHTS)}[1]
 
-        self.assertEqual(result.coverage_status, "PARTIAL")
-        self.assertIn("classification:llm", result.coverage_reasons)
+        self.assertEqual(result.coverage_status, "READY")
+        self.assertEqual(result.classification_provenance, "llm")
 
 
 if __name__ == "__main__":

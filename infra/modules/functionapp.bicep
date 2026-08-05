@@ -58,6 +58,15 @@ param alphaVantageRequestsPerMinute string = '75'
 @description('Finnhub company-news maximum lookback in days for the free tier (ingestion only)')
 param finnhubMaxLookbackDays string = '365'
 
+@description('Maximum calibrated diluted-share growth for score-driven increases; empty fails closed')
+param financingMaxDilutedShareGrowth string = ''
+
+@description('Minimum calibrated cash runway in years; empty fails closed')
+param financingMinCashRunwayYears string = ''
+
+@description('Maximum calibrated shelf filing age in days; empty fails closed')
+param financingMaxShelfAgeDays string = ''
+
 @description('Allowed browser origins for HTTP-triggered functions')
 @minLength(1)
 param allowedOrigins array = [
@@ -454,6 +463,18 @@ var webApiExtraSettings = !isIngestion ? [
   {
     name: 'DECISION_LOG_CONTAINER'
     value: 'decision_log'
+  }
+  {
+    name: 'FINANCING_MAX_DILUTED_SHARE_GROWTH'
+    value: financingMaxDilutedShareGrowth
+  }
+  {
+    name: 'FINANCING_MIN_CASH_RUNWAY_YEARS'
+    value: financingMinCashRunwayYears
+  }
+  {
+    name: 'FINANCING_MAX_SHELF_AGE_DAYS'
+    value: financingMaxShelfAgeDays
   }
 ] : []
 

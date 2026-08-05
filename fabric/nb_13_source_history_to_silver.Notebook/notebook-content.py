@@ -77,6 +77,7 @@ GOVERNED_COMPANYFACTS_CONCEPTS = (
     "Revenues",
     "SalesRevenueNet",
     "StockholdersEquity",
+    "WeightedAverageDilutedSharesOutstanding",
 )
 _HASH_SEPARATOR = "\u001f"
 _EMPTY_TIMESTAMP = datetime(1970, 1, 1, tzinfo=timezone.utc)

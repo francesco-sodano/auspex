@@ -8,11 +8,24 @@ from api.auspex_api.recommendations import (
     RecommendationService,
 )
 from api.auspex_api.recommender.costs import estimate_costs
-from api.auspex_api.recommender.policy import CandidateSignal, PortfolioContext, build_recommendations
+from api.auspex_api.recommender.policy import (
+    CandidateSignal,
+    FinancingPolicy,
+    PortfolioContext,
+    build_recommendations,
+)
 from api.auspex_api.recommender.risk_profile import policy_for_profile
 
 
 class E15RecommenderTests(unittest.TestCase):
+    @staticmethod
+    def financing_policy():
+        return FinancingPolicy(
+            max_diluted_share_growth=Decimal("0.20"),
+            min_cash_runway_years=Decimal("1.0"),
+            max_shelf_age_days=90,
+        )
+
     def test_zero_notional_has_zero_cost(self):
         self.assertEqual(
             estimate_costs(Decimal("0"), security_country="US").total_base,
@@ -34,6 +47,11 @@ class E15RecommenderTests(unittest.TestCase):
         self.assertIn('F.lit("score:security:")', notebook)
         self.assertIn('F.lit("opportunity_score")', notebook)
         self.assertIn('"coverage_reasons", "attribution", "spread_bps"', notebook)
+        self.assertIn('F.col("s.opportunity_score_raw")', notebook)
+        self.assertIn("duplicate_effective_scores", notebook)
+        self.assertIn("classification_provenance", notebook)
+        self.assertIn('spark.table("fact_financing_risk")', notebook)
+        self.assertIn("financing_coverage_status", notebook)
         self.assertIn('.unionByName(latest_scores, allowMissingColumns=True)', notebook)
 
         ingestion_app = (
@@ -68,6 +86,7 @@ class E15RecommenderTests(unittest.TestCase):
                 risk_profile="Balanced",
                 base_currency="USD",
                 annual_trade_count=3,
+                financing_policy=self.financing_policy(),
             ),
             [CandidateSignal(
                 security_sk=101,
@@ -78,6 +97,10 @@ class E15RecommenderTests(unittest.TestCase):
                 current_weight=Decimal("0"),
                 country="US",
                 spread_bps=Decimal("5"),
+                opportunity_score_raw=Decimal("1.0"),
+                financing_record_available=True,
+                diluted_share_growth_yoy=Decimal("0.01"),
+                is_burning_cash=False,
             )],
             as_of="2026-07-29",
         )
@@ -97,6 +120,7 @@ class E15RecommenderTests(unittest.TestCase):
             cash_base=Decimal("5000"),
             risk_profile="Balanced",
             base_currency="USD",
+            financing_policy=self.financing_policy(),
         )
         recommendations = build_recommendations(
             portfolio,
@@ -128,6 +152,7 @@ class E15RecommenderTests(unittest.TestCase):
             cash_base=Decimal("30000"),
             risk_profile="Balanced",
             base_currency="USD",
+            financing_policy=self.financing_policy(),
         )
         recommendations = build_recommendations(
             portfolio,
@@ -143,6 +168,10 @@ class E15RecommenderTests(unittest.TestCase):
                     coverage_status="READY", current_value_base=Decimal("0"),
                     current_weight=Decimal("0"), country="US",
                     spread_bps=Decimal("500"),
+                    opportunity_score_raw=Decimal("0.5"),
+                    financing_record_available=True,
+                    diluted_share_growth_yoy=Decimal("0.01"),
+                    is_burning_cash=False,
                 ),
             ],
             as_of="2026-07-29",
@@ -162,11 +191,16 @@ class E15RecommenderTests(unittest.TestCase):
             PortfolioContext(
                 total_value_base=Decimal("100000"), cash_base=Decimal("30000"),
                 risk_profile="Aggressive", base_currency="CHF", annual_trade_count=24,
+                financing_policy=self.financing_policy(),
             ),
             [CandidateSignal(
                 security_sk=1, ticker="MSFT", opportunity_score=Decimal("90"),
                 coverage_status="READY", current_value_base=Decimal("0"),
                 current_weight=Decimal("0"), country="US",
+                opportunity_score_raw=Decimal("1.0"),
+                financing_record_available=True,
+                diluted_share_growth_yoy=Decimal("0.01"),
+                is_burning_cash=False,
             )],
             as_of="2026-07-29",
         )
@@ -211,8 +245,12 @@ class E15RecommenderTests(unittest.TestCase):
                 "security_sk": 101, "ticker": "MSFT", "opportunity_score": "90",
                 "coverage_status": "READY", "country": "US", "spread_bps": "5",
                 "theme_id": "enterprise_technology", "coverage_reasons": [],
+                "opportunity_score_raw": "1.0",
+                "financing_coverage_status": "READY",
+                "diluted_share_growth_yoy": "0.01", "is_burning_cash": False,
                 "as_of": "2026-07-29",
             }]),
+            financing_policy=self.financing_policy(),
         )
 
         result = service.recommendations("principal-a")
@@ -221,6 +259,7 @@ class E15RecommenderTests(unittest.TestCase):
         self.assertEqual(result["as_of"], "2026-07-29")
         self.assertEqual(result["risk_profile"], "Balanced")
         self.assertEqual(result["recommendations"][0]["ticker"], "MSFT")
+        self.assertEqual(result["recommendations"][0]["opportunity_score_raw"], "1.0")
         self.assertEqual(identity.principal, "principal-a")
         self.assertEqual(portfolio.principal, "principal-a")
 
@@ -265,14 +304,80 @@ class E15RecommenderTests(unittest.TestCase):
                 "security_sk": 101, "ticker": "AAPL", "opportunity_score": "100",
                 "coverage_status": "READY", "country": "US", "spread_bps": "5",
                 "theme_id": "enterprise_technology", "coverage_reasons": [],
+                "opportunity_score_raw": "1.0",
+                "financing_coverage_status": "READY",
+                "diluted_share_growth_yoy": "0.01", "is_burning_cash": False,
                 "as_of": "2026-07-29",
             }]),
+            financing_policy=self.financing_policy(),
         )
 
         result = service.recommendations("principal-a")
 
         self.assertEqual(result["status"], "ready")
         self.assertEqual(result["recommendations"], [])
+
+    def test_absolute_floor_suppresses_score_driven_increase(self):
+        recommendation = build_recommendations(
+            PortfolioContext(
+                total_value_base=Decimal("100000"), cash_base=Decimal("30000"),
+                risk_profile="Growth", base_currency="USD",
+                financing_policy=self.financing_policy(),
+            ),
+            [CandidateSignal(
+                security_sk=1, ticker="WEAKCOHORT", opportunity_score=Decimal("90"),
+                coverage_status="READY", current_value_base=Decimal("0"),
+                current_weight=Decimal("0"), country="US",
+                opportunity_score_raw=Decimal("-0.01"),
+                financing_record_available=True,
+                diluted_share_growth_yoy=Decimal("0.01"), is_burning_cash=False,
+            )],
+            as_of="2026-08-06",
+        )[0]
+
+        self.assertEqual(recommendation.action, "HOLD")
+        self.assertIn("absolute_floor", recommendation.suppression_reasons)
+
+    def test_financing_veto_fails_closed_without_record_or_configuration(self):
+        candidate = CandidateSignal(
+            security_sk=1, ticker="FIN", opportunity_score=Decimal("90"),
+            coverage_status="READY", current_value_base=Decimal("0"),
+            current_weight=Decimal("0"), country="US",
+            opportunity_score_raw=Decimal("1.0"),
+        )
+        recommendation = build_recommendations(
+            PortfolioContext(
+                total_value_base=Decimal("100000"), cash_base=Decimal("30000"),
+                risk_profile="Growth", base_currency="USD",
+            ),
+            [candidate],
+            as_of="2026-08-06",
+        )[0]
+
+        self.assertEqual(recommendation.action, "HOLD")
+        self.assertIn("financing", recommendation.suppression_reasons)
+
+    def test_recent_shelf_filing_suppresses_score_driven_increase(self):
+        recommendation = build_recommendations(
+            PortfolioContext(
+                total_value_base=Decimal("100000"), cash_base=Decimal("30000"),
+                risk_profile="Growth", base_currency="USD",
+                financing_policy=self.financing_policy(),
+            ),
+            [CandidateSignal(
+                security_sk=1, ticker="SHELF", opportunity_score=Decimal("90"),
+                coverage_status="READY", current_value_base=Decimal("0"),
+                current_weight=Decimal("0"), country="US",
+                opportunity_score_raw=Decimal("1.0"),
+                financing_record_available=True,
+                diluted_share_growth_yoy=Decimal("0.01"), is_burning_cash=False,
+                days_since_shelf_filing=10, shelf_form="S-3ASR",
+            )],
+            as_of="2026-08-06",
+        )[0]
+
+        self.assertEqual(recommendation.action, "HOLD")
+        self.assertIn("financing", recommendation.suppression_reasons)
 
     def test_service_preserves_withheld_holding_score_and_classification(self):
         identity = SimpleNamespace(product_user=lambda _: SimpleNamespace(

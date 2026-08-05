@@ -104,7 +104,7 @@ WITH ranked_scores AS (
         SELECT s.*,
                      ROW_NUMBER() OVER (
                              PARTITION BY s.security_sk
-                             ORDER BY s.as_of DESC, s.opportunity_score DESC, s.theme_id
+                 ORDER BY s.as_of DESC
                      ) AS row_number
         FROM dbo.fact_theme_opportunity_score s
         WHERE s.coverage_status IN ('READY', 'PARTIAL')
@@ -134,7 +134,7 @@ ranked_scores AS (
         SELECT s.*,
                      ROW_NUMBER() OVER (
                              PARTITION BY s.security_sk
-                             ORDER BY s.as_of DESC, s.opportunity_score DESC, s.theme_id
+                             ORDER BY s.as_of DESC
                      ) AS row_number
         FROM dbo.fact_theme_opportunity_score s
         WHERE s.coverage_status IN ('READY', 'PARTIAL')

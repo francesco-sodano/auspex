@@ -48,6 +48,14 @@
         {"etf_symbol": "PAVE", "blend_weight": 0.25},
         {"etf_symbol": "GRID", "blend_weight": 0.25}
       ]
+    },
+    {
+      "theme_id": "quantum_computing",
+      "name": "Quantum Computing",
+      "benchmark_symbol": "QTUM",
+      "components": [
+        {"etf_symbol": "QTUM", "blend_weight": 1.0}
+      ]
     }
   ]
 }

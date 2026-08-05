@@ -26,12 +26,12 @@ USING (VALUES
     ('realized_vol_30d', 'composite_growth_score', CAST(0.100000 AS DECIMAL(9,6)), -1, 1, 'E6a', 'e6a_v1', CAST('1900-01-01' AS DATE), CAST('9999-12-31' AS DATE)),
     ('insider_net_buy_ratio_90d', 'composite_growth_score', CAST(0.250000 AS DECIMAL(9,6)), 1, 1, 'E6a', 'e6a_v1', CAST('1900-01-01' AS DATE), CAST('9999-12-31' AS DATE)),
     ('insider_cluster_buy_30d', 'composite_growth_score', CAST(0.150000 AS DECIMAL(9,6)), 1, 1, 'E6a', 'e6a_v1', CAST('1900-01-01' AS DATE), CAST('9999-12-31' AS DATE)),
-    ('thesis_linkage', 'opportunity_score', CAST(0.200000 AS DECIMAL(9,6)), 1, 1, 'E14/E6b', 'e6b_balanced_v1', CAST('1900-01-01' AS DATE), CAST('9999-12-31' AS DATE)),
-    ('attention_acceleration', 'opportunity_score', CAST(0.150000 AS DECIMAL(9,6)), 1, 1, 'E14/E6b', 'e6b_balanced_v1', CAST('1900-01-01' AS DATE), CAST('9999-12-31' AS DATE)),
-    ('smart_money', 'opportunity_score', CAST(0.200000 AS DECIMAL(9,6)), 1, 1, 'E14/E6b', 'e6b_balanced_v1', CAST('1900-01-01' AS DATE), CAST('9999-12-31' AS DATE)),
-    ('fundamental_health', 'opportunity_score', CAST(0.200000 AS DECIMAL(9,6)), 1, 1, 'E14/E6b', 'e6b_balanced_v1', CAST('1900-01-01' AS DATE), CAST('9999-12-31' AS DATE)),
-    ('valuation_brake', 'opportunity_score', CAST(0.150000 AS DECIMAL(9,6)), 1, 1, 'E14/E6b', 'e6b_balanced_v1', CAST('1900-01-01' AS DATE), CAST('9999-12-31' AS DATE)),
-    ('crowding_positioning', 'opportunity_score', CAST(0.100000 AS DECIMAL(9,6)), 1, 1, 'E14/E6b', 'e6b_balanced_v1', CAST('1900-01-01' AS DATE), CAST('9999-12-31' AS DATE))
+    ('thesis_linkage', 'opportunity_score', CAST(0.200000 AS DECIMAL(9,6)), 1, 1, 'Engine', 'balanced_v1', CAST('1900-01-01' AS DATE), CAST('9999-12-31' AS DATE)),
+    ('attention_acceleration', 'opportunity_score', CAST(0.150000 AS DECIMAL(9,6)), 1, 1, 'Engine', 'balanced_v1', CAST('1900-01-01' AS DATE), CAST('9999-12-31' AS DATE)),
+    ('smart_money', 'opportunity_score', CAST(0.200000 AS DECIMAL(9,6)), 1, 1, 'Engine', 'balanced_v1', CAST('1900-01-01' AS DATE), CAST('9999-12-31' AS DATE)),
+    ('fundamental_health', 'opportunity_score', CAST(0.200000 AS DECIMAL(9,6)), 1, 1, 'Engine', 'balanced_v1', CAST('1900-01-01' AS DATE), CAST('9999-12-31' AS DATE)),
+    ('valuation_brake', 'opportunity_score', CAST(0.150000 AS DECIMAL(9,6)), 1, 1, 'Engine', 'balanced_v1', CAST('1900-01-01' AS DATE), CAST('9999-12-31' AS DATE)),
+    ('crowding_positioning', 'opportunity_score', CAST(0.100000 AS DECIMAL(9,6)), 1, 1, 'Engine', 'balanced_v1', CAST('1900-01-01' AS DATE), CAST('9999-12-31' AS DATE))
 ) AS s(metric_name, metric_group, [weight], direction, is_active, required_epic, [version], effective_from, effective_to)
 ON t.metric_name = s.metric_name AND t.[version] = s.[version] AND t.effective_from = s.effective_from
 WHEN NOT MATCHED THEN INSERT (

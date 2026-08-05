@@ -33,6 +33,15 @@ class FakeContext:
 
 
 class DailyBuildOrchestratorTests(unittest.TestCase):
+    def test_completion_telemetry_includes_engine_diagnostics(self):
+        function_app = (ROOT / "connectors" / "function_app.py").read_text(encoding="utf-8")
+        daily_build = (ROOT / "connectors" / "shared" / "daily_build.py").read_text(encoding="utf-8")
+
+        self.assertIn("max_pc1_variance_share", function_app)
+        self.assertIn("score_movement_rows", function_app)
+        self.assertIn("financing_ready", daily_build)
+        self.assertIn('"diagnostics": warehouse.get("diagnostics", {})', daily_build)
+
     def _complete_notebook_pipeline(self, orchestration, action, pipeline_name):
         for index, notebook in enumerate(NOTEBOOK_PIPELINES[pipeline_name]):
             self.assertEqual(action[1], "start_fabric_notebook")
@@ -115,6 +124,22 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
         self.assertIn("instanceCount: 1", function_module)
         self.assertIn("maximumInstanceCount: isIngestion ? 2 : 100", function_module)
         self.assertIn("param alphaVantageRequestsPerMinute string = '75'", function_module)
+
+    def test_web_api_financing_policy_is_externally_configured_and_fail_closed(self):
+        function_module = (ROOT / "infra" / "modules" / "functionapp.bicep").read_text(
+            encoding="utf-8"
+        )
+        main = (ROOT / "infra" / "main.bicep").read_text(encoding="utf-8")
+
+        for name in (
+            "FINANCING_MAX_DILUTED_SHARE_GROWTH",
+            "FINANCING_MIN_CASH_RUNWAY_YEARS",
+            "FINANCING_MAX_SHELF_AGE_DAYS",
+        ):
+            self.assertIn(name, function_module)
+        self.assertIn("financingMaxDilutedShareGrowth string = ''", main)
+        self.assertIn("financingMinCashRunwayYears string = ''", main)
+        self.assertIn("financingMaxShelfAgeDays string = ''", main)
 
     def test_fabric_client_starts_parameterized_notebook_job(self):
         credential = Mock()

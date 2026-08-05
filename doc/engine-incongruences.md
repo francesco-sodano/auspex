@@ -31,6 +31,10 @@ The following constraints supersede the pre-rework document and old ADR assumpti
 
 **Status: Real.**
 
+**Phase 2 resolution: Implemented.** Cohort assignment is now independent from
+theme/VTI linkage, and manual or LLM provenance can be `READY` when all leg contracts
+are met.
+
 The old document says that an explicit classification replaces ETF memberships.
 Notebook 04 implements that rule with a `left_anti` join in
 `classified_theme_memberships`, then emits the manual or LLM row with
@@ -56,6 +60,10 @@ that classification confidence is economic exposure.
 
 **Status: Real and empirically confirmed.**
 
+**Phase 2 resolution: Implemented.** Linkage is now the log ratio of assigned-theme
+proxy weight to VTI weight; both observations remain PIT-bound and independently
+nullable.
+
 `engine/thesis.py` consumes raw `membership_weight`, and Notebook 04 passes the
 blended ETF constituent weight without a broad-market control. A read-only Warehouse
 check on the 5 August 2026 score date joined each cohort's latest eligible membership
@@ -77,6 +85,10 @@ defensible exposure measure exists.
 
 **Status: Misreading in the strict form; the overlap is real.**
 
+**Phase 2 resolution: Implemented.** Attention retains current-versus-prior 30-day
+change, while crowding uses inverse quarter-over-quarter institutional holder-count
+change and no longer reads news volume or holder-count level.
+
 Notebook 04 limits news to 60 days and calculates
 `(current_30d - previous_30d) / sqrt(previous_30d)`, with a current-count fallback when
 the previous window is zero. `engine/thesis.py` then standardizes that change
@@ -88,8 +100,9 @@ identical inverses, but they reuse the same observation stream and are likely
 correlated. No correlation telemetry currently tests that dependence.
 
 **Resolution:** retain attention as an explicitly named within-security change measure.
-Remove news volume from crowding. Crowding uses short-interest ratio and days to cover;
-if those inputs are unavailable, the leg is missing rather than synthesized from news.
+Remove news volume from crowding. Crowding uses quarter-over-quarter change in distinct
+active institutional holder count from PIT 13F facts; if two comparable periods are not
+available, the leg is missing rather than synthesized from news.
 
 **Tradeoff:** the legs become economically distinct at the cost of a new market-data
 dependency and more honest partial coverage during rollout.
@@ -97,6 +110,10 @@ dependency and more honest partial coverage during rollout.
 ### d. Smart-money zero fill is not neutral
 
 **Status: Real, and the implementation is less honest than the old document says.**
+
+**Phase 2 resolution: Implemented.** Nulls now reach the engine, observed
+subcomponent weights renormalize above the `0.50` gate, and no second leg
+standardization moves an imputed zero.
 
 The old document says missing smart-money subcomponents receive component z-score zero,
 make coverage partial, and can move after leg re-standardization. Notebook 04 actually
@@ -123,6 +140,9 @@ distribution-dependent imputation.
 
 **Status: Real.**
 
+**Phase 2 resolution: Implemented.** Raw composite is served to deterministic policy;
+non-positive raw composite suppresses score-driven increases with `absolute_floor`.
+
 The raw composite is stored in `fact_theme_opportunity_score`, but
 `dbo.v_opportunity_score` does not serve it and `CandidateSignal` contains only the
 percentile. Policy thresholds at 60, 70, and 80 therefore operate without any absolute
@@ -142,6 +162,9 @@ second consumer score.
 
 **Status: Real.**
 
+**Phase 2 resolution: Implemented.** QTUM is a governed weekly ETF component and VTI
+is a separate governed broad-market reference.
+
 Notebook 05 adds `quantum_computing` to `dim_theme` with benchmark `QTUM`, but
 `theme_component_df` and `bridge_theme_etf` contain no QTUM component. QTUM is reference
 metadata only, so `fact_theme_membership` receives no quantum constituents. The manual
@@ -159,6 +182,9 @@ is preferable to a permanently unrankable single-security label.
 
 **Status: Real design defect; the implementation correctly follows the old document.**
 
+**Phase 2 resolution: Implemented.** Scores use average-rank Blom positions and the UI
+chooses whole-point or one-decimal precision from cohort granularity.
+
 `engine/thesis.py` implements `100 * firstRank / (N - 1)` exactly. Every non-tied
 cohort has a 0.0 and 100.0, first-rank tie handling biases ties downward, and a fixed UI
 decimal can imply precision finer than the cohort supports.
@@ -174,6 +200,11 @@ interpretation improve.
 ### h. No financing or dilution measurement
 
 **Status: Real gap.**
+
+**Phase 2 resolution: Implemented fail-closed.** PIT financing facts now expose diluted
+share growth, cash runway/burn, and S-3/S-3ASR/424B evidence. Policy has no embedded
+thresholds; missing external calibration or incomplete records suppress increases with
+`financing`.
 
 The six-leg inputs and policy contain no financing-risk field or suppression reason.
 Fundamentals already land `shares_outstanding`, and filing ingestion recognizes 424B
@@ -194,6 +225,9 @@ observed without silently changing recommendations.
 
 **Status: Real documentation defect.**
 
+**Phase 2 resolution: Implemented.** The orphan term is removed; `opportunity_v1` is
+the sole score-engine contract and `balanced_v1` the current weight configuration.
+
 `RAGS` appears only in the old glossary. No engine symbol, schema, API contract, or
 other architecture section uses it.
 
@@ -203,6 +237,9 @@ architecture.
 ## Additional incongruences
 
 ### Multi-theme serving is not the documented maximum
+
+**Phase 2 resolution: Implemented.** Classification assigns one effective cohort and
+Notebook/Warehouse publication rejects duplicate security/date score rows.
 
 The old document says serving selects the highest same-date score outside explicit
 classifications. `dbo.v_opportunity_score` returns every theme row. The recommendation
@@ -216,6 +253,9 @@ score. This removes max-of-themes selection bias rather than making it determini
 
 ### Raw score is calculated but absent from the policy contract
 
+**Phase 2 resolution: Implemented.** Raw composite is carried through Warehouse and
+Cosmos into policy but remains excluded from consumer score display.
+
 The fact stores `opportunity_score_raw`; the serving view and `CandidateSignal` omit it.
 This prevents the absolute-floor policy required by the target design.
 
@@ -223,6 +263,9 @@ This prevents the absolute-floor policy required by the target design.
 not as a consumer-facing score.
 
 ### No leg-dependence telemetry
+
+**Phase 2 resolution: Implemented.** The current Gold release stores the full 6x6
+matrix, pair counts, and PC1 share; completion telemetry emits release summaries.
 
 The old risk section acknowledges correlated legs, but the build emits no 6x6
 correlation matrix or principal-component concentration measure. Fixed weights do not
@@ -234,6 +277,9 @@ diagnostic and does not dynamically alter weights.
 
 ### No score-movement attribution
 
+**Phase 2 resolution: Implemented.** The current release stores the prior-distribution
+counterfactual split into own-composite and cohort effects, with reconciliation checks.
+
 Facts contain a point-in-time score but no split between a security's own composite
 change and movement of the cohort distribution.
 
@@ -242,6 +288,10 @@ apply the prior cohort distribution to the current raw composite for the own-com
 effect; the residual from switching to the current distribution is the cohort effect.
 
 ### Historical machinery exceeds the changed requirements
+
+**Phase 2 resolution: Implemented for the score path.** Regenerable score and
+diagnostic tables are rebuilt in place and retired engine versions are rejected. Bronze
+and owner-scoped Cosmos ledger data retain their separate preservation contracts.
 
 The old architecture treats immutable score history, content-addressed manifests,
 model-version ledgers, and audited release retention as quality requirements. Notebook
@@ -260,7 +310,8 @@ ledger behavior remains untouched because it protects unrecoverable owner data.
 2. Assign one cohort independently of linkage and retain classification provenance.
 3. Add QTUM and a configured broad-market reference to validated ETF holdings.
 4. Use size-neutral relative linkage.
-5. Keep attention as within-security change; move crowding to short-interest data.
+5. Keep attention as within-security change; move crowding to quarter-over-quarter
+  institutional holder-count change.
 6. Renormalize available subcomponents with a `0.50` minimum available-weight gate.
 7. Use Blom plotting positions and cohort-aware display precision.
 8. Require percentile threshold and positive raw composite for score-driven increases.

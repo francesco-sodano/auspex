@@ -1297,7 +1297,7 @@ class E8ConnectorTests(unittest.TestCase):
                 since_date=date.today().isoformat(),
             ).fetch(None)
 
-        self.assertEqual(captured_forms, ["S-1", "424B4", "424B5"])
+        self.assertEqual(captured_forms, ["S-1", "S-3", "S-3ASR", "424B4", "424B5"])
 
     def test_sec_multi_form_connectors_use_root_aware_queries(self):
         os.environ["EDGAR_USER_AGENT"] = "Auspex test@example.com"
@@ -1306,7 +1306,7 @@ class E8ConnectorTests(unittest.TestCase):
             (Sec13FConnector, ["13F-HR"]),
             (Sec13DgConnector, ["SC 13D", "SC 13G", "SCHEDULE 13D", "SCHEDULE 13G"]),
             (Sec8KConnector, ["8-K"]),
-            (SecS1Connector, ["S-1", "424B4", "424B5"]),
+            (SecS1Connector, ["S-1", "S-3", "S-3ASR", "424B4", "424B5"]),
         ]
 
         for connector_cls, expected_forms in cases:

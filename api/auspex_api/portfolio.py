@@ -1688,11 +1688,18 @@ class PortfolioService:
                 "opportunity_score": (score or {}).get("opportunity_score"),
                 "score_as_of": (score or {}).get("as_of"),
                 "score_coverage_status": (score or {}).get("coverage_status"),
+                "score_candidate_count": (score or {}).get("candidate_count"),
+                "score_classification_provenance": (
+                    (score or {}).get("classification_provenance")
+                ),
                 "theme_id": (
                     (score or {}).get("theme_id")
                     or (classification or {}).get("theme_id")
                 ),
-                "theme_provenance": (classification or {}).get("provenance"),
+                "theme_provenance": (
+                    (classification or {}).get("provenance")
+                    or (score or {}).get("classification_provenance")
+                ),
                 "theme_confidence": (classification or {}).get("confidence"),
                 "weight": None,
                 "valuation_status": (

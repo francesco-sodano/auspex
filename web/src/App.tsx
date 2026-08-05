@@ -178,8 +178,10 @@ type PortfolioHomeSummary = {
     opportunity_score: string | null
     score_as_of: string | null
     score_coverage_status: 'READY' | 'PARTIAL' | null
+    score_candidate_count: number | null
+    score_classification_provenance: 'manual' | 'llm' | 'trs' | null
     theme_id: string | null
-    theme_provenance: 'manual' | 'llm' | null
+    theme_provenance: 'manual' | 'llm' | 'trs' | null
     theme_confidence: string | null
   }>
   exposures: Record<'sector' | 'country' | 'currency' | 'theme' | 'exchange', Array<{
@@ -244,6 +246,9 @@ type RecommendationResponse = {
     suppression_reasons: string[]
     tax_flags: string[]
     opportunity_score: string | null
+    opportunity_score_raw: string | null
+    candidate_count: number | null
+    classification_provenance: 'manual' | 'llm' | 'trs' | null
     theme_id: string | null
     coverage_status: 'READY' | 'PARTIAL' | 'WITHHELD'
     coverage_reasons: string[]
@@ -662,9 +667,22 @@ function ProductHome({ user }: { user: AppUser }) {
   const formatScore = (holding: PortfolioHomeSummary['holdings'][number]) => {
     if (holding.opportunity_score === null) return '—'
     const score = Number(holding.opportunity_score)
-    if (holding.score_coverage_status !== 'PARTIAL') return score.toFixed(1)
+    if (holding.score_coverage_status !== 'PARTIAL') {
+      const step = holding.score_candidate_count ? 100 / (holding.score_candidate_count + 0.25) : 0
+      return score.toFixed(step >= 1 ? 0 : 1)
+    }
     const lower = Math.min(90, Math.floor(score / 10) * 10)
     return `${lower}–${lower + 10}`
+  }
+  const formatRecommendationScore = (recommendation: RecommendationResponse['recommendations'][number]) => {
+    if (recommendation.opportunity_score === null) return '—'
+    if (recommendation.coverage_status === 'PARTIAL') {
+      const score = Number(recommendation.opportunity_score)
+      const lower = Math.min(90, Math.floor(score / 10) * 10)
+      return `${lower}–${lower + 10}`
+    }
+    const step = recommendation.candidate_count ? 100 / (recommendation.candidate_count + 0.25) : 0
+    return Number(recommendation.opportunity_score).toFixed(step >= 1 ? 0 : 1)
   }
   const earnings = summary?.total_earnings_base === null || summary?.total_earnings_base === undefined
     ? null
@@ -811,14 +829,14 @@ function ProductHome({ user }: { user: AppUser }) {
               {(['theme', 'exchange', 'country', 'currency'] as const).map((type) => <div className="exposure-group" key={type}><h3>{type}</h3>{summary?.exposures[type].map((exposure) => <div className="exposure-row" key={`${type}-${exposure.name}`}><div><span>{exposure.name.replaceAll('_', ' ')}</span><strong title={metadata.position_weight?.plain_description}>{(Number(exposure.weight) * 100).toFixed(1)}%</strong></div><span className="exposure-track"><i style={{ width: `${Math.min(100, Number(exposure.weight) * 100)}%` }} /></span></div>)}</div>)}
             </div>
           </section>
-          <section className="home-panel monthly-outlook-panel"><div className="panel-title"><div><span className="eyebrow">Latest deterministic review</span><h2>Current portfolio analysis</h2><p>Auspex policy applied to the latest portfolio, scores, coverage, and estimated trading costs.</p></div><span className="research-label">As of {recommendations?.as_of || summary?.valuation_as_of || 'unavailable'}</span></div><dl><div><dt>Portfolio mix</dt><dd>{summary?.holdings.length || 0} stocks · {summary?.cash_weight ? `${(Number(summary.cash_weight) * 100).toFixed(1)}% cash` : 'cash weight unavailable'}</dd></div><div><dt>Largest concentration</dt><dd>{largestHolding ? `${largestHolding.ticker} · ${(Number(largestHolding.weight || 0) * 100).toFixed(1)}%` : 'No stock concentration'}</dd></div><div><dt>Strongest holding signal</dt><dd>{strongestHolding ? `${strongestHolding.ticker} · ${Number(strongestHolding.opportunity_score).toFixed(1)}` : 'No scored holding'}</dd></div><div><dt>Score coverage</dt><dd>{scoredHoldings.length} of {summary?.holdings.length || 0} holdings</dd></div></dl><p className="portfolio-analysis-copy">{analysisText}</p></section>
+          <section className="home-panel monthly-outlook-panel"><div className="panel-title"><div><span className="eyebrow">Latest deterministic review</span><h2>Current portfolio analysis</h2><p>Auspex policy applied to the latest portfolio, scores, coverage, and estimated trading costs.</p></div><span className="research-label">As of {recommendations?.as_of || summary?.valuation_as_of || 'unavailable'}</span></div><dl><div><dt>Portfolio mix</dt><dd>{summary?.holdings.length || 0} stocks · {summary?.cash_weight ? `${(Number(summary.cash_weight) * 100).toFixed(1)}% cash` : 'cash weight unavailable'}</dd></div><div><dt>Largest concentration</dt><dd>{largestHolding ? `${largestHolding.ticker} · ${(Number(largestHolding.weight || 0) * 100).toFixed(1)}%` : 'No stock concentration'}</dd></div><div><dt>Strongest holding signal</dt><dd>{strongestHolding ? `${strongestHolding.ticker} · ${formatScore(strongestHolding)}` : 'No scored holding'}</dd></div><div><dt>Score coverage</dt><dd>{scoredHoldings.length} of {summary?.holdings.length || 0} holdings</dd></div></dl><p className="portfolio-analysis-copy">{analysisText}</p></section>
           <section className="home-panel recommendations-panel">
             <div className="panel-title"><div><span className="eyebrow">Deterministic policy · {user.risk_profile}</span><h2>Suggested actions</h2><p>{recommendations?.as_of ? `Signals through ${recommendations.as_of}` : 'Waiting for complete inputs'}</p></div><span className="research-label">Research only</span></div>
             {!recommendations ? <p className="recommendation-state">Loading recommendations…</p> : recommendations.status === 'withheld' ? <p className="recommendation-state">Recommendations are withheld until {recommendations.reasons.map((reason) => reason.replaceAll('_', ' ')).join(' and ')}.</p> : recommendations.recommendations.length === 0 ? <p className="recommendation-state">No trade currently clears portfolio limits, cash buffers, coverage, and estimated costs.</p> : <div className="recommendation-list">
               {recommendations.recommendations.slice(0, 12).map((recommendation) => <article className={`recommendation-card action-${recommendation.action.toLowerCase()}`} key={recommendation.recommendation_id} aria-labelledby={`recommendation-${recommendation.recommendation_id}`}>
                 <dl className="recommendation-card-head">
                   <div className="recommendation-security"><dt>Security</dt><dd><strong id={`recommendation-${recommendation.recommendation_id}`}>{recommendation.ticker}</strong><small>{(recommendation.theme_id || 'Unclassified').replaceAll('_', ' ')} · {recommendation.confidence.toLowerCase()} confidence</small></dd></div>
-                  <div><dt>Auspex score</dt><dd><strong>{recommendation.opportunity_score === null ? '—' : Number(recommendation.opportunity_score).toFixed(1)}</strong><small>{recommendation.coverage_status.toLowerCase()} coverage</small></dd></div>
+                  <div><dt>Auspex score</dt><dd><strong>{formatRecommendationScore(recommendation)}</strong><small>{recommendation.coverage_status.toLowerCase()} coverage{recommendation.candidate_count ? ` · ${recommendation.candidate_count} peers` : ''}</small></dd></div>
                   <div><dt>Action</dt><dd><b className={`recommendation-action action-${recommendation.action.toLowerCase()}`}>{recommendation.action}</b><small>{recommendation.suppression_reasons.length ? recommendation.suppression_reasons.join(', ').replaceAll('_', ' ') : 'Policy eligible'}</small></dd></div>
                   <div><dt>Current → target</dt><dd><strong>{(Number(recommendation.current_weight) * 100).toFixed(1)}% → {(Number(recommendation.target_weight) * 100).toFixed(1)}%</strong><small>Portfolio weight</small></dd></div>
                   <div><dt>Suggested amount</dt><dd><strong>{new Intl.NumberFormat(undefined, { style: 'currency', currency: recommendations.base_currency }).format(Number(recommendation.suggested_amount_base))}</strong><small>Est. cost {new Intl.NumberFormat(undefined, { style: 'currency', currency: recommendations.base_currency }).format(Number(recommendation.estimated_cost_base))}</small></dd></div>

@@ -9,7 +9,9 @@ from engine.thesis import (
     MODEL_VERSION,
     WEIGHT_VERSION,
     OpportunityObservation,
+    cohort_leg_diagnostics,
     score_theme,
+    score_movement_attribution,
 )
 
 
@@ -22,11 +24,12 @@ def observation(security_sk: int, **overrides) -> OpportunityObservation:
         "security_sk": security_sk,
         "date_sk": 20260723,
         "as_of": date(2026, 7, 23),
-        "candidate_source": "TRS",
-        "candidate_snapshot_id": "batch-20260703",
-        "candidate_snapshot_ingest_ts": datetime(2026, 7, 3, 12, tzinfo=timezone.utc),
-        "membership_weight": 0.01 + security_sk / 10000,
-        "news_volume_z_30d": security_sk / 20,
+        "classification_provenance": "trs",
+        "classification_id": "batch-20260703",
+        "classification_updated_at": datetime(2026, 7, 3, 12, tzinfo=timezone.utc),
+        "theme_proxy_weight": 0.01 + security_sk / 10000,
+        "broad_market_weight": 0.005 + security_sk / 20000,
+        "attention_change_30d": security_sk / 20,
         "insider_net_buy_ratio_90d": security_sk / 50,
         "insider_cluster_buy_30d": security_sk % 3,
         "inst_net_flow_qoq": float(security_sk * 1000),
@@ -38,8 +41,7 @@ def observation(security_sk: int, **overrides) -> OpportunityObservation:
         "fcf_yield": 0.02 + security_sk / 10000,
         "net_debt_to_ebitda": 2.0 - security_sk / 100,
         "fundamental_anchor_z": security_sk / 10,
-        "news_count_30d": 10 + security_sk,
-        "institutional_holder_count_120d": 20 + security_sk,
+        "institutional_holder_count_change_qoq": float(security_sk),
         "max_knowledge_date": date(2026, 7, 23),
     }
     values.update(overrides)
@@ -48,8 +50,8 @@ def observation(security_sk: int, **overrides) -> OpportunityObservation:
 
 class OpportunityScoreEngineTests(unittest.TestCase):
     def test_active_versions_and_balanced_weights_are_fixed(self):
-        self.assertEqual(MODEL_VERSION, "e6b_v2")
-        self.assertEqual(WEIGHT_VERSION, "e6b_balanced_v1")
+        self.assertEqual(MODEL_VERSION, "opportunity_v1")
+        self.assertEqual(WEIGHT_VERSION, "balanced_v1")
         self.assertEqual(MIN_THEME_COHORT, 8)
         self.assertAlmostEqual(sum(LEG_WEIGHTS.values()), 1.0, places=12)
         self.assertEqual(
@@ -77,7 +79,7 @@ class OpportunityScoreEngineTests(unittest.TestCase):
             by_security[2].valuation_brake_contribution,
         )
 
-    def test_missing_components_omit_incomplete_legs_and_mark_partial(self):
+    def test_missing_subcomponent_is_renormalized_without_dropping_leg(self):
         observations = [observation(index) for index in range(1, 9)]
         observations[0] = observation(
             1,
@@ -91,24 +93,37 @@ class OpportunityScoreEngineTests(unittest.TestCase):
         self.assertIsNotNone(result.opportunity_score)
         self.assertIn("missing:fundamental_anchor_z", result.coverage_reasons)
         self.assertIn("missing:contract_award_usd_trailing_90d", result.coverage_reasons)
-        self.assertEqual(result.smart_money_contribution, 0.0)
+        self.assertNotEqual(result.smart_money_contribution, 0.0)
         self.assertEqual(result.valuation_brake_contribution, 0.0)
 
-    def test_manual_classification_is_five_leg_variance_corrected_partial(self):
+    def test_manual_classification_with_measured_linkage_is_ready(self):
         observations = [observation(index) for index in range(1, 9)]
         observations[0] = observation(
             1,
-            candidate_source="MANUAL",
-            membership_weight=None,
+            classification_provenance="manual",
+        )
+
+        result = {row.security_sk: row for row in score_theme(observations, LEG_WEIGHTS)}[1]
+
+        self.assertEqual(result.coverage_status, "READY")
+        self.assertNotIn("missing:theme_proxy_weight", result.coverage_reasons)
+        self.assertIsNotNone(result.thesis_linkage_z)
+        self.assertIsNotNone(result.opportunity_score)
+
+    def test_manual_classification_without_linkage_is_partial(self):
+        observations = [observation(index) for index in range(1, 9)]
+        observations[0] = observation(
+            1,
+            classification_provenance="manual",
+            theme_proxy_weight=None,
         )
 
         result = {row.security_sk: row for row in score_theme(observations, LEG_WEIGHTS)}[1]
 
         self.assertEqual(result.coverage_status, "PARTIAL")
-        self.assertIn("missing:membership_weight", result.coverage_reasons)
-        self.assertEqual(result.thesis_linkage_z, 0.0)
+        self.assertIn("missing:theme_proxy_weight", result.coverage_reasons)
+        self.assertIsNone(result.thesis_linkage_z)
         self.assertEqual(result.thesis_linkage_contribution, 0.0)
-        self.assertIsNotNone(result.opportunity_score)
 
     def test_small_theme_cohort_is_withheld(self):
         results = score_theme([observation(index) for index in range(1, 8)], LEG_WEIGHTS)
@@ -122,8 +137,9 @@ class OpportunityScoreEngineTests(unittest.TestCase):
         observations = [
             observation(
                 index,
-                membership_weight=0.01,
-                news_volume_z_30d=0.0,
+                theme_proxy_weight=0.01,
+                broad_market_weight=0.005,
+                attention_change_30d=0.0,
                 insider_net_buy_ratio_90d=0.0,
                 insider_cluster_buy_30d=0,
                 inst_net_flow_qoq=0.0,
@@ -135,8 +151,7 @@ class OpportunityScoreEngineTests(unittest.TestCase):
                 fcf_yield=0.02,
                 net_debt_to_ebitda=1.0,
                 fundamental_anchor_z=0.0,
-                news_count_30d=10,
-                institutional_holder_count_120d=20,
+                institutional_holder_count_change_qoq=0.0,
             )
             for index in range(1, 9)
         ]
@@ -147,7 +162,7 @@ class OpportunityScoreEngineTests(unittest.TestCase):
         self.assertEqual(first, replay)
         self.assertTrue(all(row.opportunity_score == 50.0 for row in first))
 
-    def test_non_neutral_ties_share_the_first_percentile_rank(self):
+    def test_non_neutral_ties_share_the_average_percentile_rank(self):
         observations = [observation(index) for index in range(1, 9)]
         shared_fields = {
             field.name: getattr(observations[0], field.name)
@@ -184,7 +199,7 @@ class OpportunityScoreEngineTests(unittest.TestCase):
     def test_candidate_snapshot_identity_is_hashed(self):
         observations = [observation(index) for index in range(1, 9)]
         revised = list(observations)
-        revised[0] = observation(1, candidate_snapshot_id="batch-replacement")
+        revised[0] = observation(1, classification_id="batch-replacement")
 
         initial = score_theme(observations, LEG_WEIGHTS)
         replacement = score_theme(revised, LEG_WEIGHTS)
@@ -192,6 +207,35 @@ class OpportunityScoreEngineTests(unittest.TestCase):
         self.assertNotEqual(
             initial[0].cohort_snapshot_hash,
             replacement[0].cohort_snapshot_hash,
+        )
+
+    def test_blom_percentiles_do_not_pin_endpoints(self):
+        results = score_theme([observation(index) for index in range(1, 9)], LEG_WEIGHTS)
+        scores = [row.opportunity_score for row in results]
+
+        self.assertGreater(min(scores), 0.0)
+        self.assertLess(max(scores), 100.0)
+
+    def test_missing_component_does_not_depend_on_its_cohort_distribution(self):
+        baseline = [observation(index) for index in range(1, 9)]
+        baseline[0] = observation(1, contract_award_usd_trailing_90d=None)
+        changed = list(baseline)
+        for index in range(1, 8):
+            changed[index] = observation(
+                index + 1,
+                contract_award_usd_trailing_90d=float((index + 1) ** 5),
+            )
+
+        first = {row.security_sk: row for row in score_theme(baseline, LEG_WEIGHTS)}[1]
+        second = {row.security_sk: row for row in score_theme(changed, LEG_WEIGHTS)}[1]
+
+        self.assertEqual(first.coverage_status, "READY")
+        self.assertEqual(second.coverage_status, "READY")
+        self.assertAlmostEqual(first.smart_money_z, second.smart_money_z, places=12)
+        self.assertAlmostEqual(
+            first.smart_money_contribution,
+            second.smart_money_contribution,
+            places=12,
         )
 
     def test_invalid_runtime_weights_are_rejected(self):
@@ -206,6 +250,35 @@ class OpportunityScoreEngineTests(unittest.TestCase):
 
         self.assertNotIn("narrative_premium", field_names)
         self.assertNotIn("divergence_state", field_names)
+
+    def test_leg_diagnostics_emit_full_matrix_and_pc1_share(self):
+        results = score_theme([
+            observation(index, broad_market_weight=0.005)
+            for index in range(1, 9)
+        ], LEG_WEIGHTS)
+
+        diagnostics = cohort_leg_diagnostics(results)
+
+        self.assertEqual(len(diagnostics["correlations"]), 36)
+        self.assertEqual(diagnostics["complete_case_count"], 8)
+        self.assertIsNotNone(diagnostics["pc1_variance_share"])
+        self.assertGreaterEqual(diagnostics["pc1_variance_share"], 0.0)
+        self.assertLessEqual(diagnostics["pc1_variance_share"], 1.0)
+
+    def test_score_movement_splits_own_and_cohort_effects(self):
+        previous = score_theme([observation(index) for index in range(1, 9)], LEG_WEIGHTS)
+        current_observations = [observation(index) for index in range(1, 9)]
+        current_observations[0] = observation(1, profit_margin=0.9)
+        current = score_theme(current_observations, LEG_WEIGHTS)
+
+        movements = score_movement_attribution(previous, current)
+        first = next(row for row in movements if row["security_sk"] == 1)
+
+        self.assertAlmostEqual(
+            first["score_delta"],
+            first["own_composite_effect"] + first["cohort_effect"],
+            places=10,
+        )
 
 
 class OpportunityScoreArtifactTests(unittest.TestCase):
@@ -235,7 +308,7 @@ class OpportunityScoreArtifactTests(unittest.TestCase):
             "missing_theme_snapshot_provenance",
             "theme_source_freshness",
             "score_stale_dates",
-            'F.col("m.classification_source").alias("candidate_source")',
+            'F.col("c.classification_provenance").alias("classification_provenance")',
             "opportunity_active_weights",
             "score_theme(",
             'F.lit("THEME_CONTEXT_REQUIRED")',
@@ -276,7 +349,7 @@ class OpportunityScoreArtifactTests(unittest.TestCase):
             "CREATE OR ALTER VIEW dbo.v_security_score_attribution",
             "LEFT JOIN dbo.security_daily_features f",
             "f.narrative_premium",
-            "e6b_balanced_v1",
+            "balanced_v1",
         ]:
             self.assertIn(value, score_sql)
         self.assertNotIn("narrative_premium_contribution", score_sql)
@@ -305,7 +378,7 @@ class OpportunityScoreArtifactTests(unittest.TestCase):
         e8_notebook = (ROOT / "fabric" / "nb_05_alpha_vantage_to_gold.Notebook" / "notebook-content.py").read_text(encoding="utf-8")
 
         self.assertIn(
-            "Files/config/e14/d861397782bbb25849db40eb22bb76c574bf76c8be344d8d1328d3c18b559ad2.py",
+            "Files/config/engine/e4c60debd1986f7894d2504326837a0b9da85c2e287e7a3ca5292ab28465b417.py",
             fabric_deploy,
         )
         self.assertIn('ROOT / "engine" / "thesis.py"', fabric_deploy)

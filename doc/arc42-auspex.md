@@ -203,7 +203,7 @@ flowchart LR
 | Smart money | 20% | 90-day insider net-buy ratio, 30-day insider cluster buys, quarter-over-quarter institutional flow, new institutional initiations, log-transformed trailing 90-day contract awards, activist 13D flag | Available ownership and award signals are combined with renormalized weights. Missing observations are not zero activity. |
 | Fundamental health | 20% | Profit margin, year-over-year revenue growth, free-cash-flow yield, inverse net debt/EBITDA | Higher profitability, growth, cash generation, and lower leverage raise the leg. |
 | Valuation brake | 15% | Inverse `fundamental_anchor_z` | Richer-than-expected peer valuation lowers the composite. |
-| Crowding and positioning | 10% | Inverse short-interest ratio and inverse days to cover | Lower short crowding and easier positioning raise the leg. News volume and institutional holder count are not reused here. |
+| Crowding and positioning | 10% | Inverse quarter-over-quarter change in institutional holder count | A decline in distinct active institutional holders raises the under-recognition leg. The level of holder count and news volume are not reused here. |
 
 The target calculation is:
 
@@ -519,7 +519,7 @@ Auspex has no trade execution, broker integration, custody, credit, insurance, o
 - Opportunity Score remains a peer rank, not a calibrated return model. The positive raw floor prevents weak cohorts from forcing increases but is not a calibrated expected-return threshold.
 - Leg correlation remains model risk. Per-cohort matrix/PC1 telemetry exposes concentration, but weights remain fixed until a separate backtest supports a change.
 - Partial-composite variance scaling assumes stable leg variances and does not model predictive uncertainty. Partial scores remain bands and cannot drive score-based trades.
-- Short-interest and days-to-cover availability can make crowding partial during source rollout. The engine must not fall back to news volume.
+- Institutional filings arrive quarterly and with reporting lag, so the crowding leg can be stale or partial between comparable holder snapshots. The engine must not fall back to news volume or holder-count level.
 - Financing data can be stale, incomplete, or ambiguous. Suppression thresholds require an approved backtest and versioned configuration; absent configuration fails closed rather than guessing.
 - The fundamental anchor is a relative multiple model, not discounted cash flow. Young, cyclical, capital-intensive, negative-FCF, or rapidly changing companies can receive severe valuation/fundamental penalties despite strong thematic growth.
 - Recommendation thresholds (`80`, `70`, `60`, and `45`) operate on cohort percentiles. They have not been calibrated to realized forward returns, drawdowns, or probability of outperformance.
