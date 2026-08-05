@@ -1,6 +1,8 @@
 import os
 import time
+import json
 from datetime import date, timedelta
+from pathlib import Path
 
 import httpx
 from azure.identity import DefaultAzureCredential
@@ -9,6 +11,12 @@ from azure.identity import DefaultAzureCredential
 _ARM_SCOPE = "https://management.azure.com/.default"
 _FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 _TERMINAL_FAILURE_STATES = {"cancelled", "deduped", "failed"}
+_NOTEBOOK_PIPELINES = {
+	pipeline["display_name"]: pipeline["notebooks"]
+	for pipeline in json.loads(
+		Path(__file__).with_name("notebook_pipelines.json").read_text(encoding="utf-8")
+	)["pipelines"]
+}
 
 
 def schedule_is_due(schedule, as_of_date):
@@ -45,35 +53,63 @@ def alpha_vantage_profiles(as_of_date):
 	return profiles
 
 
-def _run_fabric_pipeline(context, *, as_of_date, pipeline_name, poll_seconds):
-	job = yield context.call_activity(
-		"start_fabric_daily_pipeline",
-		{"as_of_date": as_of_date, "pipeline_name": pipeline_name},
-	)
-	status_payload = {
-		"job_id": job["job_id"],
-		"pipeline_name": pipeline_name,
-	}
-	while True:
-		status = yield context.call_activity(
-			"get_fabric_daily_pipeline_status",
-			status_payload,
-		)
-		normalized_status = str(status.get("status") or "").lower()
-		if normalized_status == "completed":
-			return job
-		if normalized_status in _TERMINAL_FAILURE_STATES:
-			reason = status.get("failure_reason") or normalized_status
+def _run_fabric_pipeline(
+	context,
+	*,
+	as_of_date,
+	pipeline_name,
+	poll_seconds,
+	start_at=None,
+):
+	notebooks = _NOTEBOOK_PIPELINES.get(pipeline_name)
+	if notebooks is None:
+		raise RuntimeError(f"Unknown Fabric notebook pipeline: {pipeline_name}")
+	if start_at:
+		matches = [index for index, item in enumerate(notebooks) if item["notebook"] == start_at]
+		if len(matches) != 1:
 			raise RuntimeError(
-				f"Fabric pipeline {pipeline_name} failed: {reason}"
+				f"Expected one notebook named {start_at} in {pipeline_name}, found {len(matches)}"
 			)
-		deadline = context.current_utc_datetime + timedelta(seconds=poll_seconds)
-		yield context.create_timer(deadline)
+		notebooks = notebooks[matches[0]:]
+	jobs = []
+	for notebook in notebooks:
+		job = yield context.call_activity(
+			"start_fabric_notebook",
+			{
+				"as_of_date": as_of_date,
+				"pipeline_name": pipeline_name,
+				"notebook": notebook,
+			},
+		)
+		jobs.append(job)
+		status_payload = {
+			"job_id": job["job_id"],
+			"notebook_id": job["notebook_id"],
+			"notebook_name": job["notebook_name"],
+		}
+		while True:
+			status = yield context.call_activity(
+				"get_fabric_notebook_status",
+				status_payload,
+			)
+			normalized_status = str(status.get("status") or "").lower()
+			if normalized_status == "completed":
+				break
+			if normalized_status in _TERMINAL_FAILURE_STATES:
+				reason = status.get("failure_reason") or normalized_status
+				raise RuntimeError(
+					f"Fabric notebook {job['notebook_name']} failed: {reason}"
+				)
+			deadline = context.current_utc_datetime + timedelta(seconds=poll_seconds)
+			yield context.create_timer(deadline)
+	return {"pipeline_name": pipeline_name, "jobs": jobs}
 
 
 def daily_build_orchestrator(context, payload=None):
 	payload = payload or context.get_input() or {}
 	connector_failures = []
+	optional_connector_failures = []
+	optional_source_ids = set(payload.get("optional_source_ids") or [])
 	try:
 		yield context.call_activity("resume_fabric_capacity")
 		for source_id in payload.get("source_ids", []):
@@ -84,7 +120,14 @@ def daily_build_orchestrator(context, payload=None):
 				else [None]
 			)
 			for profile in profiles:
-				options = dict((payload.get("source_options") or {}).get(source_id) or {})
+				profile_options = (
+					((payload.get("source_profile_options") or {}).get(source_id) or {}).get(profile)
+					or {}
+				)
+				options = {
+					**profile_options,
+					**dict((payload.get("source_options") or {}).get(source_id) or {}),
+				}
 				page_field = "filing_limit" if options.get("filing_limit") else "symbol_limit"
 				offset_field = "filing_offset" if page_field == "filing_limit" else "symbol_offset"
 				page_limit = int(options.get(page_field) or 0)
@@ -109,7 +152,10 @@ def daily_build_orchestrator(context, payload=None):
 						activity_payload,
 					)
 					if result.get("status") == "failed":
-						connector_failures.append(source_id)
+						if source_id in optional_source_ids:
+							optional_connector_failures.append(source_id)
+						else:
+							connector_failures.append(source_id)
 						break
 					if result.get("last_event_ts"):
 						last_event_ts = max(last_event_ts or "", result["last_event_ts"])
@@ -156,6 +202,10 @@ def daily_build_orchestrator(context, payload=None):
 			as_of_date=payload["as_of_date"],
 			pipeline_name=core_pipeline_name,
 			poll_seconds=poll_seconds,
+			start_at=payload.get("core_notebook_start_at"),
+		)
+		active_serving = yield context.call_activity(
+			"sync_daily_active_market_projections"
 		)
 
 		narrative = {
@@ -206,8 +256,10 @@ def daily_build_orchestrator(context, payload=None):
 		result = {
 			"status": "completed",
 			"connector_failures": [],
-			"core_pipeline_job_id": core_job["job_id"],
-			"publish_pipeline_job_id": publish_job["job_id"],
+			"optional_connector_failures": sorted(set(optional_connector_failures)),
+			"core_notebook_job_ids": [job["job_id"] for job in core_job["jobs"]],
+			"publish_notebook_job_ids": [job["job_id"] for job in publish_job["jobs"]],
+			"active_serving": active_serving,
 			"narrative": narrative,
 			"warehouse": warehouse,
 			"serving": serving,
@@ -217,19 +269,19 @@ def daily_build_orchestrator(context, payload=None):
 			"record_daily_build_completion",
 			{
 				"as_of_date": payload["as_of_date"],
-				"core_pipeline_job_id": core_job["job_id"],
-				"publish_pipeline_job_id": publish_job["job_id"],
+				"core_notebook_job_ids": [job["job_id"] for job in core_job["jobs"]],
+				"publish_notebook_job_ids": [job["job_id"] for job in publish_job["jobs"]],
 			},
 		)
+		yield context.call_activity("suspend_fabric_capacity")
 		return result
 	except Exception as exc:
 		yield context.call_activity(
 			"record_daily_build_failure",
 			{"as_of_date": payload.get("as_of_date"), "error": str(exc)},
 		)
-		raise
-	finally:
 		yield context.call_activity("suspend_fabric_capacity")
+		raise
 
 
 def promote_daily_warehouse_snapshot(
@@ -438,6 +490,70 @@ class FabricDailyBuildClient:
 				f"Expected one Fabric DataPipeline named {pipeline_name}, found {len(matches)}"
 			)
 		return matches[0]["id"]
+
+	def _notebook_id(self, notebook_name):
+		response = self.http.get(
+			f"{self._workspace_url}/items",
+			headers=self._headers(_FABRIC_SCOPE),
+			params={"type": "Notebook"},
+		)
+		response.raise_for_status()
+		matches = [
+			item for item in response.json().get("value", [])
+			if item.get("displayName") == notebook_name and item.get("type") == "Notebook"
+		]
+		if len(matches) != 1:
+			raise RuntimeError(
+				f"Expected one Fabric Notebook named {notebook_name}, found {len(matches)}"
+			)
+		return matches[0]["id"]
+
+	def start_notebook(self, as_of_date, notebook):
+		notebook_name = notebook["notebook"]
+		notebook_id = self._notebook_id(notebook_name)
+		parameters = {}
+		for name, configured in (notebook.get("parameters") or {}).items():
+			value = as_of_date if configured == "@pipeline().parameters.as_of_date" else configured
+			parameters[name] = {"value": str(value), "type": "string"}
+		response = self.http.post(
+			f"{self._workspace_url}/items/{notebook_id}/jobs/instances",
+			headers=self._headers(_FABRIC_SCOPE),
+			params={"jobType": "RunNotebook"},
+			json={"executionData": {"parameters": parameters}},
+		)
+		response.raise_for_status()
+		location = response.headers.get("Location")
+		if not location:
+			raise RuntimeError("Fabric did not return a notebook job location")
+		return {
+			"job_id": location.rstrip("/").split("/")[-1],
+			"notebook_id": notebook_id,
+			"notebook_name": notebook_name,
+		}
+
+	def get_notebook_status(self, job_id, notebook_id):
+		url = f"{self._workspace_url}/items/{notebook_id}/jobs/instances/{job_id}"
+		for attempt in range(3):
+			try:
+				response = self.http.get(
+					url,
+					headers=self._headers(_FABRIC_SCOPE),
+				)
+				response.raise_for_status()
+				break
+			except httpx.HTTPStatusError as exc:
+				status_code = exc.response.status_code
+				if attempt == 2 or (status_code != 429 and status_code < 500):
+					raise
+			except httpx.TransportError:
+				if attempt == 2:
+					raise
+			time.sleep(2 ** attempt)
+		body = response.json()
+		return {
+			"status": body.get("status"),
+			"failure_reason": body.get("failureReason"),
+		}
 
 	def start_pipeline(self, as_of_date, pipeline_name=None):
 		pipeline_name = pipeline_name or self.pipeline_name

@@ -224,6 +224,15 @@ class E18DiscussionTests(unittest.TestCase):
             "Morning summary", "Email unavailable",
         ):
             self.assertIn(text, app)
+        self.assertNotIn(
+            'className={`advisor-turn ${exchange.status}`} data-ai-generated="true"',
+            app,
+        )
+        self.assertIn('<p data-ai-generated="true">{exchange.answer}</p>', app)
+        self.assertIn(
+            'className="discussion-limitations" data-ai-generated="true"',
+            app,
+        )
 
 
 if __name__ == "__main__":

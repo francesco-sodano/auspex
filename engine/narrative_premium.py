@@ -2,6 +2,7 @@
 
 from dataclasses import asdict, dataclass
 from datetime import date
+from decimal import Decimal
 import hashlib
 import json
 import math
@@ -90,12 +91,19 @@ def _finite(value: float | None) -> float | None:
 
 
 def _canonical_hash(payload: object) -> str:
+    def serialize(value):
+        if isinstance(value, date):
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return float(value)
+        raise TypeError(f"Unsupported canonical hash value: {type(value).__name__}")
+
     encoded = json.dumps(
         payload,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
-        default=lambda value: value.isoformat() if isinstance(value, date) else value,
+        default=serialize,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -321,10 +329,10 @@ def build_narrative_premiums(
             "security_sk": row.security_sk,
             "as_of_date": as_of.isoformat(),
             "anchor": {
-                "fundamental_anchor_z": row.fundamental_anchor_z,
+                "fundamental_anchor_z": _finite(row.fundamental_anchor_z),
                 "anchor_method": row.anchor_method,
                 "n_peers": row.anchor_n_peers,
-                "r2_sector": row.anchor_r2_sector,
+                "r2_sector": _finite(row.anchor_r2_sector),
                 "imputed_flags": row.anchor_imputed_flags,
                 "model_version": row.e20_model_version,
                 "generation": row.e20_generation,
@@ -333,10 +341,10 @@ def build_narrative_premiums(
                 "knowledge_date": row.anchor_knowledge_date.isoformat() if row.anchor_knowledge_date else None,
             },
             "narrative": {
-                "narrative_intensity": row.narrative_intensity,
+                "narrative_intensity": _finite(row.narrative_intensity),
                 "coverage_status": row.narrative_coverage_status,
-                "available_weight": row.narrative_available_weight,
-                "extraction_coverage": row.narrative_extraction_coverage,
+                "available_weight": _finite(row.narrative_available_weight),
+                "extraction_coverage": _finite(row.narrative_extraction_coverage),
                 "component_mask": list(sorted(row.narrative_component_mask)),
                 "coverage_reasons": list(sorted(row.narrative_coverage_reasons)),
                 "model_version": row.e21_model_version,

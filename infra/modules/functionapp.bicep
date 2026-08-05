@@ -338,7 +338,7 @@ var ingestionExtraSettings = isIngestion ? [
   }
   {
     name: 'DAILY_BUILD_SCHEDULE'
-    value: '0 0 1 * * *'
+    value: '0 0 1,4,7 * * *'
   }
   {
     name: 'DAILY_BUILD_POLL_SECONDS'
@@ -346,11 +346,19 @@ var ingestionExtraSettings = isIngestion ? [
   }
   {
     name: 'DAILY_BUILD_NARRATIVE_PAGE_SIZE'
-    value: '20'
+    value: '5'
   }
   {
     name: 'DAILY_BUILD_NARRATIVE_MAX_WORKERS'
-    value: '2'
+    value: '1'
+  }
+  {
+    name: 'DAILY_BUILD_PRICE_PAGE_SIZE'
+    value: '50'
+  }
+  {
+    name: 'DAILY_BUILD_SEC_PAGE_SIZE'
+    value: '50'
   }
   {
     name: 'INGESTION_UNIVERSE_CONTAINER'
@@ -363,6 +371,14 @@ var ingestionExtraSettings = isIngestion ? [
   {
     name: 'AI_SEARCH_EVIDENCE_INDEX'
     value: 'idx-news-filings'
+  }
+  {
+    name: 'AI_SEARCH_BATCH_SIZE'
+    value: '128'
+  }
+  {
+    name: 'AI_SEARCH_EMBEDDING_WORKERS'
+    value: '2'
   }
   {
     name: 'AZURE_OPENAI_ENDPOINT'

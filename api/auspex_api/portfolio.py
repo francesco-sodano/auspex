@@ -220,6 +220,8 @@ class MarketDataRepository(Protocol):
 
     def score(self, security_sk: int) -> dict | None: ...
 
+    def classification(self, security_sk: int) -> dict | None: ...
+
     def fx_rate(self, from_currency: str, to_currency: str, as_of: str | None = None) -> dict | None: ...
 
 
@@ -277,6 +279,7 @@ class InMemoryMarketDataRepository:
         fx_rates: dict | None = None,
         price_histories: dict | None = None,
         scores: dict | None = None,
+        classifications: dict | None = None,
     ) -> None:
         self._quotes = {str(key).upper(): value for key, value in (quotes or {}).items()}
         self._fx_rates = {
@@ -288,6 +291,9 @@ class InMemoryMarketDataRepository:
             for key, value in (price_histories or {}).items()
         }
         self._scores = {int(key): value for key, value in (scores or {}).items()}
+        self._classifications = {
+            int(key): value for key, value in (classifications or {}).items()
+        }
 
     def quote(self, ticker: str, security_sk: int | None = None) -> dict | None:
         return self._quotes.get(ticker.upper())
@@ -297,6 +303,9 @@ class InMemoryMarketDataRepository:
 
     def score(self, security_sk: int) -> dict | None:
         return self._scores.get(int(security_sk))
+
+    def classification(self, security_sk: int) -> dict | None:
+        return self._classifications.get(int(security_sk))
 
     def fx_rate(self, from_currency: str, to_currency: str, as_of: str | None = None) -> dict | None:
         source = from_currency.upper()
@@ -1576,6 +1585,11 @@ class PortfolioService:
                 if position["security_sk"] is not None
                 else None
             )
+            classification = (
+                self._market_data.classification(position["security_sk"])
+                if position["security_sk"] is not None
+                else None
+            )
             history_document = self._market_data.price_history(
                 position["ticker"], position["security_sk"]
             )
@@ -1630,7 +1644,11 @@ class PortfolioService:
                     )
                     _add_amount(
                         theme_exposure_base,
-                        str((score or {}).get("theme_id") or "Unclassified"),
+                        str(
+                            (score or {}).get("theme_id")
+                            or (classification or {}).get("theme_id")
+                            or "Unclassified"
+                        ),
                         conversion[0],
                     )
                     _add_amount(
@@ -1670,7 +1688,12 @@ class PortfolioService:
                 "opportunity_score": (score or {}).get("opportunity_score"),
                 "score_as_of": (score or {}).get("as_of"),
                 "score_coverage_status": (score or {}).get("coverage_status"),
-                "theme_id": (score or {}).get("theme_id"),
+                "theme_id": (
+                    (score or {}).get("theme_id")
+                    or (classification or {}).get("theme_id")
+                ),
+                "theme_provenance": (classification or {}).get("provenance"),
+                "theme_confidence": (classification or {}).get("confidence"),
                 "weight": None,
                 "valuation_status": (
                     "valued"

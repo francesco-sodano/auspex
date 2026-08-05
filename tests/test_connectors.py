@@ -44,8 +44,33 @@ class HttpxNetworkError(Exception):
     pass
 
 
-class HttpxResponse:
+class HttpxTransportError(Exception):
     pass
+
+
+class HttpxConnectTimeout(HttpxTransportError):
+    def __init__(self, message, request=None):
+        super().__init__(message)
+        self.request = request
+
+
+class HttpxHttpStatusError(Exception):
+    def __init__(self, message, request=None, response=None):
+        super().__init__(message)
+        self.request = request
+        self.response = response
+
+
+class HttpxRequest:
+    def __init__(self, method, url):
+        self.method = method
+        self.url = url
+
+
+class HttpxResponse:
+    def __init__(self, status_code=None, request=None):
+        self.status_code = status_code
+        self.request = request
 
 
 azure_identity_mod.DefaultAzureCredential = DefaultAzureCredential
@@ -54,6 +79,10 @@ azure_cosmos_exceptions_mod.CosmosResourceNotFoundError = CosmosResourceNotFound
 azure_storage_filedatalake_mod.DataLakeServiceClient = DataLakeServiceClient
 httpx_mod.TimeoutException = HttpxTimeoutException
 httpx_mod.NetworkError = HttpxNetworkError
+httpx_mod.TransportError = HttpxTransportError
+httpx_mod.ConnectTimeout = HttpxConnectTimeout
+httpx_mod.HTTPStatusError = HttpxHttpStatusError
+httpx_mod.Request = HttpxRequest
 httpx_mod.Response = HttpxResponse
 
 sys.modules.setdefault("azure", azure_mod)
@@ -624,6 +653,47 @@ class BackfillRunnerContractTests(unittest.TestCase):
 
 
 class PricesEodConnectorTests(unittest.TestCase):
+    def test_partial_trading_session_fails_instead_of_advancing_watermark(self):
+        os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
+        os.environ["AV_RPM"] = "100000"
+
+        def fake_http_get(url, params=None, **kwargs):
+            series = {
+                "2026-08-04": {
+                    "1. open": "10",
+                    "2. high": "11",
+                    "3. low": "9",
+                    "4. close": "10.5",
+                    "5. volume": "100",
+                }
+            } if params["symbol"] == "AAPL" else {}
+            return FakeHttpResponse({"Time Series (Daily)": series})
+
+        with patch("prices_eod.connector.http_get", side_effect=fake_http_get):
+            with self.assertRaisesRegex(RuntimeError, "landing is incomplete"):
+                PricesEodConnector(
+                    FakeControlPlane(),
+                    FakeUniverseBronzeWriter(["AAPL", "MSFT"]),
+                    since_date="2026-08-04",
+                    to_date="2026-08-04",
+                ).fetch(None)
+
+    def test_provider_error_fails_instead_of_returning_empty_batch(self):
+        os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
+        os.environ["AV_RPM"] = "100000"
+
+        with patch(
+            "prices_eod.connector.http_get",
+            return_value=FakeHttpResponse({"Information": "rate limit exceeded"}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "response failed for AAPL"):
+                PricesEodConnector(
+                    FakeControlPlane(),
+                    FakeUniverseBronzeWriter(["AAPL"]),
+                    since_date="2026-08-04",
+                    to_date="2026-08-04",
+                ).fetch(None)
+
     def test_watermark_stops_at_latest_landed_trading_session(self):
         os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
         os.environ["AV_RPM"] = "100000"

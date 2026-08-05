@@ -60,14 +60,14 @@ from pyspark.sql.types import (
     StringType, StructField, StructType, TimestampType,
 )
 
-OPPORTUNITY_ENGINE_LAKEHOUSE_PATH = "Files/config/e14/c2e46ed74b73c478528b4b39177990e988f9477dbd1be91c9d756eb5b844adab.py"
-OPPORTUNITY_ENGINE_SHA256 = "c2e46ed74b73c478528b4b39177990e988f9477dbd1be91c9d756eb5b844adab"
+OPPORTUNITY_ENGINE_LAKEHOUSE_PATH = "Files/config/e14/d861397782bbb25849db40eb22bb76c574bf76c8be344d8d1328d3c18b559ad2.py"
+OPPORTUNITY_ENGINE_SHA256 = "d861397782bbb25849db40eb22bb76c574bf76c8be344d8d1328d3c18b559ad2"
 
 opportunity_engine_source = mssparkutils.fs.head(OPPORTUNITY_ENGINE_LAKEHOUSE_PATH, 1024 * 1024)
 opportunity_engine_bytes = opportunity_engine_source.encode("utf-8")
 if hashlib.sha256(opportunity_engine_bytes).hexdigest() != OPPORTUNITY_ENGINE_SHA256:
     raise RuntimeError("E14/E6b engine resource hash mismatch")
-opportunity_engine_path = os.path.join(tempfile.gettempdir(), "thesis_e6b_v1.py")
+opportunity_engine_path = os.path.join(tempfile.gettempdir(), "thesis_e6b_v2.py")
 with open(opportunity_engine_path, "wb") as opportunity_engine_file:
     opportunity_engine_file.write(opportunity_engine_bytes)
 opportunity_engine_spec = importlib.util.spec_from_file_location("thesis", opportunity_engine_path)
@@ -155,6 +155,7 @@ def _replace_delta_projection(table_name: str, select_sql: str) -> None:
 for required in [
     "dim_security", "dim_date", "fact_market_daily", "fact_insider_txn",
     "silver_theme_membership", "fact_theme_membership",
+    "security_theme_classification",
     "fact_fundamental_anchor", "fact_narrative_intensity", "narrative_snapshot_manifest",
     "fundamental_anchor_snapshot_manifest", "fact_narrative_premium",
     "narrative_premium_snapshot_manifest",
@@ -162,16 +163,18 @@ for required in [
     _require_table(required)
 
 if parsed_priority_as_of_date is not None:
-    priority_market_date_exists = not (
+    resolved_priority_as_of_date = (
         spark.table("fact_market_daily")
-        .filter(F.col("event_date") == F.lit(parsed_priority_as_of_date))
-        .limit(1)
-        .isEmpty()
+        .filter(F.col("event_date") <= F.lit(parsed_priority_as_of_date))
+        .agg(F.max("event_date").alias("event_date"))
+        .first()
+        .event_date
     )
-    if not priority_market_date_exists:
+    if resolved_priority_as_of_date is None:
         raise ValueError(
-            "priority_as_of_date must exist in fact_market_daily before metrics rebuild"
+            "priority_as_of_date has no market session on or before it"
         )
+    parsed_priority_as_of_date = resolved_priority_as_of_date
 
 _ensure_columns("fact_theme_membership", {
     "snapshot_batch_id": "snapshot_batch_id STRING",
@@ -575,13 +578,6 @@ spark.sql("""
 """)
 DeltaTable.forName(spark, "fact_theme_opportunity_score").delete()
 DeltaTable.forName(spark, "opportunity_score_snapshot_manifest").delete()
-for derived_table in [
-    "fact_narrative_features", "fact_narrative_intensity", "narrative_snapshot_manifest",
-    "fact_narrative_premium", "fact_narrative_premium_evidence",
-    "narrative_premium_snapshot_manifest", "decision_log",
-]:
-    if spark.catalog.tableExists(derived_table):
-        DeltaTable.forName(spark, derived_table).delete()
 
 # METADATA ********************
 
@@ -851,6 +847,17 @@ theme_source_freshness = (
     .groupBy(F.col("d.as_of").alias("as_of"))
     .agg(F.max(F.col("m.snapshot_ingest_ts")).alias("theme_source_updated_at"))
 )
+classification_source_freshness = (
+    spark.table("security_daily_features").select("as_of").distinct().alias("d")
+    .join(
+        spark.table("security_theme_classification").alias("c"),
+        (F.col("c.effective_from") <= F.col("d.as_of"))
+        & (F.col("c.effective_to").isNull() | (F.col("d.as_of") < F.col("c.effective_to"))),
+        "inner",
+    )
+    .groupBy(F.col("d.as_of").alias("as_of"))
+    .agg(F.max(F.col("c.updated_at")).alias("classification_source_updated_at"))
+)
 score_manifest_freshness = (
     spark.table("opportunity_score_snapshot_manifest")
     .filter(
@@ -874,10 +881,12 @@ active_weight_updated_at = (
 )
 score_stale_dates = (
     theme_source_freshness
+    .join(classification_source_freshness, "as_of", "left")
     .join(score_manifest_freshness, "as_of", "left")
     .filter(
         F.col("score_completed_at").isNull()
         | (F.col("theme_source_updated_at") > F.col("score_completed_at"))
+        | (F.col("classification_source_updated_at") > F.col("score_completed_at"))
         | (
             F.lit(active_weight_updated_at).isNotNull()
             & (F.lit(active_weight_updated_at) > F.col("score_completed_at"))
@@ -1799,9 +1808,59 @@ latest_theme_memberships = (
         F.max(F.col("m.snapshot_batch_id")).alias("snapshot_batch_id"),
         F.max(F.col("m.snapshot_ingest_ts")).alias("snapshot_ingest_ts"),
     )
+    .withColumn("classification_source", F.lit("TRS"))
+)
+classification_window = Window.partitionBy("date_sk", "security_sk").orderBy(
+    F.when(F.col("provenance") == F.lit("manual"), F.lit(0)).otherwise(F.lit(1)),
+    F.col("confidence").desc(),
+    F.col("updated_at").desc(),
+    F.col("classification_id"),
+)
+resolved_theme_classifications = (
+    theme_dates.alias("d")
+    .join(
+        spark.table("security_theme_classification").alias("c"),
+        (F.col("c.effective_from") <= F.col("d.as_of"))
+        & (F.col("c.effective_to").isNull() | (F.col("d.as_of") < F.col("c.effective_to")))
+        & F.col("c.provenance").isin("manual", "llm"),
+        "inner",
+    )
+    .select(
+        F.col("d.date_sk").alias("date_sk"),
+        F.col("d.as_of").alias("as_of"),
+        F.col("c.security_sk").alias("security_sk"),
+        F.col("c.theme_id").alias("theme_id"),
+        F.col("c.confidence").alias("confidence"),
+        F.col("c.provenance").alias("provenance"),
+        F.col("c.classification_id").alias("classification_id"),
+        F.col("c.classification_version").alias("classification_version"),
+        F.col("c.effective_from").alias("effective_from"),
+        F.col("c.updated_at").alias("updated_at"),
+    )
+    .withColumn("classification_row_number", F.row_number().over(classification_window))
+    .filter(F.col("classification_row_number") == 1)
+    .drop("classification_row_number")
+)
+classified_theme_memberships = (
+    latest_theme_memberships.alias("m")
+    .join(
+        resolved_theme_classifications.select("date_sk", "security_sk").alias("c"),
+        ["date_sk", "security_sk"],
+        "left_anti",
+    )
+    .unionByName(
+        resolved_theme_classifications.select(
+            "date_sk", "as_of", "theme_id", "security_sk",
+            F.lit(None).cast(DoubleType()).alias("membership_weight"),
+            F.col("effective_from").alias("membership_knowledge_date"),
+            F.col("classification_id").alias("snapshot_batch_id"),
+            F.col("updated_at").alias("snapshot_ingest_ts"),
+            F.upper("provenance").alias("classification_source"),
+        )
+    )
 )
 opportunity_candidates = (
-    latest_theme_memberships.alias("m")
+    classified_theme_memberships.alias("m")
     .join(
         spark.table("security_daily_features").alias("f"),
         (F.col("m.security_sk") == F.col("f.security_sk"))
@@ -1813,7 +1872,7 @@ opportunity_candidates = (
         F.col("m.security_sk").alias("security_sk"),
         F.col("m.date_sk").alias("date_sk"),
         F.col("m.as_of").alias("as_of"),
-        F.lit("TRS").alias("candidate_source"),
+        F.col("m.classification_source").alias("candidate_source"),
         F.col("m.snapshot_batch_id").alias("candidate_snapshot_id"),
         F.col("m.snapshot_ingest_ts").alias("candidate_snapshot_ingest_ts"),
         F.col("m.membership_weight").alias("membership_weight"),
@@ -2131,7 +2190,7 @@ _replace_delta_projection("v_opportunity_legs", """
          AND m.weight_version = s.weight_version
          AND m.status = 'completed'
         WHERE s.max_knowledge_date <= s.as_of
-            AND s.model_version = 'e6b_v1'
+            AND s.model_version = 'e6b_v2'
             AND s.weight_version = 'e6b_balanced_v1'
 """)
 
@@ -2155,7 +2214,7 @@ _replace_delta_projection("v_opportunity_score", """
         LEFT JOIN security_daily_features f
             ON f.security_sk = s.security_sk AND f.date_sk = s.date_sk
         WHERE s.max_knowledge_date <= s.as_of
-            AND s.model_version = 'e6b_v1'
+            AND s.model_version = 'e6b_v2'
             AND s.weight_version = 'e6b_balanced_v1'
 """)
 
@@ -2193,7 +2252,7 @@ for attribution_leg in OPPORTUNITY_LEG_WEIGHTS:
                  AND w.version = s.weight_version
                  AND w.is_active = true
                 WHERE s.max_knowledge_date <= s.as_of
-                    AND s.model_version = 'e6b_v1'
+                    AND s.model_version = 'e6b_v2'
                     AND s.weight_version = 'e6b_balanced_v1'
         """)
 _replace_delta_projection(
@@ -2277,7 +2336,7 @@ duplicate_theme_scores = spark.sql("""
 invalid_theme_score_contract = spark.sql("""
     SELECT COUNT(*) AS n
     FROM fact_theme_opportunity_score
-    WHERE model_version <> 'e6b_v1'
+    WHERE model_version <> 'e6b_v2'
        OR weight_version <> 'e6b_balanced_v1'
        OR coverage_status NOT IN ('READY', 'PARTIAL', 'WITHHELD')
        OR coverage_reasons_json IS NULL

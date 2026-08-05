@@ -90,6 +90,7 @@ class PricesEodConnector(BaseConnector):
             )
 
         records = []
+        landed_symbols = set()
         print(
             f"Fetching {len(symbols)} prices_eod symbols "
             f"(offset={self._symbol_offset}, total_universe={total_symbols}, rpm={self._requests_per_minute_value})"
@@ -107,6 +108,18 @@ class PricesEodConnector(BaseConnector):
             )
             data = resp.json()
             series = data.get("Time Series (Daily)", {})
+            provider_error = next(
+                (
+                    str(data.get(field) or "").strip()
+                    for field in ("Error Message", "Information", "Note")
+                    if str(data.get(field) or "").strip()
+                ),
+                "",
+            )
+            if provider_error and not series:
+                raise RuntimeError(
+                    f"Alpha Vantage price response failed for {symbol}: {provider_error}"
+                )
             elapsed = time.monotonic() - t0
             if elapsed < self._min_interval_s:
                 time.sleep(self._min_interval_s - elapsed)
@@ -114,6 +127,7 @@ class PricesEodConnector(BaseConnector):
                 day = date.fromisoformat(day_str)
                 if day < from_date or day > to_date:
                     continue
+                landed_symbols.add(symbol)
                 records.append({
                     "symbol": symbol,
                     "date": day_str,
@@ -133,6 +147,13 @@ class PricesEodConnector(BaseConnector):
                 partition_date=to_date.isoformat(),
                 watermark_from=from_date.isoformat(),
                 has_more=has_more,
+            )
+        missing_symbols = sorted(set(symbols) - landed_symbols)
+        if missing_symbols:
+            raise RuntimeError(
+                "Alpha Vantage price landing is incomplete: "
+                f"landed={len(landed_symbols)}, expected={len(symbols)}, "
+                f"missing={','.join(missing_symbols[:10])}"
             )
         latest_event_date = max(record["date"] for record in records)
         return Batch(

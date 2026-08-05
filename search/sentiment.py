@@ -43,6 +43,19 @@ class CosmosSentimentCache:
                 raise RuntimeError("sentiment cache identity has conflicting output")
             return existing
 
+    def list_version(self, model_version: str, prompt_version: str) -> list[dict]:
+        return list(self._container.query_items(
+            query=(
+                "SELECT * FROM c WHERE c.model_version = @model_version "
+                "AND c.prompt_version = @prompt_version"
+            ),
+            parameters=[
+                {"name": "@model_version", "value": model_version},
+                {"name": "@prompt_version", "value": prompt_version},
+            ],
+            enable_cross_partition_query=True,
+        ))
+
 
 class SentimentService:
     def __init__(self, chat_client, cache: CosmosSentimentCache, model_version: str) -> None:
@@ -61,6 +74,9 @@ class SentimentService:
 
     def cached(self, document: dict) -> dict | None:
         return self._cache.get(self.cache_key(document))
+
+    def cached_documents(self) -> list[dict]:
+        return self._cache.list_version(self._model_version, PROMPT_VERSION)
 
     def score(self, document: dict) -> tuple[dict, bool]:
         cache_key = self.cache_key(document)
@@ -92,11 +108,15 @@ class SentimentService:
 
 
 def enrich_with_cached_sentiment(documents: list[dict], service: SentimentService) -> int:
+    cached_by_revision = {
+        str(document["document_revision_hash"]): document
+        for document in service.cached_documents()
+    }
     enriched = 0
     for document in documents:
         if document.get("source_type") != "news":
             continue
-        cached = service.cached(document)
+        cached = cached_by_revision.get(str(document.get("revision_hash") or ""))
         if cached is None:
             continue
         document.update({

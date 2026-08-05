@@ -51,6 +51,23 @@ BEGIN
     );
 END;
 
+IF OBJECT_ID('dbo.security_theme_classification', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.security_theme_classification (
+        classification_id       CHAR(64)      NOT NULL,
+        security_sk             BIGINT        NOT NULL,
+        ticker                  VARCHAR(16)   NOT NULL,
+        theme_id                VARCHAR(128)  NOT NULL,
+        provenance              VARCHAR(16)   NOT NULL,
+        confidence              FLOAT         NOT NULL,
+        rationale               VARCHAR(1000) NOT NULL,
+        effective_from          DATE          NOT NULL,
+        effective_to            DATE          NULL,
+        classification_version  VARCHAR(64)   NOT NULL,
+        updated_at              DATETIME2(6)  NOT NULL
+    );
+END;
+
 IF OBJECT_ID('dbo.dim_date', 'U') IS NULL
 BEGIN
     CREATE TABLE dbo.dim_date (

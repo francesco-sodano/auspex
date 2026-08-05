@@ -170,8 +170,9 @@ class E16AgentTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         openai = (ROOT / "infra" / "modules" / "openai.bicep").read_text(encoding="utf-8")
         deployment = (
-            ROOT / "scripts" / "deploy_e7_functions.ps1"
+            ROOT / ".github" / "workflows" / "deploy.yml"
         ).read_text(encoding="utf-8")
+        web = (ROOT / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
 
         self.assertIn('route="recommendations/{recommendation_id}/explain"', function_app)
         self.assertNotIn("owner_user_sk", function_app.split(
@@ -183,7 +184,10 @@ class E16AgentTests(unittest.TestCase):
         self.assertIn("DECISION_LOG_CONTAINER", function_infra)
         self.assertIn("AZURE_OPENAI_CHAT_MODEL_VERSION", function_infra)
         self.assertIn("webApiFuncOpenAiRole", openai)
-        self.assertIn('Copy-Item (Join-Path $repositoryRoot "agent")', deployment)
+        self.assertIn("for shared in search engine agent prompts", deployment)
+        self.assertIn("You are interacting with an AI system", web)
+        self.assertIn('data-ai-generated="true"', web)
+        self.assertIn("AI-generated explanation", web)
 
     def test_agent_instructions_forbid_action_math_and_uncited_claims(self):
         instructions = (

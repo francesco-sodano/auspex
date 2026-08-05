@@ -58,7 +58,7 @@ METRIC_METADATA = {
     "opportunity_score": {
         "key": "opportunity_score",
         "display_name": "Opportunity Score",
-        "plain_description": "Transparent 0-100 heuristic combining six thesis legs; not a return forecast.",
+        "plain_description": "Peer-relative 0-100 percentile of six thesis legs; not an absolute quality score or return forecast.",
         "unit": "score_0_100",
         "direction": "higher_is_better",
         "tier": "simple",

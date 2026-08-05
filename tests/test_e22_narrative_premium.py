@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 import json
 import math
 from statistics import fmean, stdev
@@ -66,6 +67,21 @@ def observation(
 
 
 class NarrativePremiumEngineTests(unittest.TestCase):
+    def test_spark_decimal_inputs_are_canonicalized_portably(self):
+        rows = [
+            observation(index, Decimal("0.25"), Decimal("50.0"))
+            for index in range(1, 9)
+        ]
+
+        results = build_narrative_premiums(rows)
+        self.assertEqual(len(results), 8)
+        for result in results:
+            json.dumps(result.evidence_pack)
+        self.assertEqual(
+            premium_input_snapshot_hash(rows),
+            premium_input_snapshot_hash(list(reversed(rows))),
+        )
+
     def test_ols_attribution_reconciles_exactly_and_is_order_stable(self):
         intensities = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0]
         mean_intensity = fmean(intensities)
@@ -329,8 +345,8 @@ class NarrativePremiumArtifactTests(unittest.TestCase):
         self.assertEqual(parameter_cells, ['as_of_date = ""'])
         for value in [
             'MODEL_VERSION = "e22_v4"',
-            'ENGINE_LAKEHOUSE_PATH = "Files/config/e22/09e9532dd031ecb45e8e3591986164d763a4ebbec3da43246c8ca8040aaa02ea.py"',
-            'ENGINE_SHA256 = "09e9532dd031ecb45e8e3591986164d763a4ebbec3da43246c8ca8040aaa02ea"',
+            'ENGINE_LAKEHOUSE_PATH = "Files/config/e22/9a8314cfd0990f897992c7e26ba9c2daf060f8af7c5c0a78e0d656a3821e2b07.py"',
+            'ENGINE_SHA256 = "9a8314cfd0990f897992c7e26ba9c2daf060f8af7c5c0a78e0d656a3821e2b07"',
             "_portable_snapshot_fingerprint",
             "build_narrative_premiums",
             "PreviousPremiumState",
@@ -363,9 +379,9 @@ class NarrativePremiumArtifactTests(unittest.TestCase):
             ROOT / "fabric" / "nb_12_narrative_premium.Notebook" / "notebook-content.py",
             ROOT / "fabric" / "warehouse" / "metrics" / "17_narrative_premium.sql",
             ROOT / "fabric" / "warehouse" / "metrics" / "18_promote_narrative_premium_snapshot.sql",
-            ROOT / "scripts" / "deploy_e22_fabric.ps1",
-            ROOT / "scripts" / "deploy_e22_warehouse.py",
-            ROOT / "scripts" / "run_e22_pipeline.ps1",
+            ROOT / "scripts" / "deploy_fabric_items.py",
+            ROOT / "scripts" / "deploy_fabric_pipeline.py",
+            ROOT / "scripts" / "deploy_warehouse_schema.py",
         ]:
             self.assertTrue(path.exists(), path)
 
@@ -403,6 +419,33 @@ class NarrativePremiumArtifactTests(unittest.TestCase):
             'F.col("narrative_premium").isNull().alias("narrative_premium")',
         ]:
             self.assertIn(value, metrics_notebook)
+        for upstream_table in (
+            "fact_narrative_features",
+            "fact_narrative_intensity",
+            "narrative_snapshot_manifest",
+            "fact_narrative_premium",
+            "fact_narrative_premium_evidence",
+            "narrative_premium_snapshot_manifest",
+            "decision_log",
+        ):
+            self.assertNotIn(
+                f'DeltaTable.forName(spark, "{upstream_table}").delete()',
+                metrics_notebook,
+            )
+
+        premium_notebook = notebook_code("nb_12_narrative_premium")
+        fact_guard = premium_notebook.index(
+            'and not spark.table("fact_narrative_premium").isEmpty()'
+        )
+        empty_guard = premium_notebook.index(
+            "if not latest_previous_manifests.isEmpty():"
+        )
+        previous_date = premium_notebook.index(
+            'F.max("as_of_date").alias("as_of_date")',
+            empty_guard,
+        )
+        self.assertLess(fact_guard, empty_guard)
+        self.assertLess(empty_guard, previous_date)
         for value in [
             "narrative_premium_coverage_status",
             "narrative_premium_coverage_reasons_json",
@@ -449,46 +492,36 @@ class NarrativePremiumArtifactTests(unittest.TestCase):
             self.assertIn(value, promotion_sql)
         self.assertNotIn("INSERT INTO #premium_result", promotion_sql)
 
-    def test_deployment_runners_cover_engine_notebooks_and_promotions(self):
-        fabric_runner = (ROOT / "scripts" / "deploy_e22_fabric.ps1").read_text(encoding="utf-8")
-        warehouse_runner = (ROOT / "scripts" / "deploy_e22_warehouse.py").read_text(encoding="utf-8")
-        pipeline_runner = (ROOT / "scripts" / "run_e22_pipeline.ps1").read_text(encoding="utf-8")
+    def test_generic_deployment_covers_engine_notebooks_and_promotions(self):
+        fabric_runner = (ROOT / "scripts" / "deploy_fabric_items.py").read_text(encoding="utf-8")
+        warehouse_runner = (ROOT / "scripts" / "deploy_warehouse_schema.py").read_text(encoding="utf-8")
+        pipeline_manifest = (ROOT / "fabric" / "pipelines" / "daily_build.json").read_text(encoding="utf-8")
 
         for value in [
-            "Files/config/e22/09e9532dd031ecb45e8e3591986164d763a4ebbec3da43246c8ca8040aaa02ea.py",
+            "Files/config/e22/9a8314cfd0990f897992c7e26ba9c2daf060f8af7c5c0a78e0d656a3821e2b07.py",
             "Files/config/e20/84641443bde957496881c8cce27b4c8a0dda7f2b5b94eca79b4fdd6213a9a14b.py",
-            'Deploy-Notebook -DisplayName "nb_09_fundamental_anchor"',
-            'Deploy-Notebook -DisplayName "nb_12_narrative_premium"',
-            'Deploy-Notebook -DisplayName "nb_04_metrics"',
-            "Engine hash mismatch for",
-            "Content-addressed target mismatch",
-            "Remove-ObsoleteEngineFiles",
-            'Where-Object { $_.Name -in @(".platform", "notebook-content.py") }',
+            'ROOT / "engine" / "fundamental_anchor.py"',
+            'ROOT / "engine" / "narrative_premium.py"',
+            "Content-addressed engine path mismatch",
+            'self._parts(item_path, {".platform", "notebook-content.py"})',
         ]:
             self.assertIn(value, fabric_runner)
         for value in [
-            '"17_narrative_premium.sql"',
-            '"18_promote_narrative_premium_snapshot.sql"',
-            '"14_fundamental_anchor.sql"',
-            "usp_promote_narrative_premium_snapshot",
-            '"--gold-promotion-run-id"',
-            "usp_promote_e22_release",
-            "PREPRODUCTION_DERIVED_RESET_SQL",
-            "model_version <> 'e20_v2'",
-            "model_version <> 'e22_v4'",
+            'WAREHOUSE / "metrics" / "17_narrative_premium.sql"',
+            'WAREHOUSE / "metrics" / "18_promote_narrative_premium_snapshot.sql"',
+            'WAREHOUSE / "metrics" / "14_fundamental_anchor.sql"',
+            'WAREHOUSE / "05_promote_lakehouse_snapshot.sql"',
         ]:
             self.assertIn(value, warehouse_runner)
         for value in [
-            "Assert-NoActiveJobs",
-            'Invoke-Notebook "nb_09_fundamental_anchor"',
-            'Invoke-Notebook "nb_11_narrative_intensity"',
-            'Invoke-Notebook "nb_12_narrative_premium"',
-            'Invoke-Notebook "nb_04_metrics"',
-            "priority_as_of_date = $AsOfDate",
-            "--gold-promotion-run-id",
-            "/suspend?api-version=2023-11-01",
+            '"notebook": "nb_09_fundamental_anchor"',
+            '"notebook": "nb_11_narrative_intensity"',
+            '"notebook": "nb_12_narrative_premium"',
+            '"notebook": "nb_04_metrics"',
+            '"priority_as_of_date": "@pipeline().parameters.as_of_date"',
+            '"name": "serving_refresh"',
         ]:
-            self.assertIn(value, pipeline_runner)
+            self.assertIn(value, pipeline_manifest)
 
 
 if __name__ == "__main__":

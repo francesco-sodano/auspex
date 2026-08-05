@@ -99,10 +99,11 @@ class RecommendationService:
                 security_sk=security_sk,
                 ticker=str(holding["ticker"]).upper(),
                 opportunity_score=Decimal("0"),
-                coverage_status="PARTIAL",
+                coverage_status="WITHHELD",
                 current_value_base=Decimal(str(holding.get("market_value_base") or "0")),
                 current_weight=Decimal(str(holding.get("weight") or "0")),
                 country=holding.get("country"),
+                theme_id=holding.get("theme_id"),
                 coverage_reasons=("missing:opportunity_score",),
             ))
         trade_count = self._portfolio.annual_trade_count(
@@ -126,12 +127,15 @@ class RecommendationService:
                 continue
             payload = recommendation_payload(recommendation)
             signal = signals_by_security.get(recommendation.security_sk)
-            payload["opportunity_score"] = str(
-                signal.get("opportunity_score") if signal else "0"
+            holding = holdings.get(recommendation.security_sk, {})
+            payload["opportunity_score"] = (
+                str(signal.get("opportunity_score")) if signal else None
             )
-            payload["theme_id"] = signal.get("theme_id") if signal else None
+            payload["theme_id"] = (
+                signal.get("theme_id") if signal else holding.get("theme_id")
+            )
             payload["coverage_status"] = (
-                signal.get("coverage_status") if signal else "PARTIAL"
+                signal.get("coverage_status") if signal else "WITHHELD"
             )
             payload["coverage_reasons"] = list(
                 signal.get("coverage_reasons") or ["missing:opportunity_score"]

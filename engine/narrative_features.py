@@ -95,7 +95,9 @@ def narrative_messages(
         {
             "role": "user",
             "content": (
-                f"Title: {title.strip()}\n\nEvidence excerpts:\n"
+                f"Title: {title.strip()}\n\n"
+                f"Valid evidence indexes are integers from 0 through {len(excerpts) - 1}.\n\n"
+                "Evidence excerpts:\n"
                 + "\n".join(f"[{index}] {excerpt}" for index, excerpt in enumerate(excerpts))
             ),
         },

@@ -1,5 +1,6 @@
 """Replay-safe evidence projection indexing."""
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from itertools import islice
 
@@ -104,31 +105,57 @@ class EvidenceIndexer:
         self._embeddings = embeddings
         self._schema = schema
 
-    def sync(self, documents: list[dict], batch_size: int = 16) -> dict:
+    def sync(
+        self,
+        documents: list[dict],
+        batch_size: int = 16,
+        embedding_workers: int = 1,
+    ) -> dict:
+        if embedding_workers < 1 or embedding_workers > 8:
+            raise ValueError("embedding_workers must be between 1 and 8")
         generation = validate_projection(documents)
         self._search.ensure_index(self._schema)
+        existing_ids = self._search.list_generation_ids(generation)
+        pending_documents = [
+            document for document in documents if document["id"] not in existing_ids
+        ]
         uploaded = 0
-        for batch in _batches(documents, batch_size):
-            vectors = self._embeddings.embed([document["content"] for document in batch])
-            if len(vectors) != len(batch):
-                raise RuntimeError("embedding count does not match evidence batch")
-            search_documents = []
-            for document, vector in zip(batch, vectors):
-                search_document = {
-                    field: document.get(field)
-                    for field in SEARCH_FIELDS
-                    if document.get(field) is not None
+        batches = iter(_batches(pending_documents, batch_size))
+        with ThreadPoolExecutor(max_workers=embedding_workers) as executor:
+            while True:
+                batch_window = list(islice(batches, embedding_workers))
+                if not batch_window:
+                    break
+                future_batches = {
+                    executor.submit(
+                        self._embeddings.embed,
+                        [document["content"] for document in batch],
+                    ): batch
+                    for batch in batch_window
                 }
-                search_document["event_date"] = _search_datetime(document["event_date"])
-                search_document["knowledge_date"] = _search_datetime(document["knowledge_date"])
-                search_document["published_at"] = _search_datetime(document.get("published_at"))
-                search_document["content_vector"] = vector
-                search_documents.append(search_document)
-            uploaded += self._search.upload_documents(search_documents)
+                for future in as_completed(future_batches):
+                    batch = future_batches[future]
+                    vectors = future.result()
+                    if len(vectors) != len(batch):
+                        raise RuntimeError("embedding count does not match evidence batch")
+                    search_documents = []
+                    for document, vector in zip(batch, vectors):
+                        search_document = {
+                            field: document.get(field)
+                            for field in SEARCH_FIELDS
+                            if document.get(field) is not None
+                        }
+                        search_document["event_date"] = _search_datetime(document["event_date"])
+                        search_document["knowledge_date"] = _search_datetime(document["knowledge_date"])
+                        search_document["published_at"] = _search_datetime(document.get("published_at"))
+                        search_document["content_vector"] = vector
+                        search_documents.append(search_document)
+                    uploaded += self._search.upload_documents(search_documents)
         deleted = self._search.delete_stale_generation(generation)
         return {
             "generation": generation,
             "documents": len(documents),
+            "existing": len(existing_ids),
             "uploaded": uploaded,
             "deleted_stale": deleted,
         }

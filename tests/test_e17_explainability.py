@@ -26,6 +26,7 @@ class E17ExplainabilityTests(unittest.TestCase):
         }
 
         self.assertTrue(required.issubset(METRIC_METADATA))
+        self.assertIn("percentile", METRIC_METADATA["opportunity_score"]["plain_description"])
         for key in required:
             metadata = METRIC_METADATA[key]
             self.assertEqual(metadata["key"], key)

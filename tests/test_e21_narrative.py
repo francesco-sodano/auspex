@@ -37,6 +37,18 @@ class E21NarrativeEngineTests(unittest.TestCase):
         self.assertTrue(all(quote in content for quote in result.evidence_quotes.values()))
         self.assertIn(result.theme_evidence["ai_infrastructure"], content)
 
+    def test_messages_state_the_exact_valid_evidence_index_range(self):
+        from engine.narrative_features import narrative_messages
+
+        messages = narrative_messages(
+            "Cloud demand",
+            "First evidence excerpt. Second evidence excerpt.",
+            "System prompt",
+            max_excerpt_chars=25,
+        )
+
+        self.assertIn("Valid evidence indexes are integers from 0 through 1.", messages[1]["content"])
+
     def test_parser_rejects_invalid_ranges_indexes_and_theme_contract(self):
         from engine.narrative_features import parse_narrative_response
 
@@ -188,14 +200,70 @@ class E21NarrativeEngineTests(unittest.TestCase):
         self.assertEqual(first["prompt_version"], "e21_narrative_v1")
         self.assertEqual(first["prompt_sha256"], "70987525ba240b9008ec684c5cab346cfd02b10f8315d7c2f66adff381c930a5")
 
+    def test_service_repairs_two_invalid_responses_before_caching(self):
+        from search.narrative import NarrativeFeatureService
+
+        invalid = json.dumps({"sentiment": 2})
+        valid = json.dumps({
+            "sentiment": 0.2,
+            "relevance": 0.8,
+            "forward_promise_ratio": 0.3,
+            "hype_density": 0.1,
+            "themes": [{"label": "Cloud", "evidence_index": 0}],
+            "evidence_indices": {
+                "sentiment": 0,
+                "forward_promise_ratio": 0,
+                "hype_density": 0,
+            },
+        })
+
+        class FakeChat:
+            def __init__(self):
+                self.responses = [invalid, invalid, valid]
+
+            def complete_json(self, messages):
+                return self.responses.pop(0)
+
+        class FakeCache:
+            def get(self, key):
+                return None
+
+            def create(self, document):
+                return document
+
+        service = NarrativeFeatureService(
+            FakeChat(),
+            FakeCache(),
+            model_version="gpt-4o:2024-11-20",
+            prompt_text=(ROOT / "prompts" / "narrative" / "e21_v1.txt").read_text(encoding="utf-8"),
+        )
+        result, cached = service.score({
+            "id": "doc-repair",
+            "security_sk": 42,
+            "source_id": "news:repair",
+            "source_type": "news",
+            "revision_hash": "c" * 64,
+            "title": "Cloud demand",
+            "content": "Cloud demand increased.",
+            "event_date": "2026-07-20",
+            "knowledge_date": "2026-07-21",
+            "generation": "e7-generation",
+        })
+
+        self.assertFalse(cached)
+        self.assertEqual(result["sentiment"], 0.2)
+
     def test_projection_requires_complete_current_cache_and_ignores_stale_audit_rows(self):
         from search.narrative import build_narrative_projection
 
         evidence = [{
             "id": "doc-1",
+            "security_sk": 1,
             "source_type": "news",
             "source_id": "news:1",
             "revision_hash": "a" * 64,
+            "event_date": "2026-07-23",
+            "knowledge_date": "2026-07-24",
             "generation": "e7-current",
         }]
         current = {
@@ -217,6 +285,74 @@ class E21NarrativeEngineTests(unittest.TestCase):
         self.assertEqual(manifest["stale_cache_count"], 1)
         with self.assertRaisesRegex(ValueError, "incomplete"):
             build_narrative_projection(evidence, [stale])
+
+    def test_narrative_pagination_caps_each_security_to_three_newest_documents(self):
+        from search.narrative import page_narrative_documents
+
+        documents = [
+            {
+                "id": f"a{index}",
+                "security_sk": 1,
+                "source_type": "news",
+                "event_date": f"2026-07-{index:02d}",
+                "knowledge_date": f"2026-07-{index:02d}",
+                "revision_hash": str(index),
+            }
+            for index in range(1, 6)
+        ] + [
+            {
+                "id": "b1",
+                "security_sk": 2,
+                "source_type": "news",
+                "event_date": "2026-07-01",
+                "knowledge_date": "2026-07-01",
+                "revision_hash": "1",
+            },
+            {"id": "filing", "security_sk": 1, "source_type": "sec_filing"},
+        ]
+
+        first, cursor, has_more = page_narrative_documents(documents, limit=2)
+        second, _, second_has_more = page_narrative_documents(
+            documents, limit=2, after_id=cursor
+        )
+
+        self.assertEqual([document["id"] for document in first], ["a3", "a4"])
+        self.assertTrue(has_more)
+        self.assertEqual([document["id"] for document in second], ["a5", "b1"])
+        self.assertFalse(second_has_more)
+
+    def test_narrative_pagination_excludes_news_outside_active_universe(self):
+        from search.narrative import page_narrative_documents
+
+        documents = [
+            {
+                "id": "active",
+                "security_sk": 1,
+                "symbol": "AAA",
+                "source_type": "news",
+                "event_date": "2026-08-03",
+                "knowledge_date": "2026-08-04",
+                "revision_hash": "a" * 64,
+            },
+            {
+                "id": "inactive",
+                "security_sk": 2,
+                "symbol": "ZZZ",
+                "source_type": "news",
+                "event_date": "2026-08-03",
+                "knowledge_date": "2026-08-04",
+                "revision_hash": "b" * 64,
+            },
+        ]
+
+        page, _, has_more = page_narrative_documents(
+            documents,
+            limit=10,
+            eligible_symbols={"aaa"},
+        )
+
+        self.assertEqual([document["id"] for document in page], ["active"])
+        self.assertFalse(has_more)
 
 
 class E21ArtifactContractTests(unittest.TestCase):
@@ -322,8 +458,8 @@ class E21ArtifactContractTests(unittest.TestCase):
         notebook = ROOT / "fabric" / "nb_11_narrative_intensity.Notebook" / "notebook-content.py"
         warehouse = ROOT / "fabric" / "warehouse" / "metrics" / "15_narrative_features.sql"
         promotion = ROOT / "fabric" / "warehouse" / "metrics" / "16_promote_narrative_snapshot.sql"
-        warehouse_runner = ROOT / "scripts" / "deploy_e21_warehouse.py"
-        fabric_deployer = ROOT / "scripts" / "deploy_e21_fabric.ps1"
+        warehouse_runner = ROOT / "scripts" / "deploy_warehouse_schema.py"
+        fabric_deployer = ROOT / "scripts" / "deploy_fabric_items.py"
 
         for path in [prompt, notebook, warehouse, promotion, warehouse_runner, fabric_deployer]:
             self.assertTrue(path.exists(), path)
@@ -342,18 +478,24 @@ class E21ArtifactContractTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS fact_narrative_intensity", notebook_text)
         self.assertIn("coverage_status", notebook_text)
         self.assertIn("LOOKBACK_DAYS = 90", notebook_text)
+        self.assertIn("NARRATIVE_DOCUMENTS_PER_SECURITY = 3", notebook_text)
+        self.assertIn('ACTIVE_UNIVERSE_PATH = "Files/config/alpha_vantage_universe.json"', notebook_text)
+        self.assertIn('F.upper(F.col("symbol")).isin(active_symbols)', notebook_text)
+        self.assertIn('Window.partitionBy("security_sk")', notebook_text)
+        self.assertIn(
+            'F.col("revision_row_number") <= NARRATIVE_DOCUMENTS_PER_SECURITY',
+            notebook_text,
+        )
         self.assertIn("PROMPT_SHA256", notebook_text)
         self.assertIn("knowledge_date", notebook_text)
         self.assertIn("fact_narrative_features", warehouse_text)
         self.assertIn("fact_narrative_intensity", warehouse_text)
         self.assertIn("BEGIN TRANSACTION", promotion_text)
-        self.assertIn('"04_base_metrics.sql"', warehouse_runner_text)
-        self.assertIn('"05_promote_lakehouse_snapshot.sql"', warehouse_runner_text)
-        self.assertIn("if args.gold_promotion_run_id else []", warehouse_runner_text)
-        self.assertIn('"--gold-promotion-run-id"', warehouse_runner_text)
-        self.assertIn("usp_promote_lakehouse_gold", warehouse_runner_text)
-        self.assertIn('Deploy-Notebook -DisplayName "nb_11_narrative_intensity"', fabric_deployer_text)
-        self.assertIn('Deploy-Notebook -DisplayName "nb_04_metrics"', fabric_deployer_text)
+        self.assertIn('WAREHOUSE / "metrics" / "04_base_metrics.sql"', warehouse_runner_text)
+        self.assertIn('WAREHOUSE / "05_promote_lakehouse_snapshot.sql"', warehouse_runner_text)
+        self.assertIn('WAREHOUSE / "metrics" / "15_narrative_features.sql"', warehouse_runner_text)
+        self.assertIn('WAREHOUSE / "metrics" / "16_promote_narrative_snapshot.sql"', warehouse_runner_text)
+        self.assertIn('FABRIC_ROOT.glob("*.Notebook")', fabric_deployer_text)
         self.assertIn('route="score_narrative_features"', function_app)
         self.assertIn('route="publish_narrative_features"', function_app)
         self.assertLess(

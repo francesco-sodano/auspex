@@ -2,8 +2,6 @@
   "pipelines": [
     {
       "display_name": "auspex_daily_build",
-      "description": "Daily Auspex bronze-to-evidence build after scheduled connector ingestion.",
-      "parameter": "as_of_date",
       "notebooks": [
         {"name": "bronze_health", "notebook": "nb_00_bronze_health", "parameters": {"to_date": "@pipeline().parameters.as_of_date"}},
         {"name": "entity_resolution", "notebook": "nb_00_entity_resolution", "parameters": {}},
@@ -21,8 +19,6 @@
     },
     {
       "display_name": "auspex_daily_publish",
-      "description": "Daily Auspex narrative scoring and metric publication after E21 extraction.",
-      "parameter": "as_of_date",
       "notebooks": [
         {"name": "narrative_intensity", "notebook": "nb_11_narrative_intensity", "parameters": {"as_of_date": "@pipeline().parameters.as_of_date"}},
         {"name": "narrative_premium", "notebook": "nb_12_narrative_premium", "parameters": {"as_of_date": "@pipeline().parameters.as_of_date"}},

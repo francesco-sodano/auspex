@@ -54,6 +54,7 @@ BEGIN
     DELETE FROM dbo.fact_institutional_holding;
     DELETE FROM dbo.fact_insider_txn;
     DELETE FROM dbo.fact_market_daily;
+    DELETE FROM dbo.security_theme_classification;
     DELETE FROM dbo.bridge_theme_etf;
     DELETE FROM dbo.dim_theme;
     DELETE FROM dbo.dim_source;
@@ -82,6 +83,16 @@ BEGIN
     )
     SELECT theme_id, etf_symbol, blend_weight, is_active, catalog_version, updated_at
     FROM auspex_bronze.dbo.bridge_theme_etf;
+
+    INSERT INTO dbo.security_theme_classification (
+        classification_id, security_sk, ticker, theme_id, provenance,
+        confidence, rationale, effective_from, effective_to,
+        classification_version, updated_at
+    )
+    SELECT classification_id, security_sk, ticker, theme_id, provenance,
+           confidence, rationale, effective_from, effective_to,
+           classification_version, updated_at
+    FROM auspex_bronze.dbo.security_theme_classification;
 
     INSERT INTO dbo.dim_date (
         date_sk, cal_date, [year], [quarter], [month], [day], is_trading_day,
@@ -349,6 +360,7 @@ BEGIN
         SELECT COUNT_BIG(*) AS row_count FROM auspex_bronze.dbo.dim_security
         UNION ALL SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.dim_theme
         UNION ALL SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.bridge_theme_etf
+        UNION ALL SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.security_theme_classification
         UNION ALL SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.dim_date
         UNION ALL SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.dim_entity
         UNION ALL SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.dim_source
@@ -384,6 +396,7 @@ BEGIN
         ('dim_security', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.dim_security)),
         ('dim_theme', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.dim_theme)),
         ('bridge_theme_etf', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.bridge_theme_etf)),
+        ('security_theme_classification', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.security_theme_classification)),
         ('dim_date', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.dim_date)),
         ('dim_entity', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.dim_entity)),
         ('dim_source', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.dim_source)),
@@ -412,6 +425,7 @@ BEGIN
         SELECT COUNT_BIG(*) AS row_count FROM dbo.dim_security
         UNION ALL SELECT COUNT_BIG(*) FROM dbo.dim_theme
         UNION ALL SELECT COUNT_BIG(*) FROM dbo.bridge_theme_etf
+        UNION ALL SELECT COUNT_BIG(*) FROM dbo.security_theme_classification
         UNION ALL SELECT COUNT_BIG(*) FROM dbo.dim_date
         UNION ALL SELECT COUNT_BIG(*) FROM dbo.dim_entity
         UNION ALL SELECT COUNT_BIG(*) FROM dbo.dim_source
@@ -444,6 +458,7 @@ BEGIN
             ('dim_security', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.dim_security), (SELECT COUNT_BIG(*) FROM dbo.dim_security)),
             ('dim_theme', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.dim_theme), (SELECT COUNT_BIG(*) FROM dbo.dim_theme)),
             ('bridge_theme_etf', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.bridge_theme_etf), (SELECT COUNT_BIG(*) FROM dbo.bridge_theme_etf)),
+            ('security_theme_classification', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.security_theme_classification), (SELECT COUNT_BIG(*) FROM dbo.security_theme_classification)),
             ('dim_date', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.dim_date), (SELECT COUNT_BIG(*) FROM dbo.dim_date)),
             ('dim_entity', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.dim_entity), (SELECT COUNT_BIG(*) FROM dbo.dim_entity)),
             ('dim_source', (SELECT COUNT_BIG(*) FROM auspex_bronze.dbo.dim_source), (SELECT COUNT_BIG(*) FROM dbo.dim_source)),
@@ -471,6 +486,15 @@ BEGIN
         THROW 50208, 'Warehouse per-table row-count reconciliation failed.', 1;
 
     IF EXISTS (
+        SELECT 1 FROM dbo.security_theme_classification
+        WHERE provenance NOT IN ('manual', 'llm')
+           OR confidence < 0 OR confidence > CASE WHEN provenance = 'llm' THEN 0.85 ELSE 1 END
+           OR effective_from IS NULL
+           OR (effective_to IS NOT NULL AND effective_to <= effective_from)
+    ) OR EXISTS (
+        SELECT classification_id FROM dbo.security_theme_classification
+        GROUP BY classification_id HAVING COUNT_BIG(*) > 1
+    ) OR EXISTS (
         SELECT 1 FROM dbo.fact_market_daily
         GROUP BY security_sk, date_sk, price_revision_hash HAVING COUNT_BIG(*) > 1
     ) OR EXISTS (
@@ -482,7 +506,8 @@ BEGIN
         HAVING COUNT_BIG(*) > 1
     ) OR EXISTS (
         SELECT 1 FROM dbo.fact_ownership_event
-        GROUP BY security_sk, entity_sk, event_date, ownership_revision_hash HAVING COUNT_BIG(*) > 1
+        GROUP BY accession_no, security_sk, entity_sk, event_date, ownership_revision_hash
+        HAVING COUNT_BIG(*) > 1
     ) OR EXISTS (
         SELECT 1 FROM dbo.fact_news_sentiment
         GROUP BY news_sk, security_sk, news_revision_hash HAVING COUNT_BIG(*) > 1
@@ -542,7 +567,7 @@ BEGIN
 
     IF EXISTS (
         SELECT 1 FROM dbo.fact_theme_opportunity_score
-        WHERE model_version <> 'e6b_v1'
+        WHERE model_version <> 'e6b_v2'
            OR weight_version <> 'e6b_balanced_v1'
            OR coverage_status NOT IN ('READY', 'PARTIAL', 'WITHHELD')
            OR coverage_reasons_json IS NULL
@@ -627,7 +652,7 @@ BEGIN
          AND f.model_version = m.model_version
          AND f.weight_version = m.weight_version
         WHERE m.status <> 'completed'
-           OR m.model_version <> 'e6b_v1'
+           OR m.model_version <> 'e6b_v2'
            OR m.weight_version <> 'e6b_balanced_v1'
            OR LEN(m.fingerprint) <> 64
            OR COALESCE(f.row_count, 0) <> m.row_count
@@ -651,7 +676,7 @@ BEGIN
          AND m.weight_version = f.weight_version
          AND m.status = 'completed'
         WHERE f.max_knowledge_date <= f.as_of
-          AND f.model_version = 'e6b_v1'
+          AND f.model_version = 'e6b_v2'
           AND f.weight_version = 'e6b_balanced_v1'
     );
 

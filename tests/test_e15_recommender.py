@@ -39,7 +39,7 @@ class E15RecommenderTests(unittest.TestCase):
         ingestion_app = (
             Path(__file__).resolve().parents[1] / "connectors" / "function_app.py"
         ).read_text(encoding="utf-8")
-        self.assertIn('("quote:", "history:", "fx:", "score:security:")', ingestion_app)
+        self.assertIn('("quote:", "history:", "fx:", "score:security:", "classification:security:")', ingestion_app)
 
     def test_engine_is_packaged_with_the_function_app(self):
         package = Path(__file__).resolve().parents[1] / "api" / "auspex_api" / "recommender"
@@ -273,6 +273,41 @@ class E15RecommenderTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "ready")
         self.assertEqual(result["recommendations"], [])
+
+    def test_service_preserves_withheld_holding_score_and_classification(self):
+        identity = SimpleNamespace(product_user=lambda _: SimpleNamespace(
+            user_sk="owner-a", risk_profile="Growth", base_currency="USD",
+        ))
+        portfolio = SimpleNamespace(
+            portfolio_summary=lambda _: {
+                "status": "ready", "base_currency": "USD",
+                "valuation_as_of": "2026-08-05", "total_cash_base": "1000.00",
+                "total_value_base": "100000.00", "holdings": [{
+                    "security_sk": 202, "ticker": "RGTI", "country": "US",
+                    "market_value_base": "2500.00", "weight": "0.025",
+                    "theme_id": "quantum_computing",
+                }],
+            },
+            annual_trade_count=lambda *_: 0,
+        )
+        service = RecommendationService(
+            identity,
+            portfolio,
+            InMemoryOpportunitySignalRepository([{
+                "security_sk": 101, "ticker": "MSFT", "opportunity_score": "80",
+                "coverage_status": "READY", "country": "US", "spread_bps": "5",
+                "theme_id": "enterprise_technology", "coverage_reasons": [],
+                "as_of": "2026-08-05",
+            }]),
+        )
+
+        result = service.recommendations("principal-a")
+        rgti = next(row for row in result["recommendations"] if row["ticker"] == "RGTI")
+
+        self.assertIsNone(rgti["opportunity_score"])
+        self.assertEqual(rgti["coverage_status"], "WITHHELD")
+        self.assertEqual(rgti["theme_id"], "quantum_computing")
+        self.assertEqual(rgti["coverage_reasons"], ["missing:opportunity_score"])
 
 
 if __name__ == "__main__":

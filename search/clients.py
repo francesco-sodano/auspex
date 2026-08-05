@@ -1,6 +1,7 @@
 """Managed-identity REST clients for E7 Azure services."""
 
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import time
@@ -22,7 +23,7 @@ class BearerRestClient:
 
     def request(self, method: str, path: str, *, params=None, payload=None) -> dict:
         response = None
-        for attempt in range(4):
+        for attempt in range(12):
             token = self._credential.get_token(self._scope).token
             response = self._client.request(
                 method,
@@ -31,7 +32,7 @@ class BearerRestClient:
                 json=payload,
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             )
-            if response.status_code not in {408, 429, 500, 502, 503, 504} or attempt == 3:
+            if response.status_code not in {408, 429, 500, 502, 503, 504} or attempt == 11:
                 break
             retry_after_ms = response.headers.get("retry-after-ms")
             retry_after = response.headers.get("Retry-After")
@@ -168,6 +169,61 @@ class AzureSearchRestClient:
             if failures:
                 raise RuntimeError(f"Search rejected {len(failures)} stale-document deletions")
             deleted += len(stale_ids)
+
+    def list_generation_ids(
+        self,
+        generation: str,
+        *,
+        batch_size: int = 1000,
+        max_documents: int = 250000,
+    ) -> set[str]:
+        escaped_generation = generation.replace("'", "''")
+        prefix_characters = sorted(
+            "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
+        )
+
+        def list_prefix(index_prefix):
+            index, prefix_character = index_prefix
+            prefix_ids = set()
+            lower_bound = f"d{prefix_character}"
+            filter_parts = [
+                f"generation eq '{escaped_generation}'",
+                f"id ge '{lower_bound}'",
+            ]
+            if index + 1 < len(prefix_characters):
+                filter_parts.append(f"id lt 'd{prefix_characters[index + 1]}'")
+            skip = 0
+            while True:
+                response = self.search({
+                    "search": "*",
+                    "filter": " and ".join(filter_parts),
+                    "select": "id",
+                    "top": batch_size,
+                    "skip": skip,
+                })
+                page_ids = {item["id"] for item in response.get("value", [])}
+                if not page_ids:
+                    break
+                previous_count = len(prefix_ids)
+                prefix_ids.update(page_ids)
+                if len(prefix_ids) == previous_count or len(page_ids) < batch_size:
+                    break
+                skip += len(page_ids)
+                if skip >= 100000:
+                    raise RuntimeError(
+                        f"Search ID prefix {lower_bound} exceeds the skip limit"
+                    )
+            return prefix_ids
+
+        document_ids = set()
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            for prefix_ids in executor.map(list_prefix, enumerate(prefix_characters)):
+                document_ids.update(prefix_ids)
+                if len(document_ids) > max_documents:
+                    raise RuntimeError(
+                        "Current Search generation exceeds resumable document limit"
+                    )
+        return document_ids
 
     def search(self, payload: dict) -> dict:
         return self._rest.request(

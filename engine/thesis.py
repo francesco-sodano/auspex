@@ -11,7 +11,7 @@ from statistics import fmean, stdev
 from typing import Callable, Iterable, Optional
 
 
-MODEL_VERSION = "e6b_v1"
+MODEL_VERSION = "e6b_v2"
 WEIGHT_VERSION = "e6b_balanced_v1"
 MIN_THEME_COHORT = 8
 WINSOR_LOWER = 0.01
@@ -24,6 +24,21 @@ LEG_WEIGHTS = {
     "fundamental_health": 0.20,
     "valuation_brake": 0.15,
     "crowding_positioning": 0.10,
+}
+
+LEG_INPUTS = {
+    "thesis_linkage": ("membership_weight",),
+    "attention_acceleration": ("news_volume_z_30d",),
+    "smart_money": (
+        "insider_net_buy_ratio_90d", "insider_cluster_buy_30d",
+        "inst_net_flow_qoq", "inst_new_initiations",
+        "contract_award_usd_trailing_90d", "activist_13d_flag",
+    ),
+    "fundamental_health": (
+        "profit_margin", "rev_growth_yoy", "fcf_yield", "net_debt_to_ebitda",
+    ),
+    "valuation_brake": ("fundamental_anchor_z",),
+    "crowding_positioning": ("news_count_30d", "institutional_holder_count_120d"),
 }
 
 
@@ -199,11 +214,17 @@ def _coverage_reasons(observation: OpportunityObservation) -> tuple[str, ...]:
         "news_count_30d",
         "institutional_holder_count_120d",
     )
-    return tuple(
+    missing_reasons = tuple(
         f"missing:{field_name}"
         for field_name in required_fields
         if getattr(observation, field_name) is None
     )
+    classification_reasons = (
+        ("classification:llm",)
+        if observation.candidate_source == "LLM"
+        else ()
+    )
+    return tuple(sorted((*missing_reasons, *classification_reasons)))
 
 
 def _validate(observations: list[OpportunityObservation]) -> None:
@@ -251,6 +272,14 @@ def _validate_leg_weights(leg_weights: dict[str, float]) -> dict[str, float]:
     if not math.isclose(sum(validated.values()), 1.0, abs_tol=1e-9):
         raise ValueError("Opportunity Score leg weights must sum to 1.0")
     return validated
+
+
+def _available_legs(observation: OpportunityObservation) -> tuple[str, ...]:
+    return tuple(
+        leg_name
+        for leg_name, field_names in LEG_INPUTS.items()
+        if all(getattr(observation, field_name) is not None for field_name in field_names)
+    )
 
 
 def _cohort_snapshot_hash(
@@ -367,17 +396,35 @@ def score_theme(
             component_z["institutional_holder_count_120d"],
         )),
     }
+    available_legs = {
+        observation.security_sk: _available_legs(observation)
+        for observation in ordered
+    }
+    leg_raw = {
+        leg_name: {
+            security_sk: value if leg_name in available_legs[security_sk] else None
+            for security_sk, value in values.items()
+        }
+        for leg_name, values in leg_raw.items()
+    }
     leg_z = {
         leg_name: _winsorized_z(values)
         for leg_name, values in leg_raw.items()
     }
-    raw_scores = {
-        observation.security_sk: sum(
-            active_weights[leg_name] * leg_z[leg_name][observation.security_sk]
-            for leg_name in active_weights
+    full_variance = sum(weight * weight for weight in active_weights.values())
+    variance_scales = {}
+    raw_scores = {}
+    for observation in ordered:
+        security_sk = observation.security_sk
+        available = available_legs[security_sk]
+        available_variance = sum(active_weights[leg_name] ** 2 for leg_name in available)
+        if available_variance <= 0.0:
+            raise ValueError("Opportunity Score requires at least one complete leg")
+        variance_scales[security_sk] = math.sqrt(full_variance / available_variance)
+        raw_scores[security_sk] = variance_scales[security_sk] * sum(
+            active_weights[leg_name] * leg_z[leg_name][security_sk]
+            for leg_name in available
         )
-        for observation in ordered
-    }
     unique_scores = sorted(set(raw_scores.values()))
     if len(unique_scores) == 1:
         percentile_scores = {observation.security_sk: 50.0 for observation in ordered}
@@ -395,7 +442,21 @@ def score_theme(
         security_sk = observation.security_sk
         reasons = reasons_by_security[security_sk]
         contributions = {
-            leg_name: active_weights[leg_name] * leg_z[leg_name][security_sk]
+            leg_name: (
+                variance_scales[security_sk]
+                * active_weights[leg_name]
+                * leg_z[leg_name][security_sk]
+                if leg_name in available_legs[security_sk]
+                else 0.0
+            )
+            for leg_name in active_weights
+        }
+        effective_leg_z = {
+            leg_name: (
+                leg_z[leg_name][security_sk]
+                if leg_name in available_legs[security_sk]
+                else 0.0
+            )
             for leg_name in active_weights
         }
         results.append(OpportunityResult(
@@ -409,12 +470,12 @@ def score_theme(
             candidate_snapshot_id=observation.candidate_snapshot_id,
             candidate_snapshot_ingest_ts=observation.candidate_snapshot_ingest_ts,
             candidate_count=candidate_count,
-            thesis_linkage_z=leg_z["thesis_linkage"][security_sk],
-            attention_acceleration_z=leg_z["attention_acceleration"][security_sk],
-            smart_money_z=leg_z["smart_money"][security_sk],
-            fundamental_health_z=leg_z["fundamental_health"][security_sk],
-            valuation_brake_z=leg_z["valuation_brake"][security_sk],
-            crowding_positioning_z=leg_z["crowding_positioning"][security_sk],
+            thesis_linkage_z=effective_leg_z["thesis_linkage"],
+            attention_acceleration_z=effective_leg_z["attention_acceleration"],
+            smart_money_z=effective_leg_z["smart_money"],
+            fundamental_health_z=effective_leg_z["fundamental_health"],
+            valuation_brake_z=effective_leg_z["valuation_brake"],
+            crowding_positioning_z=effective_leg_z["crowding_positioning"],
             thesis_linkage_contribution=contributions["thesis_linkage"],
             attention_acceleration_contribution=contributions["attention_acceleration"],
             smart_money_contribution=contributions["smart_money"],

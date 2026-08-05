@@ -102,6 +102,24 @@
     "schema_version": 1
   },
   {
+    "id": "theme_classifier",
+    "source_id": "theme_classifier",
+    "name": "SEC Annual Filing Theme Classifier",
+    "type": "classification",
+    "schedule": "daily",
+    "base_url": "https://data.sec.gov/submissions",
+    "auth_secret_ref": "EDGAR-USER-AGENT",
+    "latency_class": "daily",
+    "reliability_weight": 0.65,
+    "rate_limit": {
+      "requests_per_minute": 60
+    },
+    "implementation_status": "implemented",
+    "enabled": true,
+    "required": false,
+    "schema_version": 1
+  },
+  {
     "id": "prices_yf",
     "source_id": "prices_yf",
     "name": "Yahoo Finance Prices (fallback, unofficial)",

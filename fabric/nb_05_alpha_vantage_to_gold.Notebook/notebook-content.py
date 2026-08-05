@@ -42,7 +42,7 @@ from delta.tables import DeltaTable
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 from pyspark.sql.types import (
-    ArrayType, DecimalType, IntegerType, LongType,
+    ArrayType, DateType, DecimalType, IntegerType, LongType,
     MapType, StringType, StructField, StructType,
 )
 
@@ -241,7 +241,8 @@ for required in [
 # --- Read Alpha Vantage, ETF, and Finnhub news bronze records ---
 av_paths = _existing_paths(_date_paths("alpha_vantage") + _date_paths("etf_holdings"))
 news_paths = _existing_paths(_date_paths("news"))
-paths = av_paths + news_paths
+classification_paths = _existing_paths(_date_paths("theme_classifier"))
+paths = av_paths + news_paths + classification_paths
 if not paths:
     raise RuntimeError("No Alpha Vantage/ETF/news bronze files found in window")
 
@@ -370,6 +371,10 @@ spark.sql("""
 """)
 theme_dimension_df = (
     theme_component_df.select("theme_id", "theme_name", "benchmark_symbol").distinct()
+    .unionByName(spark.createDataFrame(
+        [("quantum_computing", "Quantum Computing", "QTUM")],
+        "theme_id STRING, theme_name STRING, benchmark_symbol STRING",
+    ))
     .withColumn("is_active", F.lit(True))
     .withColumn("catalog_version", F.lit(1))
     .withColumn("updated_at", F.current_timestamp())
@@ -396,6 +401,138 @@ theme_bridge_df = (
     theme_bridge_df.write.format("delta").mode("overwrite")
     .option("overwriteSchema", "true").saveAsTable("bridge_theme_etf")
 )
+
+spark.sql("""
+    CREATE TABLE IF NOT EXISTS security_theme_classification (
+        classification_id STRING NOT NULL,
+        security_sk BIGINT NOT NULL,
+        ticker STRING NOT NULL,
+        theme_id STRING NOT NULL,
+        provenance STRING NOT NULL,
+        confidence DOUBLE NOT NULL,
+        rationale STRING NOT NULL,
+        effective_from DATE NOT NULL,
+        effective_to DATE,
+        classification_version STRING NOT NULL,
+        updated_at TIMESTAMP NOT NULL
+    ) USING DELTA
+""")
+manual_theme_seed = spark.createDataFrame([
+    ("AMD", "data_center_buildout", "Compute accelerators used in data-center infrastructure."),
+    ("AVGO", "data_center_buildout", "Networking and custom silicon used in data centers."),
+    ("CAMT", "ai_compute_semiconductors", "Semiconductor inspection and metrology equipment."),
+    ("COHR", "data_center_buildout", "Optical communications components used in data-center interconnects."),
+    ("INTC", "data_center_buildout", "Data-center processors, accelerators, and platform infrastructure."),
+    ("MRVL", "data_center_buildout", "Data-center connectivity, switching, and custom silicon."),
+    ("NVDA", "ai_compute_semiconductors", "AI accelerators and compute platforms."),
+    ("PLTR", "enterprise_technology", "Enterprise data and software platform."),
+    ("RGTI", "quantum_computing", "Quantum processors and cloud quantum-computing systems."),
+    ("VRT", "data_center_buildout", "Power, cooling, and infrastructure for data centers."),
+], "ticker STRING, theme_id STRING, rationale STRING")
+manual_classifications = (
+    manual_theme_seed.alias("s")
+    .join(
+        spark.table("dim_security")
+        .filter(F.col("is_current") == F.lit(True))
+        .select("security_sk", F.upper("ticker").alias("ticker"))
+        .alias("d"),
+        "ticker",
+        "inner",
+    )
+    .withColumn(
+        "classification_id",
+        F.sha2(F.concat_ws("|", F.lit("manual_v1"), "ticker", "theme_id"), 256),
+    )
+    .withColumn("provenance", F.lit("manual"))
+    .withColumn("confidence", F.lit(1.0))
+    .withColumn("effective_from", F.to_date(F.lit("2026-08-04")))
+    .withColumn("effective_to", F.lit(None).cast(DateType()))
+    .withColumn("classification_version", F.lit("manual_v1"))
+    .withColumn("updated_at", F.to_timestamp(F.lit("2026-08-04T00:00:00Z")))
+    .select(
+        "classification_id", "security_sk", "ticker", "theme_id", "provenance",
+        "confidence", "rationale", "effective_from", "effective_to",
+        "classification_version", "updated_at",
+    )
+)
+if manual_classifications.count() != 10:
+    raise RuntimeError("Manual portfolio theme seed did not resolve exactly ten securities")
+classification_target = DeltaTable.forName(spark, "security_theme_classification")
+(
+    classification_target.alias("t")
+    .merge(manual_classifications.alias("s"), "t.classification_id = s.classification_id")
+    .whenMatchedUpdateAll()
+    .whenNotMatchedInsertAll()
+    .execute()
+)
+
+llm_classification_source = (
+    raw_lines
+    .filter(F.get_json_object("raw_json", "$.source_id") == F.lit("theme_classifier"))
+    .filter(F.get_json_object("raw_json", "$.record.classification_status") == F.lit("classified"))
+    .select(
+        F.get_json_object("raw_json", "$.record.classification_id").alias("classification_id"),
+        F.get_json_object("raw_json", "$.record.security_sk").cast(LongType()).alias("security_sk"),
+        F.upper(F.get_json_object("raw_json", "$.record.ticker")).alias("ticker"),
+        F.get_json_object("raw_json", "$.record.theme_id").alias("theme_id"),
+        F.get_json_object("raw_json", "$.record.provenance").alias("provenance"),
+        F.get_json_object("raw_json", "$.record.confidence").cast("double").alias("confidence"),
+        F.get_json_object("raw_json", "$.record.rationale").alias("rationale"),
+        F.to_date(F.get_json_object("raw_json", "$.record.effective_from")).alias("effective_from"),
+        F.get_json_object("raw_json", "$.record.classification_version").alias("classification_version"),
+        F.to_timestamp(F.get_json_object("raw_json", "$.record.classified_at")).alias("updated_at"),
+    )
+)
+invalid_llm_classifications = (
+    llm_classification_source.alias("c")
+    .join(
+        spark.table("dim_theme").filter(F.col("is_active") == F.lit(True)).select("theme_id").alias("t"),
+        "theme_id",
+        "left",
+    )
+    .join(
+        spark.table("dim_security")
+        .filter(F.col("is_current") == F.lit(True))
+        .select("security_sk", F.upper("ticker").alias("dim_ticker"))
+        .alias("d"),
+        "security_sk",
+        "left",
+    )
+    .filter(
+        F.col("classification_id").isNull()
+        | (F.length("classification_id") != 64)
+        | F.col("t.theme_id").isNull()
+        | F.col("d.security_sk").isNull()
+        | (F.col("ticker") != F.col("dim_ticker"))
+        | (F.col("provenance") != F.lit("llm"))
+        | F.col("confidence").isNull()
+        | (F.col("confidence") < F.lit(0.0))
+        | (F.col("confidence") > F.lit(0.85))
+        | F.col("rationale").isNull()
+        | F.col("effective_from").isNull()
+        | F.col("updated_at").isNull()
+    )
+)
+if not invalid_llm_classifications.isEmpty():
+    raise RuntimeError("LLM theme classification Bronze validation failed")
+if not llm_classification_source.isEmpty():
+    llm_classifications = (
+        llm_classification_source
+        .withColumn("effective_to", F.lit(None).cast(DateType()))
+        .select(
+            "classification_id", "security_sk", "ticker", "theme_id", "provenance",
+            "confidence", "rationale", "effective_from", "effective_to",
+            "classification_version", "updated_at",
+        )
+        .dropDuplicates(["classification_id"])
+    )
+    (
+        classification_target.alias("t")
+        .merge(llm_classifications.alias("s"), "t.classification_id = s.classification_id")
+        .whenMatchedUpdateAll()
+        .whenNotMatchedInsertAll()
+        .execute()
+    )
 
 
 macro_schema = StructType([StructField("data", ArrayType(MapType(StringType(), StringType())))])

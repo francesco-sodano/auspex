@@ -107,7 +107,11 @@ BEGIN
                             ON t.owner_user_sk = c.owner_user_sk
                          AND t.transaction_id = c.corrects_transaction_id
                         WHERE c.corrects_transaction_id IS NOT NULL
-                            AND (t.transaction_id IS NULL OR t.corrects_transaction_id IS NOT NULL)
+                            AND (
+                                t.transaction_id IS NULL
+                                OR c.transaction_id = c.corrects_transaction_id
+                                OR c.created_at <= t.created_at
+                            )
                 ) OR EXISTS (
                         SELECT owner_user_sk, corrects_transaction_id
                         FROM dbo.fact_portfolio_transaction

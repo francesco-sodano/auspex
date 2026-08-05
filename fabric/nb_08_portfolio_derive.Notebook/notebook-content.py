@@ -107,6 +107,7 @@ def _merge_all(table_name: str, source_df, condition: str) -> None:
 for required_table in [
     "dim_security", "fact_market_daily", "fact_fx_rate",
     "fact_theme_membership", "fact_theme_opportunity_score", "security_daily_features",
+    "security_theme_classification",
 ]:
     _require_table(required_table)
 
@@ -381,6 +382,32 @@ invalid_score_attribution = latest_scores.filter(
 )
 if not invalid_score_attribution.isEmpty():
     raise RuntimeError("Opportunity Score projection contains incomplete attribution")
+classification_window = Window.partitionBy("security_sk").orderBy(
+    F.when(F.col("provenance") == F.lit("manual"), F.lit(0)).otherwise(F.lit(1)),
+    F.col("confidence").desc(),
+    F.col("updated_at").desc(),
+    F.col("classification_id"),
+)
+latest_classifications = (
+    spark.table("security_theme_classification")
+    .filter(
+        (F.col("effective_from") <= F.to_date(F.lit(to_date)))
+        & (F.col("effective_to").isNull() | (F.to_date(F.lit(to_date)) < F.col("effective_to")))
+    )
+    .withColumn("classification_row_number", F.row_number().over(classification_window))
+    .filter(F.col("classification_row_number") == 1)
+    .join(current_securities.select("security_sk"), "security_sk", "inner")
+    .select(
+        F.concat(F.lit("classification:security:"), F.col("security_sk")).alias("id"),
+        F.lit("theme_classification").alias("kind"),
+        "security_sk", "ticker", "theme_id", "provenance",
+        F.col("confidence").cast(StringType()).alias("confidence"),
+        "rationale", "classification_version",
+        F.lit(to_date).alias("as_of"),
+        F.lit("fabric").alias("source_id"),
+        F.lit(projection_generation).alias("generation"),
+    )
+)
 dated_fx = (
     spark.table("fact_fx_rate")
     .filter(F.col("knowledge_date") <= F.to_date(F.lit(to_date)))
@@ -411,6 +438,7 @@ dated_fx = (
     .unionByName(latest_fx, allowMissingColumns=True)
     .unionByName(dated_fx, allowMissingColumns=True)
     .unionByName(latest_scores, allowMissingColumns=True)
+    .unionByName(latest_classifications, allowMissingColumns=True)
     .coalesce(1)
     .write.mode("overwrite")
     .json("Files/serving/market_data")
@@ -760,14 +788,24 @@ positions = (
 # Keep ingestion coverage aligned with every held security and every constituent
 # of the themes represented by current positions.
 portfolio_security_keys = positions.select("security_sk").distinct()
+theme_membership = spark.table("fact_theme_membership")
+latest_theme_snapshots = theme_membership.groupBy("theme_id").agg(
+    F.max("event_date").alias("latest_event_date")
+)
+current_theme_membership = (
+    theme_membership.alias("membership")
+    .join(latest_theme_snapshots.alias("latest"), "theme_id", "inner")
+    .filter(F.col("membership.event_date") == F.col("latest.latest_event_date"))
+    .select("membership.*")
+)
 portfolio_theme_ids = (
-    spark.table("fact_theme_membership")
+    current_theme_membership
     .join(portfolio_security_keys, "security_sk", "inner")
     .select("theme_id")
     .distinct()
 )
 required_coverage_symbols = (
-    spark.table("fact_theme_membership")
+    current_theme_membership
     .join(portfolio_theme_ids, "theme_id", "inner")
     .select("security_sk")
     .unionByName(portfolio_security_keys)
@@ -797,8 +835,11 @@ existing_coverage = {
     if str(symbol).strip()
 }
 required_coverage = {row.ticker for row in required_coverage_symbols.collect()}
-active_symbols = sorted(existing_active | required_coverage)
-coverage_symbols = sorted(existing_coverage | set(active_symbols))
+current_security_symbols = {
+    row.ticker for row in current_securities.select("ticker").distinct().collect()
+}
+active_symbols = sorted(required_coverage)
+coverage_symbols = sorted((existing_coverage & current_security_symbols) | required_coverage)
 active_max_symbols = int(
     (alpha_vantage_universe.get("policy") or {}).get("active_max_symbols", 1000)
 )
@@ -965,7 +1006,7 @@ if not positions_enriched.isEmpty():
 
 if portfolio_bronze_exists:
     completed_position_count = positions_enriched.count()
-    completed_valuation_count = valuation.count()
+    completed_valuation_count = spark.table("fact_portfolio_valuation").count()
     completed_manifest = spark.sql(f"""
         SELECT
             '{selected_snapshot_id}' AS snapshot_id,

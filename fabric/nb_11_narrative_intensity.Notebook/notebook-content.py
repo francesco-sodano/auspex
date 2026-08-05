@@ -55,10 +55,12 @@ from pyspark.sql.types import (
 )
 
 NARRATIVE_PATH = "Files/serving/narrative_features"
+ACTIVE_UNIVERSE_PATH = "Files/config/alpha_vantage_universe.json"
 PROMPT_VERSION = "e21_narrative_v1"
 PROMPT_SHA256 = "70987525ba240b9008ec684c5cab346cfd02b10f8315d7c2f66adff381c930a5"
 MODEL_VERSION = "gpt-4o:2024-11-20"
 LOOKBACK_DAYS = 90
+NARRATIVE_DOCUMENTS_PER_SECURITY = 3
 COMPONENT_WEIGHTS = {
     "sentiment_strength": 0.10,
     "sentiment_velocity_strength": 0.10,
@@ -132,6 +134,14 @@ if parsed_as_of_date > date.today():
     raise ValueError("as_of_date cannot be in the future")
 as_of = F.to_date(F.lit(as_of_date))
 date_sk = int(parsed_as_of_date.strftime("%Y%m%d"))
+active_universe = json.loads(mssparkutils.fs.head(ACTIVE_UNIVERSE_PATH))
+active_symbols = sorted({
+    str(symbol).strip().upper()
+    for symbol in (active_universe.get("tiers") or {}).get("active", [])
+    if str(symbol).strip()
+})
+if not active_symbols:
+    raise RuntimeError("E21 active narrative universe is empty")
 
 projection_schema = StructType([
     StructField("id", StringType()),
@@ -195,6 +205,8 @@ invalid_cache_contract = cache.filter(
     | F.col("source_id").isNull()
     | F.col("document_revision_hash").isNull()
     | F.col("security_sk").isNull()
+    | F.col("symbol").isNull()
+    | ~F.upper(F.col("symbol")).isin(active_symbols)
     | (F.col("source_type") != F.lit("news"))
     | (F.col("prompt_version") != F.lit(PROMPT_VERSION))
     | (F.col("prompt_sha256") != F.lit(PROMPT_SHA256))
@@ -255,7 +267,10 @@ if duplicate_cache_ids or duplicate_document_ids or invalid_cache_contract or in
 
 # CELL ********************
 
-evidence = spark.table("fact_evidence_chunk").filter(F.col("source_type") == "news")
+evidence = spark.table("fact_evidence_chunk").filter(
+    (F.col("source_type") == "news")
+    & F.upper(F.col("symbol")).isin(active_symbols)
+)
 cache_evidence = cache.alias("c").join(
     evidence.alias("e"),
     (F.col("c.document_id") == F.col("e.id"))
@@ -299,7 +314,7 @@ evidence_asof = evidence.filter(
     & (F.col("knowledge_date") <= as_of)
     & (F.col("event_date") >= F.date_sub(as_of, LOOKBACK_DAYS - 1))
 )
-latest_revision_window = Window.partitionBy("source_id").orderBy(
+latest_revision_window = Window.partitionBy("security_sk").orderBy(
     F.col("knowledge_date").desc(),
     F.col("event_date").desc(),
     F.col("revision_hash").desc(),
@@ -307,7 +322,7 @@ latest_revision_window = Window.partitionBy("source_id").orderBy(
 )
 eligible_latest = (
     evidence_asof.withColumn("revision_row_number", F.row_number().over(latest_revision_window))
-    .filter(F.col("revision_row_number") == 1)
+    .filter(F.col("revision_row_number") <= NARRATIVE_DOCUMENTS_PER_SECURITY)
     .drop("revision_row_number")
 )
 source_cache_orphan_count = eligible_latest.alias("e").join(

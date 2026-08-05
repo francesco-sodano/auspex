@@ -17,9 +17,9 @@ EDGAR_USER_AGENT_TOKEN = "{{EDGAR_USER_AGENT}}"
 FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 STORAGE_SCOPE = "https://storage.azure.com/.default"
 ENGINE_TARGETS = {
-    ROOT / "engine" / "thesis.py": "Files/config/e14/c2e46ed74b73c478528b4b39177990e988f9477dbd1be91c9d756eb5b844adab.py",
+    ROOT / "engine" / "thesis.py": "Files/config/e14/d861397782bbb25849db40eb22bb76c574bf76c8be344d8d1328d3c18b559ad2.py",
     ROOT / "engine" / "fundamental_anchor.py": "Files/config/e20/84641443bde957496881c8cce27b4c8a0dda7f2b5b94eca79b4fdd6213a9a14b.py",
-    ROOT / "engine" / "narrative_premium.py": "Files/config/e22/09e9532dd031ecb45e8e3591986164d763a4ebbec3da43246c8ca8040aaa02ea.py",
+    ROOT / "engine" / "narrative_premium.py": "Files/config/e22/9a8314cfd0990f897992c7e26ba9c2daf060f8af7c5c0a78e0d656a3821e2b07.py",
 }
 
 
@@ -119,16 +119,29 @@ class FabricItemDeployer:
 
     def _wait_for_operation(self, response):
         if response.status_code != 202:
-            return
+            try:
+                return response.json()
+            except ValueError:
+                return None
         location = response.headers.get("Location") or response.headers.get("Operation-Location")
         if not location:
             raise RuntimeError("Fabric accepted an item deployment without an operation URL")
         while True:
             result = self.http.get(location, headers=self._headers(FABRIC_SCOPE))
             result.raise_for_status()
-            status = str(result.json().get("status") or "").lower()
+            operation = result.json()
+            status = str(operation.get("status") or "").lower()
             if status in {"succeeded", "completed"}:
-                return
+                operation_result = self.http.get(
+                    f"{location.rstrip('/')}/result",
+                    headers=self._headers(FABRIC_SCOPE),
+                )
+                if operation_result.status_code < 400:
+                    try:
+                        return operation_result.json()
+                    except ValueError:
+                        pass
+                return operation
             if status in {"failed", "cancelled"}:
                 raise RuntimeError(f"Fabric item deployment {status}: {result.text}")
             time.sleep(int(result.headers.get("Retry-After", "2")))
@@ -175,6 +188,78 @@ class FabricItemDeployer:
         response.raise_for_status()
         return {"path": target_path, "sha256": digest, "action": "created"}
 
+    def _refresh_ontology_graph(self, ontology_id):
+        graph_name = f"auspex_iq_pilot_graph_{ontology_id.replace('-', '')}"
+        response = self.http.get(
+            f"{self.base_url}/GraphModels", headers=self._headers(FABRIC_SCOPE)
+        )
+        response.raise_for_status()
+        matches = [
+            graph
+            for graph in response.json().get("value", [])
+            if graph.get("displayName") == graph_name
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"Expected one managed Graph model named {graph_name}, found {len(matches)}"
+            )
+        graph = matches[0]
+        graph_url = f"{self.base_url}/GraphModels/{graph['id']}"
+        response = self.http.post(
+            f"{graph_url}/getDefinition", headers=self._headers(FABRIC_SCOPE)
+        )
+        response.raise_for_status()
+        definition_result = self._wait_for_operation(response) or {}
+        definition = definition_result.get("definition", {})
+        parts = [
+            part for part in definition.get("parts", []) if part.get("path") != ".platform"
+        ]
+        if len(parts) < 5:
+            raise RuntimeError(f"Managed Graph definition is incomplete: parts={len(parts)}")
+
+        response = self.http.get(
+            f"{graph_url}/jobs/instances?jobType=Refresh",
+            headers=self._headers(FABRIC_SCOPE),
+        )
+        response.raise_for_status()
+        known_job_ids = {
+            job.get("id") for job in response.json().get("value", []) if job.get("id")
+        }
+        response = self.http.post(
+            f"{graph_url}/updateDefinition",
+            headers=self._headers(FABRIC_SCOPE),
+            json={"definition": {"parts": parts}},
+        )
+        response.raise_for_status()
+        self._wait_for_operation(response)
+
+        refresh_job = None
+        for _ in range(30):
+            response = self.http.get(
+                f"{graph_url}/jobs/instances?jobType=Refresh",
+                headers=self._headers(FABRIC_SCOPE),
+            )
+            response.raise_for_status()
+            refresh_job = next(
+                (
+                    job
+                    for job in response.json().get("value", [])
+                    if job.get("id") not in known_job_ids
+                ),
+                None,
+            )
+            if refresh_job is not None:
+                break
+            time.sleep(2)
+        if refresh_job is None:
+            raise RuntimeError("Managed Graph save did not create a refresh job")
+        return {
+            "graph_id": graph["id"],
+            "graph_name": graph_name,
+            "query_readiness": graph.get("properties", {}).get("queryReadiness"),
+            "refresh_job": refresh_job,
+        }
+
     def deploy(self, *, include_ontology=True):
         engines = [
             self._upload_engine(source_path, target_path)
@@ -191,6 +276,7 @@ class FabricItemDeployer:
             for item_path in sorted(FABRIC_ROOT.glob("*.Notebook"))
         ]
         ontology = None
+        graph = None
         if include_ontology:
             ontology_path = FABRIC_ROOT / "auspex_iq_pilot.Ontology"
             ontology = self._upsert(
@@ -199,7 +285,24 @@ class FabricItemDeployer:
                 self._parts(ontology_path),
                 items,
             )
-        return {"engines": engines, "notebooks": notebooks, "ontology": ontology}
+            refreshed_items = self._items()
+            ontology_matches = [
+                item
+                for item in refreshed_items
+                if item.get("displayName") == "auspex_iq_pilot"
+                and item.get("type") == "Ontology"
+            ]
+            if len(ontology_matches) != 1:
+                raise RuntimeError(
+                    "Expected one deployed Ontology named auspex_iq_pilot before graph refresh"
+                )
+            graph = self._refresh_ontology_graph(ontology_matches[0]["id"])
+        return {
+            "engines": engines,
+            "notebooks": notebooks,
+            "ontology": ontology,
+            "graph": graph,
+        }
 
 
 def main():

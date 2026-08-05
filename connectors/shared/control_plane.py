@@ -57,6 +57,25 @@ class CosmosControlPlane:
     def upsert_security_catalog(self, document: dict) -> None:
         self._container("security_catalog").upsert_item(document)
 
+    def get_security_by_ticker(self, ticker: str) -> Optional[dict]:
+        try:
+            normalized = str(ticker or "").strip().upper()
+            return self._container("security_catalog").read_item(
+                item=f"ticker:{normalized}",
+                partition_key=f"ticker:{normalized}",
+            )
+        except CosmosResourceNotFoundError:
+            return None
+
+    def get_market_data(self, document_id: str) -> Optional[dict]:
+        try:
+            return self._container("market_data").read_item(
+                item=document_id,
+                partition_key=document_id,
+            )
+        except CosmosResourceNotFoundError:
+            return None
+
     def count_documents(self, container_name: str) -> int:
         values = self._container(container_name).query_items(
             query="SELECT VALUE COUNT(1) FROM c",

@@ -138,7 +138,7 @@ class E5GoldContractTests(unittest.TestCase):
         for revision_grain in [
             "accession_no, line_no",
             "accession_no, security_sk, entity_sk, date_sk, holding_revision_hash",
-            "security_sk, entity_sk, event_date, ownership_revision_hash",
+            "accession_no, security_sk, entity_sk, event_date, ownership_revision_hash",
             "transaction_id, contract_revision_hash",
             "indicator_code, event_date, macro_revision_hash",
             "ccy_pair, event_date, fx_revision_hash",

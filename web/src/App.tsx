@@ -179,6 +179,8 @@ type PortfolioHomeSummary = {
     score_as_of: string | null
     score_coverage_status: 'READY' | 'PARTIAL' | null
     theme_id: string | null
+    theme_provenance: 'manual' | 'llm' | null
+    theme_confidence: string | null
   }>
   exposures: Record<'sector' | 'country' | 'currency' | 'theme' | 'exchange', Array<{
     name: string
@@ -241,9 +243,9 @@ type RecommendationResponse = {
     rationale: string
     suppression_reasons: string[]
     tax_flags: string[]
-    opportunity_score: string
+    opportunity_score: string | null
     theme_id: string | null
-    coverage_status: 'READY' | 'PARTIAL'
+    coverage_status: 'READY' | 'PARTIAL' | 'WITHHELD'
     coverage_reasons: string[]
     attribution: Array<{
       key: string
@@ -657,6 +659,13 @@ function ProductHome({ user }: { user: AppUser }) {
   const formatMoney = (value: string | null | undefined) => value === null || value === undefined
     ? 'Pending valuation'
     : new Intl.NumberFormat(undefined, { style: 'currency', currency: summary?.base_currency || user.base_currency }).format(Number(value))
+  const formatScore = (holding: PortfolioHomeSummary['holdings'][number]) => {
+    if (holding.opportunity_score === null) return '—'
+    const score = Number(holding.opportunity_score)
+    if (holding.score_coverage_status !== 'PARTIAL') return score.toFixed(1)
+    const lower = Math.min(90, Math.floor(score / 10) * 10)
+    return `${lower}–${lower + 10}`
+  }
   const earnings = summary?.total_earnings_base === null || summary?.total_earnings_base === undefined
     ? null
     : Number(summary.total_earnings_base)
@@ -786,12 +795,12 @@ function ProductHome({ user }: { user: AppUser }) {
               <table className="holdings-table analytical-holdings">
                 <thead><tr><th scope="col">Security</th><th scope="col">7 sessions</th><th scope="col"><MetricLabel metricKey="position_quantity" metadata={metadata} fallback="Quantity" /></th><th scope="col"><MetricLabel metricKey="latest_price" metadata={metadata} fallback="Last price" /></th><th scope="col"><MetricLabel metricKey="stocks_value" metadata={metadata} fallback="Stock value" /></th><th scope="col"><MetricLabel metricKey="opportunity_score" metadata={metadata} fallback="Auspex score" /></th></tr></thead>
                 <tbody>{summary?.holdings.map((holding) => <tr key={`${holding.security_sk}-${holding.ticker}`}>
-                  <th scope="row"><strong>{holding.ticker}</strong><small>{holding.company_name}</small><small>{holding.exchange || 'Exchange unavailable'} · {(holding.theme_id || 'Unclassified').replaceAll('_', ' ')}</small></th>
+                  <th scope="row"><strong>{holding.ticker}</strong><small>{holding.company_name}</small><small>{holding.exchange || 'Exchange unavailable'} · {(holding.theme_id || 'Unclassified').replaceAll('_', ' ')}{holding.theme_provenance ? ` · ${holding.theme_provenance} classification` : ''}</small></th>
                   <td><PriceSparkline points={holding.price_history} ticker={holding.ticker} /></td>
                   <td>{holding.quantity}<small>Avg {holding.average_acquisition_price ? `${holding.currency} ${holding.average_acquisition_price}` : 'unavailable'}</small></td>
                   <td>{holding.latest_price ? `${holding.price_currency || holding.currency} ${holding.latest_price}` : 'Pending'}<small>{holding.price_as_of || 'Date unavailable'}</small></td>
                   <td>{formatMoney(holding.market_value_base)}<small className={Number(holding.gain_loss_pct) > 0 ? 'positive' : Number(holding.gain_loss_pct) < 0 ? 'negative' : ''}>{holding.gain_loss_pct === null ? 'Return unavailable' : `${Number(holding.gain_loss_pct) >= 0 ? '+' : ''}${Number(holding.gain_loss_pct).toFixed(1)}% vs acquisition`}</small></td>
-                  <td><strong className="holding-score">{holding.opportunity_score === null ? '—' : Number(holding.opportunity_score).toFixed(1)}</strong><small>{holding.score_coverage_status ? `${holding.score_coverage_status.toLowerCase()} · ${holding.score_as_of}` : 'Score unavailable'}</small></td>
+                  <td><strong className="holding-score">{formatScore(holding)}</strong><small>{holding.score_coverage_status ? `${holding.score_coverage_status.toLowerCase()}${holding.score_coverage_status === 'PARTIAL' ? ' band' : ''} · ${holding.score_as_of}` : 'Score unavailable'}</small></td>
                 </tr>)}</tbody>
               </table>
             </div>
@@ -809,7 +818,7 @@ function ProductHome({ user }: { user: AppUser }) {
               {recommendations.recommendations.slice(0, 12).map((recommendation) => <article className={`recommendation-card action-${recommendation.action.toLowerCase()}`} key={recommendation.recommendation_id} aria-labelledby={`recommendation-${recommendation.recommendation_id}`}>
                 <dl className="recommendation-card-head">
                   <div className="recommendation-security"><dt>Security</dt><dd><strong id={`recommendation-${recommendation.recommendation_id}`}>{recommendation.ticker}</strong><small>{(recommendation.theme_id || 'Unclassified').replaceAll('_', ' ')} · {recommendation.confidence.toLowerCase()} confidence</small></dd></div>
-                  <div><dt>Auspex score</dt><dd><strong>{Number(recommendation.opportunity_score).toFixed(1)}</strong><small>{recommendation.coverage_status.toLowerCase()} coverage</small></dd></div>
+                  <div><dt>Auspex score</dt><dd><strong>{recommendation.opportunity_score === null ? '—' : Number(recommendation.opportunity_score).toFixed(1)}</strong><small>{recommendation.coverage_status.toLowerCase()} coverage</small></dd></div>
                   <div><dt>Action</dt><dd><b className={`recommendation-action action-${recommendation.action.toLowerCase()}`}>{recommendation.action}</b><small>{recommendation.suppression_reasons.length ? recommendation.suppression_reasons.join(', ').replaceAll('_', ' ') : 'Policy eligible'}</small></dd></div>
                   <div><dt>Current → target</dt><dd><strong>{(Number(recommendation.current_weight) * 100).toFixed(1)}% → {(Number(recommendation.target_weight) * 100).toFixed(1)}%</strong><small>Portfolio weight</small></dd></div>
                   <div><dt>Suggested amount</dt><dd><strong>{new Intl.NumberFormat(undefined, { style: 'currency', currency: recommendations.base_currency }).format(Number(recommendation.suggested_amount_base))}</strong><small>Est. cost {new Intl.NumberFormat(undefined, { style: 'currency', currency: recommendations.base_currency }).format(Number(recommendation.estimated_cost_base))}</small></dd></div>
@@ -826,7 +835,7 @@ function ProductHome({ user }: { user: AppUser }) {
                 {dispositionErrors[recommendation.recommendation_id] && <p className="error" role="alert">{dispositionErrors[recommendation.recommendation_id]}</p>}
                 {explanationErrors[recommendation.recommendation_id] && <p className="error" role="alert">{explanationErrors[recommendation.recommendation_id]}</p>}
                 {explanations[recommendation.recommendation_id]?.status === 'withheld' && <p className="grounded-withheld">Explanation withheld: {explanations[recommendation.recommendation_id].reasons.map((reason) => reason.replaceAll('_', ' ')).join(', ')}.</p>}
-                {explanations[recommendation.recommendation_id]?.status === 'published' && <div className="grounded-output"><p>{explanations[recommendation.recommendation_id].output.explanation}</p><small>{explanations[recommendation.recommendation_id].output.uncertainty}</small><div className="evidence-list">{explanations[recommendation.recommendation_id].citations.map((citation) => <details className="evidence-item" key={citation.id}><summary>{citation.title || citation.source_name || 'Source evidence'}<small>{citation.knowledge_date ? `Known ${citation.knowledge_date}` : 'Knowledge date unavailable'}</small></summary>{citation.excerpt && <p>{citation.excerpt}</p>}<dl><div><dt>Source</dt><dd>{citation.source_name || citation.source_type || 'Unavailable'}</dd></div><div><dt>Event date</dt><dd>{citation.event_date || 'Unavailable'}</dd></div><div><dt>Knowledge date</dt><dd>{citation.knowledge_date || 'Unavailable'}</dd></div><div><dt>Content</dt><dd>{citation.content_status?.replaceAll('_', ' ') || 'Unavailable'}</dd></div></dl>{citation.url && <a href={citation.url} target="_blank" rel="noreferrer">Open original source <ArrowRight size={12} /></a>}</details>)}</div></div>}
+                {explanations[recommendation.recommendation_id]?.status === 'published' && <div className="grounded-output" data-ai-generated="true"><span className="ai-output-label">AI-generated explanation</span><p>{explanations[recommendation.recommendation_id].output.explanation}</p><small>{explanations[recommendation.recommendation_id].output.uncertainty}</small><div className="evidence-list">{explanations[recommendation.recommendation_id].citations.map((citation) => <details className="evidence-item" key={citation.id}><summary>{citation.title || citation.source_name || 'Source evidence'}<small>{citation.knowledge_date ? `Known ${citation.knowledge_date}` : 'Knowledge date unavailable'}</small></summary>{citation.excerpt && <p>{citation.excerpt}</p>}<dl><div><dt>Source</dt><dd>{citation.source_name || citation.source_type || 'Unavailable'}</dd></div><div><dt>Event date</dt><dd>{citation.event_date || 'Unavailable'}</dd></div><div><dt>Knowledge date</dt><dd>{citation.knowledge_date || 'Unavailable'}</dd></div><div><dt>Content</dt><dd>{citation.content_status?.replaceAll('_', ' ') || 'Unavailable'}</dd></div></dl>{citation.url && <a href={citation.url} target="_blank" rel="noreferrer">Open original source <ArrowRight size={12} /></a>}</details>)}</div></div>}
               </article>)}
             </div>}
             <p className="recommendation-disclaimer">{recommendations?.disclaimer || 'Research only; not financial or tax advice. You decide and execute.'}</p>
@@ -1431,7 +1440,7 @@ function DiscussionPage({ user }: { user: AppUser }) {
       <AccountHeader user={user} currentPage="discussion" />
       <section className="discussion-main">
         <header className="discussion-heading">
-          <div><span className="eyebrow">Grounded portfolio research</span><h1>Discussion</h1><p>Ask about the portfolio, its evidence, or a hypothetical amount. Decisions and arithmetic stay deterministic.</p></div>
+          <div><span className="eyebrow">AI-assisted portfolio research</span><h1>Discussion</h1><p>You are interacting with an AI system. Its answers use your portfolio and point-in-time evidence; decisions and arithmetic stay deterministic.</p></div>
           <div className="discussion-heading-actions">
             <button className="secondary-action" type="button" onClick={() => setSettingsOpen((open) => !open)}><SlidersHorizontal size={15} /> Advisor settings</button>
             <button className="secondary-action" type="button" onClick={newDiscussion}><Plus size={15} /> New discussion</button>
@@ -1468,7 +1477,7 @@ function DiscussionPage({ user }: { user: AppUser }) {
               <div className="user-turn"><span>You</span><p>{exchange.query}</p></div>
               <div className={`advisor-turn ${exchange.status}`}>
                 <div className="advisor-turn-meta"><span>Auspex</span><small>{exchange.confidence} confidence · {new Date(exchange.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small></div>
-                <p>{exchange.answer}</p>
+                <p data-ai-generated="true">{exchange.answer}</p>
                 {exchange.what_if && <dl className="what-if-result">
                   <div><dt>Amount</dt><dd>{exchange.what_if.base_currency} {exchange.what_if.amount_base}</dd></div>
                   <div><dt>Projected weight</dt><dd>{(Number(exchange.what_if.projected_weight) * 100).toFixed(1)}%</dd></div>
@@ -1477,7 +1486,7 @@ function DiscussionPage({ user }: { user: AppUser }) {
                 </dl>}
                 {exchange.metric_keys.length > 0 && <div className="discussion-metrics">{exchange.metric_keys.map((metricKey) => <button type="button" key={metricKey} onClick={() => ask(`Explain the ${metricKey} number in your last answer.`)}><CircleHelp size={13} /> Explain this number <small>{metricKey.replaceAll('_', ' ')}</small></button>)}</div>}
                 {exchange.citations.length > 0 && <details className="discussion-evidence"><summary>{exchange.citations.length} grounded source{exchange.citations.length === 1 ? '' : 's'}</summary><ol>{exchange.citations.map((citation) => <li key={citation.id}>{citation.url ? <a href={citation.url} target="_blank" rel="noreferrer">{citation.title || citation.source_name || citation.id}</a> : <strong>{citation.title || citation.source_name || citation.id}</strong>}<small>{citation.source_type} · known {citation.knowledge_date || 'date unavailable'}</small></li>)}</ol></details>}
-                {exchange.limitations && <small className="discussion-limitations">{exchange.limitations}</small>}
+                {exchange.limitations && <small className="discussion-limitations" data-ai-generated="true">{exchange.limitations}</small>}
               </div>
             </article>)}
             <div ref={endRef} />

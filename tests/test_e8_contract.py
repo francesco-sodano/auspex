@@ -30,6 +30,12 @@ class E8ContractTests(unittest.TestCase):
         self.assertIn("contract_changed", app)
         self.assertIn('source.update(_SOURCE_SEEDS["portfolio"])', app)
         self.assertIn('route="serving_projection_status"', app)
+        self.assertIn('route="sync_active_market_projections"', app)
+        self.assertIn('bw.read_universe("alpha_vantage", "active")', app)
+        self.assertIn('"active market projection is incomplete: "', app)
+        active_sync = app[app.index("def _sync_active_market_projections"):]
+        active_sync = active_sync[:active_sync.index('@app.route(route="serving_projection_status"')]
+        self.assertNotIn("delete_stale_projection_generation", active_sync)
 
     def test_source_seed_enables_mvp_feeds_and_keeps_fallbacks_disabled(self):
         sources = json.loads(_read(CONNECTORS / "shared" / "sources_seed.json"))
@@ -80,6 +86,18 @@ class E8ContractTests(unittest.TestCase):
         self.assertIn("knowledge_date", nb)
         self.assertIn("spark.read.text(paths)", nb)
         self.assertNotIn("spark.read.json(paths)", nb)
+        self.assertIn('(\"quantum_computing\", \"Quantum Computing\", \"QTUM\")', nb)
+        self.assertIn("CREATE TABLE IF NOT EXISTS security_theme_classification", nb)
+        self.assertIn('(\"VRT\", \"data_center_buildout\"', nb)
+        self.assertIn('(\"COHR\", \"data_center_buildout\"', nb)
+        self.assertIn('(\"RGTI\", \"quantum_computing\"', nb)
+        self.assertIn('F.lit("manual")', nb)
+        self.assertIn('F.to_timestamp(F.lit("2026-08-04T00:00:00Z"))', nb)
+        self.assertIn('_date_paths("theme_classifier")', nb)
+        self.assertIn('F.lit("theme_classifier")', nb)
+        self.assertIn('F.lit("classified")', nb)
+        self.assertIn("invalid_llm_classifications", nb)
+        self.assertIn('(F.col("confidence") > F.lit(0.85))', nb)
 
     def test_alpha_vantage_notebook_builds_macro_and_theme_silver_dq_boundary(self):
         nb = notebook_code("nb_05_alpha_vantage_to_gold")
@@ -318,6 +336,11 @@ class E8ContractTests(unittest.TestCase):
         self.assertIn("macro_revision_hash CHAR(64) NOT NULL", base_facts)
         self.assertIn("fx_revision_hash CHAR(64)    NOT NULL", fx)
         self.assertIn("theme_revision_hash CHAR(64)  NOT NULL", sql)
+        dimensions = _read(ROOT / "fabric" / "warehouse" / "01_dims.sql")
+        promotion = _read(ROOT / "fabric" / "warehouse" / "05_promote_lakehouse_snapshot.sql")
+        self.assertIn("dbo.security_theme_classification", dimensions)
+        self.assertIn("FROM auspex_bronze.dbo.security_theme_classification", promotion)
+        self.assertIn("provenance NOT IN ('manual', 'llm')", promotion)
         self.assertRegex(sql, r"filer_name\s+VARCHAR\(8000\)\s+NULL")
         self.assertIn("CREATE TABLE dbo.fact_macro_revisioned", base_facts)
         self.assertIn("CREATE TABLE dbo.fact_fx_rate_revisioned", fx)

@@ -1,11 +1,8 @@
 // keyvault.bicep — Azure Key Vault for Auspex
 // Region: Switzerland North — supported.
 //
-// Secrets that MUST be set manually after deployment (never set via Bicep):
-//   EDGAR-USER-AGENT      e.g. "Auspex/1.0 your@email.com"  — required by SEC EDGAR
-//   ALPHAVANTAGE-API-KEY  — Alpha Vantage premium key
-//   FMP-API-KEY           — Financial Modeling Prep free key
-//   FINNHUB-API-KEY       — Finnhub free key
+// Enabled-source credentials are supplied as secure parameters by the deployment.
+// FMP-API-KEY remains optional because the FMP source is disabled by default.
 //
 // APPLICATIONINSIGHTS-CONNECTION-STRING is written here from the monitor module output
 // so Function Apps can reference it as a Key Vault reference.
@@ -27,6 +24,18 @@ param appInsightsConnectionString string
 
 @description('Log Analytics workspace resource ID for diagnostic settings')
 param logAnalyticsWorkspaceId string
+
+@secure()
+@description('SEC EDGAR user agent')
+param edgarUserAgent string
+
+@secure()
+@description('Alpha Vantage API key')
+param alphaVantageApiKey string
+
+@secure()
+@description('Finnhub API key')
+param finnhubApiKey string
 
 var kvName = 'auspex-${env}-kv'
 
@@ -65,6 +74,30 @@ resource appInsightsSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   name: 'APPLICATIONINSIGHTS-CONNECTION-STRING'
   properties: {
     value: appInsightsConnectionString
+  }
+}
+
+resource edgarUserAgentSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: keyVault
+  name: 'EDGAR-USER-AGENT'
+  properties: {
+    value: edgarUserAgent
+  }
+}
+
+resource alphaVantageSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: keyVault
+  name: 'ALPHAVANTAGE-API-KEY'
+  properties: {
+    value: alphaVantageApiKey
+  }
+}
+
+resource finnhubSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: keyVault
+  name: 'FINNHUB-API-KEY'
+  properties: {
+    value: finnhubApiKey
   }
 }
 

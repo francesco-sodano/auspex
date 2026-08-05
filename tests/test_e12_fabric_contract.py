@@ -32,7 +32,7 @@ class E12FabricContractTests(unittest.TestCase):
         self.assertIn('F.collect_list(F.struct("date", "price"))', notebook)
         self.assertIn('alias("prices")', notebook)
         function_app = (ROOT / "connectors" / "function_app.py").read_text(encoding="utf-8")
-        self.assertIn('("quote:", "history:", "fx:", "score:security:")', function_app)
+        self.assertIn('("quote:", "history:", "fx:", "score:security:", "classification:security:")', function_app)
         self.assertIn('bw.read_serving_projection("market_history")', function_app)
         self.assertIn('F.when(F.col("coverage_complete")', notebook)
         self.assertIn("Files/serving/security_catalog", notebook)
@@ -53,7 +53,11 @@ class E12FabricContractTests(unittest.TestCase):
         self.assertIn("effective_ledger", notebook)
         self.assertIn("required_coverage_symbols", notebook)
         self.assertIn('universe_path = "Files/config/alpha_vantage_universe.json"', notebook)
-        self.assertIn("existing_active | required_coverage", notebook)
+        self.assertIn("latest_theme_snapshots", notebook)
+        self.assertIn("current_theme_membership", notebook)
+        self.assertIn("active_symbols = sorted(required_coverage)", notebook)
+        self.assertIn("existing_coverage & current_security_symbols", notebook)
+        self.assertNotIn("existing_active | required_coverage", notebook)
         self.assertIn("Portfolio theme universe exceeds configured active maximum", notebook)
         self.assertIn("invalid_correction_order", notebook)
         self.assertNotIn("correction_chains", notebook)
@@ -85,13 +89,28 @@ class E12FabricContractTests(unittest.TestCase):
         self.assertIn("portfolio_snapshot_manifest", notebook)
         self.assertIn("snapshot_id", notebook)
         self.assertIn("'completed' AS status", notebook)
+        self.assertIn("security_theme_classification", notebook)
+        self.assertIn('F.lit("theme_classification").alias("kind")', notebook)
+        self.assertIn(
+            '.join(current_securities.select("security_sk"), "security_sk", "inner")',
+            notebook,
+        )
+        self.assertIn(
+            'completed_valuation_count = spark.table("fact_portfolio_valuation").count()',
+            notebook,
+        )
 
-    def test_metrics_priority_date_fails_before_destructive_rebuild(self):
+    def test_metrics_priority_date_resolves_latest_session_before_destructive_rebuild(self):
         notebook = notebook_code("nb_04_metrics")
 
-        validation = notebook.index("priority_as_of_date must exist in fact_market_daily")
+        validation = notebook.index("priority_as_of_date has no market session on or before it")
         score_delete = notebook.index('DeltaTable.forName(spark, "fact_theme_opportunity_score").delete()')
         self.assertLess(validation, score_delete)
+        self.assertIn(
+            '.filter(F.col("event_date") <= F.lit(parsed_priority_as_of_date))',
+            notebook,
+        )
+        self.assertIn('F.max("event_date").alias("event_date")', notebook)
 
     def test_warehouse_portfolio_contract_is_owner_scoped(self):
         dimensions = (WAREHOUSE / "06_portfolio_dims.sql").read_text(encoding="utf-8")
@@ -144,6 +163,9 @@ class E12FabricContractTests(unittest.TestCase):
         self.assertIn("position_weight", promotion)
         self.assertIn("portfolio_snapshot_manifest", promotion)
         self.assertIn("status = 'completed'", promotion)
+        self.assertIn("c.created_at <= t.created_at", promotion)
+        self.assertNotIn("t.corrects_transaction_id IS NOT NULL", promotion)
+        self.assertNotIn("active_universe", views)
 
 
 if __name__ == "__main__":

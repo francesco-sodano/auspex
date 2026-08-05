@@ -45,6 +45,21 @@ param logRetentionDays int = 30
 @minLength(3)
 param alertEmailAddress string
 
+@secure()
+@description('SEC EDGAR user agent with an operator-monitored contact address')
+@minLength(3)
+param edgarUserAgent string
+
+@secure()
+@description('Alpha Vantage API key for enabled price, fundamental, FX, news, and ETF sources')
+@minLength(1)
+param alphaVantageApiKey string
+
+@secure()
+@description('Finnhub API key for the enabled company-news source')
+@minLength(1)
+param finnhubApiKey string
+
 @description('Fabric workspace GUID for OneLake bronze writes')
 @minLength(36)
 param onelakeWorkspaceId string
@@ -214,6 +229,9 @@ module keyVault 'modules/keyvault.bicep' = {
     webApiFuncPrincipalId: webApiFunc.outputs.principalId
     appInsightsConnectionString: monitor.outputs.appInsightsConnectionString
     logAnalyticsWorkspaceId: monitor.outputs.workspaceId
+    edgarUserAgent: edgarUserAgent
+    alphaVantageApiKey: alphaVantageApiKey
+    finnhubApiKey: finnhubApiKey
   }
 }
 

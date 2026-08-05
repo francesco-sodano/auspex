@@ -285,11 +285,11 @@ class FundamentalAnchorContractTests(unittest.TestCase):
         self.assertIn("PARTITION BY a.security_sk", notebook)
         self.assertIn("a.anchor_row_number = 1", notebook)
         self.assertNotIn("SELECT a.*, s.ticker", notebook)
-        deployment_script = (ROOT / "scripts" / "deploy_e20_engine.ps1").read_text(encoding="utf-8")
-        self.assertIn('-replace "`r`n", "`n"', deployment_script)
-        self.assertIn("GetByteArrayAsync", deployment_script)
-        self.assertIn("E20 engine hash mismatch", deployment_script)
-        self.assertIn('foreach ($directory in @("Files/config", "Files/config/e20"))', deployment_script)
+        deployment_script = (ROOT / "scripts" / "deploy_fabric_items.py").read_text(encoding="utf-8")
+        self.assertIn('replace("\\r\\n", "\\n")', deployment_script)
+        self.assertIn("existing.content", deployment_script)
+        self.assertIn("Immutable engine conflict", deployment_script)
+        self.assertIn('ROOT / "engine" / "fundamental_anchor.py"', deployment_script)
 
     def test_warehouse_and_metrics_consume_anchor_without_premature_score(self):
         anchor_sql = (WAREHOUSE / "metrics" / "14_fundamental_anchor.sql").read_text(encoding="utf-8")

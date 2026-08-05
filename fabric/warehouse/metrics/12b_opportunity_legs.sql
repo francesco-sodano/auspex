@@ -93,6 +93,6 @@ JOIN dbo.opportunity_score_snapshot_manifest m
  AND m.weight_version = s.weight_version
  AND m.status = 'completed'
 WHERE s.max_knowledge_date <= s.as_of
-  AND s.model_version = 'e6b_v1'
+    AND s.model_version = 'e6b_v2'
   AND s.weight_version = 'e6b_balanced_v1';
 GO

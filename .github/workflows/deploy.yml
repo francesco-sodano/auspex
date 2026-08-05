@@ -54,6 +54,8 @@ jobs:
       - name: Deploy infrastructure
         shell: bash
         env:
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
           MICROSOFT_AUTH_CLIENT_SECRET: ${{ secrets.MICROSOFT_AUTH_CLIENT_SECRET }}
         run: |
           az deployment sub create \
@@ -64,6 +66,9 @@ jobs:
               env="${AUSPEX_ENV}" \
               fabricAdminUpn="${{ vars.FABRIC_ADMIN_UPN }}" \
               alertEmailAddress="${{ vars.ALERT_EMAIL_ADDRESS }}" \
+              edgarUserAgent="${{ vars.EDGAR_USER_AGENT }}" \
+              alphaVantageApiKey="${ALPHAVANTAGE_API_KEY}" \
+              finnhubApiKey="${FINNHUB_API_KEY}" \
               onelakeWorkspaceId="${FABRIC_WORKSPACE_ID}" \
               onelakeLakehouseName="${{ vars.FABRIC_LAKEHOUSE_ID }}" \
               fabricWarehouseServer="${{ vars.FABRIC_WAREHOUSE_SERVER }}" \

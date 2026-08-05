@@ -48,7 +48,7 @@ def observation(security_sk: int, **overrides) -> OpportunityObservation:
 
 class OpportunityScoreEngineTests(unittest.TestCase):
     def test_active_versions_and_balanced_weights_are_fixed(self):
-        self.assertEqual(MODEL_VERSION, "e6b_v1")
+        self.assertEqual(MODEL_VERSION, "e6b_v2")
         self.assertEqual(WEIGHT_VERSION, "e6b_balanced_v1")
         self.assertEqual(MIN_THEME_COHORT, 8)
         self.assertAlmostEqual(sum(LEG_WEIGHTS.values()), 1.0, places=12)
@@ -77,7 +77,7 @@ class OpportunityScoreEngineTests(unittest.TestCase):
             by_security[2].valuation_brake_contribution,
         )
 
-    def test_missing_components_are_neutral_imputed_and_mark_partial(self):
+    def test_missing_components_omit_incomplete_legs_and_mark_partial(self):
         observations = [observation(index) for index in range(1, 9)]
         observations[0] = observation(
             1,
@@ -91,6 +91,24 @@ class OpportunityScoreEngineTests(unittest.TestCase):
         self.assertIsNotNone(result.opportunity_score)
         self.assertIn("missing:fundamental_anchor_z", result.coverage_reasons)
         self.assertIn("missing:contract_award_usd_trailing_90d", result.coverage_reasons)
+        self.assertEqual(result.smart_money_contribution, 0.0)
+        self.assertEqual(result.valuation_brake_contribution, 0.0)
+
+    def test_manual_classification_is_five_leg_variance_corrected_partial(self):
+        observations = [observation(index) for index in range(1, 9)]
+        observations[0] = observation(
+            1,
+            candidate_source="MANUAL",
+            membership_weight=None,
+        )
+
+        result = {row.security_sk: row for row in score_theme(observations, LEG_WEIGHTS)}[1]
+
+        self.assertEqual(result.coverage_status, "PARTIAL")
+        self.assertIn("missing:membership_weight", result.coverage_reasons)
+        self.assertEqual(result.thesis_linkage_z, 0.0)
+        self.assertEqual(result.thesis_linkage_contribution, 0.0)
+        self.assertIsNotNone(result.opportunity_score)
 
     def test_small_theme_cohort_is_withheld(self):
         results = score_theme([observation(index) for index in range(1, 8)], LEG_WEIGHTS)
@@ -196,7 +214,8 @@ class OpportunityScoreArtifactTests(unittest.TestCase):
             ROOT / "engine" / "thesis.py",
             ROOT / "fabric" / "warehouse" / "metrics" / "12b_opportunity_legs.sql",
             ROOT / "fabric" / "warehouse" / "metrics" / "13_opportunity_score.sql",
-            ROOT / "scripts" / "deploy_e14_e6b_warehouse.py",
+            ROOT / "scripts" / "deploy_fabric_items.py",
+            ROOT / "scripts" / "deploy_warehouse_schema.py",
         ]:
             self.assertTrue(path.exists(), path)
 
@@ -216,7 +235,7 @@ class OpportunityScoreArtifactTests(unittest.TestCase):
             "missing_theme_snapshot_provenance",
             "theme_source_freshness",
             "score_stale_dates",
-            'F.lit("TRS").alias("candidate_source")',
+            'F.col("m.classification_source").alias("candidate_source")',
             "opportunity_active_weights",
             "score_theme(",
             'F.lit("THEME_CONTEXT_REQUIRED")',
@@ -279,31 +298,25 @@ class OpportunityScoreArtifactTests(unittest.TestCase):
             notebook,
         )
 
-    def test_deployment_paths_pin_engine_and_scope_derived_cleanup(self):
-        fabric_deploy = (ROOT / "scripts" / "deploy_e22_fabric.ps1").read_text(encoding="utf-8")
-        warehouse_deploy = (ROOT / "scripts" / "deploy_e14_e6b_warehouse.py").read_text(encoding="utf-8")
+    def test_deployment_paths_pin_engine_and_cover_complete_schema(self):
+        fabric_deploy = (ROOT / "scripts" / "deploy_fabric_items.py").read_text(encoding="utf-8")
+        warehouse_deploy = (ROOT / "scripts" / "deploy_warehouse_schema.py").read_text(encoding="utf-8")
         base_metrics_sql = (ROOT / "fabric" / "warehouse" / "metrics" / "04_base_metrics.sql").read_text(encoding="utf-8")
         e8_notebook = (ROOT / "fabric" / "nb_05_alpha_vantage_to_gold.Notebook" / "notebook-content.py").read_text(encoding="utf-8")
 
         self.assertIn(
-            "Files/config/e14/c2e46ed74b73c478528b4b39177990e988f9477dbd1be91c9d756eb5b844adab.py",
+            "Files/config/e14/d861397782bbb25849db40eb22bb76c574bf76c8be344d8d1328d3c18b559ad2.py",
             fabric_deploy,
         )
-        self.assertIn("e14 = $opportunityEngine", fabric_deploy)
-        self.assertIn('Deploy-Notebook -DisplayName "nb_05_alpha_vantage_to_gold"', fabric_deploy)
-        self.assertIn("PREPRODUCTION_DERIVED_RESET_SQL", warehouse_deploy)
-        self.assertIn('"01_dims.sql"', warehouse_deploy)
-        self.assertIn('"14_fundamental_anchor.sql"', warehouse_deploy)
-        self.assertIn("fact_theme_opportunity_score", warehouse_deploy)
-        self.assertIn("opportunity_score_snapshot_manifest", warehouse_deploy)
-        for table in [
-            "fact_narrative_features", "fact_narrative_intensity",
-            "narrative_snapshot_manifest", "fact_narrative_premium",
-            "fact_narrative_premium_evidence", "narrative_premium_snapshot_manifest",
-            "decision_log", "e22_release_audit",
+        self.assertIn('ROOT / "engine" / "thesis.py"', fabric_deploy)
+        for artifact in [
+            'WAREHOUSE / "01_dims.sql"',
+            'WAREHOUSE / "metrics" / "14_fundamental_anchor.sql"',
+            'WAREHOUSE / "metrics" / "12b_opportunity_legs.sql"',
+            'WAREHOUSE / "metrics" / "13_opportunity_score.sql"',
         ]:
-            self.assertIn(f"DELETE FROM dbo.{table};", warehouse_deploy)
-        self.assertNotIn("fact_market_daily", warehouse_deploy)
+            self.assertIn(artifact, warehouse_deploy)
+        self.assertNotIn("DELETE FROM", warehouse_deploy)
         self.assertNotIn("WHEN MATCHED THEN UPDATE SET\n    metric_group", base_metrics_sql)
         self.assertIn('Window.partitionBy("theme_id").orderBy', e8_notebook)
         self.assertIn("latest_theme_batches", e8_notebook)

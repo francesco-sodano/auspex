@@ -27,6 +27,7 @@ from sec_8k.connector import Sec8KConnector
 from sec_form4.connector import SecForm4Connector
 from sec_form4.blueprint import bp as sec_form4_bp
 from sec_s1.connector import SecS1Connector
+from theme_classifier.connector import ThemeClassifierConnector
 from shared.clients import get_bronze_writer, get_control_plane
 from shared.daily_build import (
 	FabricDailyBuildClient,
@@ -42,6 +43,7 @@ from search.narrative import (
 	CosmosNarrativeFeatureCache,
 	NarrativeFeatureService,
 	build_narrative_projection,
+	page_narrative_documents,
 )
 from search.sentiment import (
 	CosmosSentimentCache,
@@ -53,6 +55,8 @@ from search.sentiment import (
 app = df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
 app.register_blueprint(sec_form4_bp)
 app.register_blueprint(prices_eod_bp)
+
+_RETRYABLE_DAILY_BUILD_STATES = {"Failed", "Canceled", "Terminated"}
 
 _CONNECTORS = {
 	"sec_form4": lambda cp, bw, body, source: SecForm4Connector(cp, bw, source_config=source, since_date=body.get("since_date") or None, to_date=body.get("to_date") or None),
@@ -94,6 +98,9 @@ _CONNECTORS = {
 		include_global=body.get("include_global"),
 		profile=body.get("profile") or "combined",
 		source_config=source,
+	),
+	"theme_classifier": lambda cp, bw, body, source: ThemeClassifierConnector(
+		cp, bw, source_config=source
 	),
 	"news": lambda cp, bw, body, source: NewsConnector(
 		cp,
@@ -265,7 +272,7 @@ def _execute_connector(body: dict) -> tuple[dict, int]:
 	canonical_seed = _SOURCE_SEEDS.get(source_id, {})
 	canonical_fields = (
 		"enabled", "schedule", "schema_version", "etf_symbols", "etf_series",
-		"profiles", "rate_limit", "max_lookback_days", "search_terms",
+		"profiles", "rate_limit", "max_lookback_days", "search_terms", "required",
 	)
 	contract_changed = False
 	for field in canonical_fields:
@@ -322,7 +329,7 @@ def _sync_serving_projections() -> dict:
 	)
 	if any(not str(document.get("id") or "").startswith(("ticker:", "isin:", "security:")) for document in security_documents):
 		raise ValueError("invalid security projection id")
-	if any(not str(document.get("id") or "").startswith(("quote:", "history:", "fx:", "score:security:")) for document in market_documents):
+	if any(not str(document.get("id") or "").startswith(("quote:", "history:", "fx:", "score:security:", "classification:security:")) for document in market_documents):
 		raise ValueError("invalid market projection id")
 	security_generations = {document.get("generation") for document in security_documents}
 	market_generations = {document.get("generation") for document in market_documents}
@@ -356,6 +363,65 @@ def sync_serving_projections(req: func.HttpRequest) -> func.HttpResponse:
 		return _json_response({"status": "failed", "error": str(exc)}, 400)
 
 
+def _sync_active_market_projections() -> dict:
+	cp = get_control_plane()
+	bw = get_bronze_writer()
+	active_symbols = {
+		str(symbol).strip().upper()
+		for symbol in bw.read_universe("alpha_vantage", "active")
+		if str(symbol).strip()
+	}
+	if not active_symbols:
+		raise ValueError("active market universe is empty")
+	market_documents = [
+		document
+		for document in (
+			bw.read_serving_projection("market_data")
+			+ bw.read_serving_projection("market_history")
+		)
+		if str(document.get("ticker") or "").strip().upper() in active_symbols
+	]
+	if any(not str(document.get("id") or "").startswith(("quote:", "history:", "score:security:", "classification:security:")) for document in market_documents):
+		raise ValueError("invalid active market projection id")
+	market_generations = {document.get("generation") for document in market_documents}
+	if len(market_generations) != 1 or None in market_generations:
+		raise ValueError("active market projection generation is invalid")
+	quote_symbols = {
+		str(document.get("ticker") or "").strip().upper()
+		for document in market_documents
+		if str(document.get("id") or "").startswith("quote:security:")
+	}
+	history_symbols = {
+		str(document.get("ticker") or "").strip().upper()
+		for document in market_documents
+		if str(document.get("id") or "").startswith("history:security:")
+	}
+	missing_quotes = sorted(active_symbols - quote_symbols)
+	missing_histories = sorted(active_symbols - history_symbols)
+	if missing_quotes or missing_histories:
+		raise ValueError(
+			"active market projection is incomplete: "
+			f"missing_quotes={len(missing_quotes)}, "
+			f"missing_histories={len(missing_histories)}"
+		)
+	with ThreadPoolExecutor(max_workers=16) as executor:
+		list(executor.map(cp.upsert_market_data, market_documents))
+	return {
+		"status": "ok",
+		"active_symbols": len(active_symbols),
+		"market_documents": len(market_documents),
+		"generation": next(iter(market_generations)),
+	}
+
+
+@app.route(route="sync_active_market_projections", methods=["POST"])
+def sync_active_market_projections(req: func.HttpRequest) -> func.HttpResponse:
+	try:
+		return _json_response(_sync_active_market_projections())
+	except ValueError as exc:
+		return _json_response({"status": "failed", "error": str(exc)}, 400)
+
+
 @app.route(route="serving_projection_status", methods=["GET"])
 def serving_projection_status(req: func.HttpRequest) -> func.HttpResponse:
 	cp = get_control_plane()
@@ -372,7 +438,13 @@ def _sync_evidence_index() -> dict:
 	return {
 		"status": "ok",
 		"sentiment_documents": sentiment_documents,
-		**_evidence_indexer().sync(documents),
+		**_evidence_indexer().sync(
+			documents,
+			batch_size=int(os.environ.get("AI_SEARCH_BATCH_SIZE", "128")),
+			embedding_workers=int(
+				os.environ.get("AI_SEARCH_EMBEDDING_WORKERS", "2")
+			),
+		),
 	}
 
 
@@ -446,10 +518,19 @@ def _score_narrative_page(body: dict) -> dict:
 	if max_workers < 1 or max_workers > 8:
 		raise ValueError("max_workers must be between 1 and 8")
 	after_id = str(body.get("after_id") or "").strip()
-	documents, next_after_id, has_more = page_evidence_documents(
-		get_bronze_writer().read_serving_projection("evidence"),
+	bw = get_bronze_writer()
+	eligible_symbols = {
+		str(symbol).strip().upper()
+		for symbol in bw.read_universe("alpha_vantage", "active")
+		if str(symbol).strip()
+	}
+	if not eligible_symbols:
+		raise ValueError("active narrative universe is empty")
+	documents, next_after_id, has_more = page_narrative_documents(
+		bw.read_serving_projection("evidence"),
 		limit=limit,
 		after_id=after_id,
+		eligible_symbols=eligible_symbols,
 	)
 	service = _narrative_service()
 	with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -468,9 +549,17 @@ def _score_narrative_page(body: dict) -> dict:
 def _publish_narrative_features() -> dict:
 	bw = get_bronze_writer()
 	service = _narrative_service()
+	eligible_symbols = {
+		str(symbol).strip().upper()
+		for symbol in bw.read_universe("alpha_vantage", "active")
+		if str(symbol).strip()
+	}
+	if not eligible_symbols:
+		raise ValueError("active narrative universe is empty")
 	projection, manifest = build_narrative_projection(
 		bw.read_serving_projection("evidence"),
 		service.list_cached(),
+		eligible_symbols=eligible_symbols,
 	)
 	bytes_written = bw.write_serving_projection("narrative_features", projection)
 	return {"status": "ok", **manifest, "bytes_written": bytes_written}
@@ -491,23 +580,71 @@ def _daily_build_client() -> FabricDailyBuildClient:
 async def daily_build_schedule(timer: func.TimerRequest, client):
 	as_of_date = datetime.now(timezone.utc).date().isoformat()
 	instance_id = f"daily-build-{as_of_date}"
-	if await client.get_status(instance_id) is not None:
-		return
+	logging.info(
+		"DailyBuildScheduleTriggered instance_id=%s past_due=%s",
+		instance_id,
+		bool(getattr(timer, "past_due", False)),
+	)
+	status = await client.get_status(instance_id)
+	if status is not None:
+		runtime_status = getattr(status.runtime_status, "value", status.runtime_status)
+		logging.info(
+			"DailyBuildScheduleExistingInstance instance_id=%s runtime_status=%s",
+			instance_id,
+			runtime_status,
+		)
+		if str(runtime_status) not in _RETRYABLE_DAILY_BUILD_STATES:
+			return
+		await client.purge_instance_history(instance_id)
+		logging.info("DailyBuildSchedulePurged instance_id=%s", instance_id)
 	await client.start_new(
 		"daily_build",
 		instance_id,
 		{
 			"as_of_date": as_of_date,
 			"source_ids": scheduled_source_ids(_SOURCE_SEEDS.values(), as_of_date),
+			"optional_source_ids": [
+				source["source_id"]
+				for source in _SOURCE_SEEDS.values()
+				if source.get("enabled") and not source.get("required", True)
+			],
+			"source_profile_options": {
+				"alpha_vantage": {
+					profile: {"symbol_limit": int(config["symbol_limit"])}
+					for profile, config in (_SOURCE_SEEDS["alpha_vantage"].get("profiles") or {}).items()
+					if config.get("symbol_limit")
+				}
+			},
+			"source_options": {
+				**{
+					source_id: {
+						"filing_limit": int(
+							os.environ.get("DAILY_BUILD_SEC_PAGE_SIZE", "50")
+						)
+					}
+					for source_id in ("sec_13f", "sec_13dg", "sec_8k", "sec_s1")
+				},
+				"prices_eod": {
+					"symbol_limit": int(
+						os.environ.get("DAILY_BUILD_PRICE_PAGE_SIZE", "50")
+					),
+				},
+				"sec_companyfacts": {
+					"symbol_limit": int(
+						os.environ.get("DAILY_BUILD_SEC_PAGE_SIZE", "50")
+					),
+				},
+			},
 			"poll_seconds": int(os.environ.get("DAILY_BUILD_POLL_SECONDS", "30")),
 			"narrative_page_size": int(
-				os.environ.get("DAILY_BUILD_NARRATIVE_PAGE_SIZE", "20")
+				os.environ.get("DAILY_BUILD_NARRATIVE_PAGE_SIZE", "5")
 			),
 			"narrative_max_workers": int(
-				os.environ.get("DAILY_BUILD_NARRATIVE_MAX_WORKERS", "2")
+				os.environ.get("DAILY_BUILD_NARRATIVE_MAX_WORKERS", "1")
 			),
 		},
 	)
+	logging.info("DailyBuildScheduleStarted instance_id=%s", instance_id)
 
 
 @app.orchestration_trigger(context_name="context")
@@ -570,13 +707,16 @@ def run_scheduled_connector(payload: dict):
 				raise RuntimeError(f"Connector {source_id} returned has_more without a page limit")
 			page_offset += page_limit
 	if any(result.get("status") == "failed" for result in results):
-		logging.error("RequiredConnectorFailed source_id=%s", source_id)
+		if (_SOURCE_SEEDS.get(source_id) or {}).get("required", True):
+			logging.error("RequiredConnectorFailed source_id=%s", source_id)
+		else:
+			logging.warning("OptionalConnectorFailed source_id=%s", source_id)
 		return {"status": "failed", "source_id": source_id, "results": results}
 	return {
 		"status": "completed",
 		"source_id": source_id,
 		"results": results,
-		"has_more": any(result.get("has_more") for result in results),
+		"has_more": bool(results[-1].get("has_more")) if results else False,
 		"last_event_ts": max(
 			(result.get("last_event_ts") for result in results if result.get("last_event_ts")),
 			default=None,
@@ -600,16 +740,16 @@ def commit_scheduled_watermark(payload: dict):
 
 
 @app.activity_trigger(input_name="payload")
-def start_fabric_daily_pipeline(payload: dict):
-	return _daily_build_client().start_pipeline(
-		payload["as_of_date"], payload.get("pipeline_name")
+def start_fabric_notebook(payload: dict):
+	return _daily_build_client().start_notebook(
+		payload["as_of_date"], payload["notebook"]
 	)
 
 
 @app.activity_trigger(input_name="payload")
-def get_fabric_daily_pipeline_status(payload: dict):
-	return _daily_build_client().get_pipeline_status(
-		payload["job_id"], payload.get("pipeline_name")
+def get_fabric_notebook_status(payload: dict):
+	return _daily_build_client().get_notebook_status(
+		payload["job_id"], payload["notebook_id"]
 	)
 
 
@@ -650,6 +790,11 @@ def record_daily_build_failure(payload: dict):
 @app.activity_trigger(input_name="payload")
 def sync_daily_serving_projections(payload):
 	return _sync_serving_projections()
+
+
+@app.activity_trigger(input_name="payload")
+def sync_daily_active_market_projections(payload):
+	return _sync_active_market_projections()
 
 
 @app.activity_trigger(input_name="payload")

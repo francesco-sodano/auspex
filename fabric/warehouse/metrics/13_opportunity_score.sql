@@ -36,7 +36,7 @@ JOIN dbo.dim_security d
 LEFT JOIN dbo.security_daily_features f
   ON f.security_sk = s.security_sk AND f.date_sk = s.date_sk
 WHERE s.max_knowledge_date <= s.as_of
-  AND s.model_version = 'e6b_v1'
+    AND s.model_version = 'e6b_v2'
   AND s.weight_version = 'e6b_balanced_v1';
 GO
 
@@ -56,7 +56,7 @@ WITH active_scores AS (
         LEFT JOIN dbo.security_daily_features f
       ON f.security_sk = s.security_sk AND f.date_sk = s.date_sk
     WHERE s.max_knowledge_date <= s.as_of
-      AND s.model_version = 'e6b_v1'
+    AND s.model_version = 'e6b_v2'
       AND s.weight_version = 'e6b_balanced_v1'
 ), attribution AS (
     SELECT score_id, generation, theme_id, security_sk, ticker, company_name,

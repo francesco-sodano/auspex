@@ -11,6 +11,67 @@ from engine.narrative_features import (
     narrative_messages,
     parse_narrative_response,
 )
+from engine.sentiment import evidence_candidates
+
+NARRATIVE_DOCUMENTS_PER_SECURITY = 3
+
+
+def eligible_narrative_documents(
+    documents: list[dict],
+    *,
+    eligible_symbols: set[str] | None = None,
+) -> list[dict]:
+    normalized_symbols = (
+        {str(symbol).strip().upper() for symbol in eligible_symbols if str(symbol).strip()}
+        if eligible_symbols is not None
+        else None
+    )
+    by_security: dict[object, list[dict]] = {}
+    for document in documents:
+        if document.get("source_type") != "news" or document.get("security_sk") is None:
+            continue
+        if (
+            normalized_symbols is not None
+            and str(document.get("symbol") or "").strip().upper() not in normalized_symbols
+        ):
+            continue
+        by_security.setdefault(document["security_sk"], []).append(document)
+
+    eligible = []
+    for security_documents in by_security.values():
+        eligible.extend(sorted(
+            security_documents,
+            key=lambda document: (
+                str(document.get("knowledge_date") or ""),
+                str(document.get("event_date") or ""),
+                str(document.get("revision_hash") or ""),
+                str(document.get("id") or ""),
+            ),
+            reverse=True,
+        )[:NARRATIVE_DOCUMENTS_PER_SECURITY])
+    return sorted(eligible, key=lambda document: document["id"])
+
+
+def page_narrative_documents(
+    documents: list[dict],
+    *,
+    limit: int,
+    after_id: str = "",
+    eligible_symbols: set[str] | None = None,
+) -> tuple[list[dict], str | None, bool]:
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    eligible = [
+        document
+        for document in eligible_narrative_documents(
+            documents,
+            eligible_symbols=eligible_symbols,
+        )
+        if document["id"] > after_id
+    ]
+    page = eligible[:limit]
+    next_after_id = page[-1]["id"] if page else None
+    return page, next_after_id, len(eligible) > limit
 
 
 class CosmosNarrativeFeatureCache:
@@ -119,22 +180,27 @@ class NarrativeFeatureService:
             content,
             self._prompt_text,
         )
-        raw_response = self._chat.complete_json(messages)
-        try:
-            features = parse_narrative_response(raw_response, content)
-        except ValueError as exc:
-            repair_messages = messages + [
+        max_evidence_index = len(evidence_candidates(content)) - 1
+        repair_messages = list(messages)
+        for attempt in range(3):
+            raw_response = self._chat.complete_json(repair_messages)
+            try:
+                features = parse_narrative_response(raw_response, content)
+                break
+            except ValueError as exc:
+                if attempt == 2:
+                    raise
+                repair_messages.extend([
                 {"role": "assistant", "content": raw_response},
                 {
                     "role": "user",
                     "content": (
                         f"The JSON failed validation: {exc}. Return corrected JSON with exactly "
-                        "the required fields and only valid supplied excerpt indexes."
+                        "the required fields. Every evidence_index must be an integer from 0 "
+                        f"through {max_evidence_index}."
                     ),
                 },
-            ]
-            raw_response = self._chat.complete_json(repair_messages)
-            features = parse_narrative_response(raw_response, content)
+                ])
         result = {
             "id": cache_key,
             "document_id": document["id"],
@@ -168,11 +234,15 @@ class NarrativeFeatureService:
 def build_narrative_projection(
     evidence_documents: list[dict],
     cached_documents: list[dict],
+    *,
+    eligible_symbols: set[str] | None = None,
 ) -> tuple[list[dict], dict]:
     news_documents = {
         document["id"]: document
-        for document in evidence_documents
-        if document.get("source_type") == "news"
+        for document in eligible_narrative_documents(
+            evidence_documents,
+            eligible_symbols=eligible_symbols,
+        )
     }
     input_generations = {document.get("generation") for document in evidence_documents}
     if len(input_generations) != 1 or None in input_generations:

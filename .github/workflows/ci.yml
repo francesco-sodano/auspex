@@ -51,4 +51,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: azure/CLI@v2
         with:
-          inlineScript: az bicep build --file infra/main.bicep --outfile /tmp/auspex-main.json
+          inlineScript: |
+            az bicep build --file infra/bootstrap-fabric.bicep --outfile /tmp/auspex-bootstrap-fabric.json
+            az bicep build --file infra/main.bicep --outfile /tmp/auspex-main.json

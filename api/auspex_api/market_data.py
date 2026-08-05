@@ -112,6 +112,9 @@ class CosmosMarketDataRepository:
     def score(self, security_sk: int) -> dict | None:
         return _read(self._container, f"score:security:{int(security_sk)}")
 
+    def classification(self, security_sk: int) -> dict | None:
+        return _read(self._container, f"classification:security:{int(security_sk)}")
+
     def fx_rate(
         self,
         from_currency: str,

@@ -62,8 +62,8 @@ MODEL_VERSION = "e22_v4"
 E20_MODEL_VERSION = "e20_v2"
 E21_MODEL_VERSION = "gpt-4o:2024-11-20"
 E21_PROMPT_VERSION = "e21_narrative_v1"
-ENGINE_LAKEHOUSE_PATH = "Files/config/e22/09e9532dd031ecb45e8e3591986164d763a4ebbec3da43246c8ca8040aaa02ea.py"
-ENGINE_SHA256 = "09e9532dd031ecb45e8e3591986164d763a4ebbec3da43246c8ca8040aaa02ea"
+ENGINE_LAKEHOUSE_PATH = "Files/config/e22/9a8314cfd0990f897992c7e26ba9c2daf060f8af7c5c0a78e0d656a3821e2b07.py"
+ENGINE_SHA256 = "9a8314cfd0990f897992c7e26ba9c2daf060f8af7c5c0a78e0d656a3821e2b07"
 
 
 def _require_table(table_name: str) -> None:
@@ -409,6 +409,7 @@ previous_premiums = {}
 if (
     spark.catalog.tableExists("fact_narrative_premium")
     and spark.catalog.tableExists("narrative_premium_snapshot_manifest")
+    and not spark.table("fact_narrative_premium").isEmpty()
 ):
     _ensure_columns("fact_narrative_premium", {
         "fit_context_hash": "fit_context_hash STRING",
@@ -426,50 +427,52 @@ if (
         .filter(F.col("manifest_row_number") == 1)
         .drop("manifest_row_number")
     )
-    previous_as_of = latest_previous_manifests.agg(
-        F.max("as_of_date").alias("as_of_date")
-    ).first().as_of_date
-    if previous_as_of is not None:
+    if not latest_previous_manifests.isEmpty():
+        previous_as_of = latest_previous_manifests.agg(
+            F.max("as_of_date").alias("as_of_date")
+        ).first().as_of_date
         latest_previous_manifests = latest_previous_manifests.filter(
             F.col("as_of_date") == F.lit(previous_as_of)
         )
-    previous_window = Window.partitionBy("security_sk").orderBy(
-        F.col("p.date_sk").desc(), F.col("p.created_at").desc(), F.col("p.decision_id").desc()
-    )
-    previous_rows = (
-        spark.table("fact_narrative_premium").alias("p")
-        .join(
-            latest_previous_manifests.alias("m"),
-            (F.col("p.generation") == F.col("m.generation"))
-            & (F.col("p.date_sk") == F.date_format(F.col("m.as_of_date"), "yyyyMMdd").cast(IntegerType())),
-            "inner",
+        previous_window = Window.partitionBy("security_sk").orderBy(
+            F.col("p.date_sk").desc(),
+            F.col("p.created_at").desc(),
+            F.col("p.decision_id").desc(),
         )
-        .filter(
-            (F.col("p.model_version") == F.lit(MODEL_VERSION))
-            & F.col("p.narrative_premium").isNotNull()
+        previous_rows = (
+            spark.table("fact_narrative_premium").alias("p")
+            .join(
+                latest_previous_manifests.alias("m"),
+                (F.col("p.generation") == F.col("m.generation"))
+                & (F.col("p.date_sk") == F.date_format(F.col("m.as_of_date"), "yyyyMMdd").cast(IntegerType())),
+                "inner",
+            )
+            .filter(
+                (F.col("p.model_version") == F.lit(MODEL_VERSION))
+                & F.col("p.narrative_premium").isNotNull()
+            )
+            .withColumn("row_number", F.row_number().over(previous_window))
+            .filter(F.col("row_number") == 1)
+            .select(
+                F.col("p.security_sk").alias("security_sk"),
+                F.col("p.decision_id").alias("decision_id"),
+                F.col("m.as_of_date").alias("previous_as_of"),
+                F.col("p.generation").alias("generation"),
+                F.col("p.narrative_premium").alias("narrative_premium"),
+                F.col("p.fit_context_hash").alias("fit_context_hash"),
+            )
+            .collect()
         )
-        .withColumn("row_number", F.row_number().over(previous_window))
-        .filter(F.col("row_number") == 1)
-        .select(
-            F.col("p.security_sk").alias("security_sk"),
-            F.col("p.decision_id").alias("decision_id"),
-            F.col("m.as_of_date").alias("previous_as_of"),
-            F.col("p.generation").alias("generation"),
-            F.col("p.narrative_premium").alias("narrative_premium"),
-            F.col("p.fit_context_hash").alias("fit_context_hash"),
-        )
-        .collect()
-    )
-    previous_premiums = {
-        row.security_sk: PreviousPremiumState(
-            decision_id=row.decision_id,
-            as_of=row.previous_as_of,
-            generation=row.generation,
-            narrative_premium=row.narrative_premium,
-            fit_context_hash=row.fit_context_hash,
-        )
-        for row in previous_rows
-    }
+        previous_premiums = {
+            row.security_sk: PreviousPremiumState(
+                decision_id=row.decision_id,
+                as_of=row.previous_as_of,
+                generation=row.generation,
+                narrative_premium=row.narrative_premium,
+                fit_context_hash=row.fit_context_hash,
+            )
+            for row in previous_rows
+        }
 
 premium_results = build_narrative_premiums(
     observations,

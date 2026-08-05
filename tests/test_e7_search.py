@@ -150,6 +150,10 @@ class E7EvidenceIdentityTests(unittest.TestCase):
                 self.calls.append(("upload", documents))
                 return len(documents)
 
+            def list_generation_ids(self, generation):
+                self.calls.append(("existing", generation))
+                return set()
+
             def delete_stale_generation(self, generation):
                 self.calls.append(("cleanup", generation))
                 return 3
@@ -187,10 +191,109 @@ class E7EvidenceIdentityTests(unittest.TestCase):
             {"name": "idx-news-filings"},
         ).sync(documents, batch_size=1)
 
-        self.assertEqual([call[0] for call in search.calls], ["ensure", "upload", "upload", "cleanup"])
-        self.assertEqual(search.calls[1][1][0]["content_vector"], [0.0, 1.0])
-        self.assertEqual(search.calls[1][1][0]["event_date"], "2026-03-14T00:00:00Z")
+        self.assertEqual(
+            [call[0] for call in search.calls],
+            ["ensure", "existing", "upload", "upload", "cleanup"],
+        )
+        self.assertEqual(search.calls[2][1][0]["content_vector"], [0.0, 1.0])
+        self.assertEqual(search.calls[2][1][0]["event_date"], "2026-03-14T00:00:00Z")
         self.assertEqual(result["deleted_stale"], 3)
+
+    def test_index_sync_skips_existing_generation_documents(self):
+        from search.evidence import evidence_document_id
+        from search.indexing import EvidenceIndexer
+
+        revision_hash = "f" * 64
+        documents = [{
+            "id": evidence_document_id("news", "news:42", revision_hash, index),
+            "source_type": "news",
+            "source_id": "news:42",
+            "content": f"Evidence {index}",
+            "event_date": "2026-03-14",
+            "knowledge_date": "2026-03-15",
+            "revision_hash": revision_hash,
+            "chunk_index": index,
+            "generation": "generation-1",
+            "content_status": "full_text",
+        } for index in range(3)]
+
+        class FakeSearch:
+            def ensure_index(self, schema):
+                pass
+
+            def list_generation_ids(self, generation):
+                return {documents[0]["id"]}
+
+            def upload_documents(self, rows):
+                self.uploaded = list(rows)
+                return len(self.uploaded)
+
+            def delete_stale_generation(self, generation):
+                return 0
+
+        class FakeEmbeddings:
+            def __init__(self):
+                self.texts = []
+
+            def embed(self, texts):
+                self.texts.extend(texts)
+                return [[1.0] for _ in texts]
+
+        search = FakeSearch()
+        embeddings = FakeEmbeddings()
+        result = EvidenceIndexer(
+            search, embeddings, {"name": "idx-news-filings"}
+        ).sync(documents, batch_size=2, embedding_workers=2)
+
+        self.assertEqual(embeddings.texts, ["Evidence 1", "Evidence 2"])
+        self.assertEqual(result["existing"], 1)
+        self.assertEqual(result["uploaded"], 2)
+
+    def test_sentiment_enrichment_bulk_loads_cache_once(self):
+        from search.sentiment import enrich_with_cached_sentiment
+
+        class FakeService:
+            def __init__(self):
+                self.calls = 0
+
+            def cached_documents(self):
+                self.calls += 1
+                return [{
+                    "id": "cache-1",
+                    "document_revision_hash": "a" * 64,
+                    "model_version": "model-1",
+                    "prompt_version": "prompt-1",
+                    "sentiment": "0.4",
+                    "relevance": "0.9",
+                }]
+
+        documents = [
+            {"source_type": "news", "revision_hash": "a" * 64},
+            {"source_type": "news", "revision_hash": "b" * 64},
+            {"source_type": "sec_filing", "revision_hash": "a" * 64},
+        ]
+        service = FakeService()
+
+        enriched = enrich_with_cached_sentiment(documents, service)
+
+        self.assertEqual(enriched, 1)
+        self.assertEqual(service.calls, 1)
+        self.assertEqual(documents[0]["sentiment_cache_key"], "cache-1")
+        self.assertNotIn("sentiment", documents[1])
+
+    def test_ingestion_search_sync_uses_configurable_large_batches(self):
+        ingestion_app = (ROOT / "connectors" / "function_app.py").read_text(
+            encoding="utf-8"
+        )
+        function_bicep = (ROOT / "infra" / "modules" / "functionapp.bicep").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('os.environ.get("AI_SEARCH_BATCH_SIZE", "128")', ingestion_app)
+        self.assertIn('os.environ.get("AI_SEARCH_EMBEDDING_WORKERS", "2")', ingestion_app)
+        self.assertIn("name: 'AI_SEARCH_BATCH_SIZE'", function_bicep)
+        self.assertIn("name: 'AI_SEARCH_EMBEDDING_WORKERS'", function_bicep)
+        self.assertIn("value: '128'", function_bicep)
 
     def test_search_datetime_normalizes_negative_offsets(self):
         from search.indexing import _search_datetime
@@ -200,6 +303,29 @@ class E7EvidenceIdentityTests(unittest.TestCase):
             "2026-03-15T10:30:00-05:00",
         )
         self.assertEqual(_search_datetime("2026-03-15T10:30:00"), "2026-03-15T10:30:00Z")
+
+    def test_search_generation_ids_page_within_key_prefix(self):
+        from search.clients import AzureSearchRestClient
+
+        client = AzureSearchRestClient.__new__(AzureSearchRestClient)
+        payloads = []
+
+        def search(payload):
+            payloads.append(payload)
+            if "id ge 'd-'" in payload["filter"]:
+                if payload["skip"] == 0:
+                    return {"value": [{"id": "d-a"}, {"id": "d-b"}]}
+                return {"value": [{"id": "d-c"}]}
+            return {"value": []}
+
+        client.search = search
+
+        ids = client.list_generation_ids("generation-1", batch_size=2)
+
+        self.assertEqual(ids, {"d-a", "d-b", "d-c"})
+        self.assertEqual(payloads[0]["skip"], 0)
+        self.assertEqual(payloads[1]["skip"], 2)
+        self.assertIn("id ge 'd-'", payloads[0]["filter"])
 
     def test_projection_allows_omitted_nullable_filing_metadata(self):
         from search.evidence import evidence_document_id
@@ -349,10 +475,10 @@ class E7EvidenceIdentityTests(unittest.TestCase):
         self.assertNotIn("owner_user_sk", definitions)
         self.assertNotIn("portfolio", definitions.lower())
 
-        deploy_script = (ROOT / "scripts" / "deploy_e7_fabric.ps1").read_text(encoding="utf-8")
-        self.assertIn("Save-OntologyGraph", deploy_script)
+        deploy_script = (ROOT / "scripts" / "deploy_fabric_items.py").read_text(encoding="utf-8")
+        self.assertIn("_refresh_ontology_graph", deploy_script)
         self.assertIn('jobs/instances?jobType=Refresh', deploy_script)
-        self.assertIn('Where-Object { $_.path -ne ".platform" }', deploy_script)
+        self.assertIn('part.get("path") != ".platform"', deploy_script)
 
     def test_sentiment_cache_key_is_versioned_and_replay_stable(self):
         from engine.sentiment import sentiment_cache_key

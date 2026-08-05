@@ -92,7 +92,7 @@ resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2
   name: 'text-embedding-3-large'
   sku: {
     name: 'Standard'
-    capacity: 50 // 50K TPM — sufficient for daily batch embedding
+    capacity: 350 // 350K TPM — required for the full daily evidence generation
   }
   properties: {
     model: {

@@ -1119,6 +1119,41 @@ class E12TransactionTests(unittest.TestCase):
         self.assertEqual(summary["exposures"]["theme"][0]["name"], "enterprise_technology")
         self.assertEqual(summary["exposures"]["exchange"][0]["name"], "NASDAQ")
 
+    def test_portfolio_summary_uses_classification_without_fabricating_score(self):
+        market_data = InMemoryMarketDataRepository(
+            quotes={"AAPL": {"price": "210.00", "currency": "USD", "as_of": "2026-07-21"}},
+            classifications={102: {
+                "theme_id": "consumer_technology",
+                "provenance": "manual",
+                "confidence": "1.0",
+            }},
+        )
+        service = PortfolioService(
+            self.identity,
+            self.transactions,
+            security_catalog=self.catalog,
+            universe=self.universe,
+            market_data=market_data,
+            clock=lambda: NOW,
+        )
+        service.create_transaction(
+            self.user_a,
+            transaction_payload(
+                "classified-stock",
+                "OPENING_POSITION",
+                security_code="AAPL",
+                quantity="1",
+                price="200",
+            ),
+        )
+
+        holding = service.portfolio_summary(self.user_a)["holdings"][0]
+
+        self.assertEqual(holding["theme_id"], "consumer_technology")
+        self.assertEqual(holding["theme_provenance"], "manual")
+        self.assertIsNone(holding["opportunity_score"])
+        self.assertIsNone(holding["score_coverage_status"])
+
     def test_holding_history_is_sorted_and_bounded_to_latest_seven_sessions(self):
         market_data = InMemoryMarketDataRepository(
             quotes={"MSFT": {"price": "420.00", "currency": "USD", "as_of": "2026-07-21"}},
