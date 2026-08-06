@@ -110,6 +110,21 @@ jobs:
             --src /tmp/auspex-api.zip \
             --only-show-errors
 
+      - name: Seed required ETF linkage inputs
+        shell: bash
+        run: |
+          FUNCTION_KEY=$(az functionapp keys list \
+            --resource-group "auspex-${AUSPEX_ENV}-ingest" \
+            --name "auspex-${AUSPEX_ENV}-func" \
+            --query masterKey -o tsv)
+          echo "::add-mask::${FUNCTION_KEY}"
+          curl --fail --retry 5 --retry-all-errors \
+            --request POST \
+            --header "x-functions-key: ${FUNCTION_KEY}" \
+            --header "Content-Type: application/json" \
+            --data "{\"source_id\":\"etf_holdings\",\"run_id\":\"deploy-etf-holdings-${GITHUB_RUN_ID}\",\"mode\":\"backfill\",\"to_date\":\"$(date -u +%F)\"}" \
+            "https://auspex-${AUSPEX_ENV}-func.azurewebsites.net/api/run"
+
       - name: Grant ingestion identity Fabric workspace access
         shell: bash
         run: |

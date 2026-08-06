@@ -721,6 +721,8 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
             "Resume existing Fabric capacity before infrastructure update",
             "az deployment sub create",
             "config-zip",
+            "Seed required ETF linkage inputs",
+            "etf_holdings",
             "deploy_fabric_items.py",
             "deploy_fabric_pipeline.py",
             "run_fabric_schema_refresh.py",
