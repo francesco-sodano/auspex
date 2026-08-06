@@ -22,6 +22,7 @@ NOTEBOOK_PIPELINES = {
 from shared.daily_build import (
     FabricDailyBuildClient,
     alpha_vantage_profiles,
+    daily_build_instance_action,
     daily_build_orchestrator,
     scheduled_source_ids,
 )
@@ -33,6 +34,27 @@ class FakeContext:
 
 
 class DailyBuildOrchestratorTests(unittest.TestCase):
+    def test_scheduler_starts_absent_and_ghost_instances(self):
+        ghost = type("Status", (), {"runtime_status": None})()
+        self.assertEqual(daily_build_instance_action(None), "start")
+        self.assertEqual(daily_build_instance_action(ghost), "start")
+
+    def test_scheduler_skips_active_and_restarts_terminal_instances(self):
+        def status(value):
+            return type(
+                "Status",
+                (),
+                {"runtime_status": type("RuntimeStatus", (), {"value": value})()},
+            )()
+
+        self.assertEqual(daily_build_instance_action(status("Running")), "skip")
+        self.assertEqual(daily_build_instance_action(status("Completed")), "skip")
+        for value in ("Failed", "Canceled", "Terminated"):
+            self.assertEqual(
+                daily_build_instance_action(status(value)),
+                "purge_and_start",
+            )
+
     def test_completion_telemetry_includes_engine_diagnostics(self):
         function_app = (ROOT / "connectors" / "function_app.py").read_text(encoding="utf-8")
         daily_build = (ROOT / "connectors" / "shared" / "daily_build.py").read_text(encoding="utf-8")

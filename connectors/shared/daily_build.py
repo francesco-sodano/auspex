@@ -11,12 +11,25 @@ from azure.identity import DefaultAzureCredential
 _ARM_SCOPE = "https://management.azure.com/.default"
 _FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 _TERMINAL_FAILURE_STATES = {"cancelled", "deduped", "failed"}
+_RETRYABLE_DAILY_BUILD_STATES = {"Failed", "Canceled", "Terminated"}
 _NOTEBOOK_PIPELINES = {
 	pipeline["display_name"]: pipeline["notebooks"]
 	for pipeline in json.loads(
 		Path(__file__).with_name("notebook_pipelines.json").read_text(encoding="utf-8")
 	)["pipelines"]
 }
+
+
+def daily_build_instance_action(status) -> str:
+	if status is None:
+		return "start"
+	runtime_status = getattr(status, "runtime_status", None)
+	runtime_status = getattr(runtime_status, "value", runtime_status)
+	if runtime_status is None:
+		return "start"
+	if str(runtime_status) in _RETRYABLE_DAILY_BUILD_STATES:
+		return "purge_and_start"
+	return "skip"
 
 
 def schedule_is_due(schedule, as_of_date):

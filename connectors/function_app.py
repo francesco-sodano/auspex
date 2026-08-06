@@ -32,6 +32,7 @@ from shared.clients import get_bronze_writer, get_control_plane
 from shared.daily_build import (
 	FabricDailyBuildClient,
 	alpha_vantage_profiles,
+	daily_build_instance_action,
 	daily_build_orchestrator,
 	promote_daily_warehouse_snapshot,
 	scheduled_source_ids,
@@ -55,8 +56,6 @@ from search.sentiment import (
 app = df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
 app.register_blueprint(sec_form4_bp)
 app.register_blueprint(prices_eod_bp)
-
-_RETRYABLE_DAILY_BUILD_STATES = {"Failed", "Canceled", "Terminated"}
 
 _CONNECTORS = {
 	"sec_form4": lambda cp, bw, body, source: SecForm4Connector(cp, bw, source_config=source, since_date=body.get("since_date") or None, to_date=body.get("to_date") or None),
@@ -586,14 +585,17 @@ async def daily_build_schedule(timer: func.TimerRequest, client):
 		bool(getattr(timer, "past_due", False)),
 	)
 	status = await client.get_status(instance_id)
-	if status is not None:
-		runtime_status = getattr(status.runtime_status, "value", status.runtime_status)
+	action = daily_build_instance_action(status)
+	if action != "start":
+		runtime_status = getattr(status, "runtime_status", None)
+		runtime_status = getattr(runtime_status, "value", runtime_status)
 		logging.info(
-			"DailyBuildScheduleExistingInstance instance_id=%s runtime_status=%s",
+			"DailyBuildScheduleExistingInstance instance_id=%s runtime_status=%s action=%s",
 			instance_id,
 			runtime_status,
+			action,
 		)
-		if str(runtime_status) not in _RETRYABLE_DAILY_BUILD_STATES:
+		if action == "skip":
 			return
 		await client.purge_instance_history(instance_id)
 		logging.info("DailyBuildSchedulePurged instance_id=%s", instance_id)
