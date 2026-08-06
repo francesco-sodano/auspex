@@ -115,7 +115,36 @@ class EvidenceIndexer:
             raise ValueError("embedding_workers must be between 1 and 8")
         generation = validate_projection(documents)
         self._search.ensure_index(self._schema)
-        existing_ids = self._search.list_generation_ids(generation)
+        indexed_generations = self._search.list_document_generations()
+        projection_ids = {document["id"] for document in documents}
+        existing_ids = projection_ids.intersection(indexed_generations)
+        reusable_documents = [
+            document
+            for document in documents
+            if (
+                document["id"] in existing_ids
+                and indexed_generations[document["id"]] != generation
+            )
+        ]
+        metadata_refreshed = 0
+        metadata_batch_size = min(max(batch_size * 4, 1), 1000)
+        for batch in _batches(reusable_documents, metadata_batch_size):
+            search_documents = []
+            for document in batch:
+                search_document = {
+                    field: document.get(field)
+                    for field in SEARCH_FIELDS - {"content"}
+                    if document.get(field) is not None
+                }
+                search_document["event_date"] = _search_datetime(document["event_date"])
+                search_document["knowledge_date"] = _search_datetime(
+                    document["knowledge_date"]
+                )
+                search_document["published_at"] = _search_datetime(
+                    document.get("published_at")
+                )
+                search_documents.append(search_document)
+            metadata_refreshed += self._search.upload_documents(search_documents)
         pending_documents = [
             document for document in documents if document["id"] not in existing_ids
         ]
@@ -156,6 +185,7 @@ class EvidenceIndexer:
             "generation": generation,
             "documents": len(documents),
             "existing": len(existing_ids),
+            "metadata_refreshed": metadata_refreshed,
             "uploaded": uploaded,
             "deleted_stale": deleted,
         }

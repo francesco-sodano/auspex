@@ -150,9 +150,9 @@ class E7EvidenceIdentityTests(unittest.TestCase):
                 self.calls.append(("upload", documents))
                 return len(documents)
 
-            def list_generation_ids(self, generation):
-                self.calls.append(("existing", generation))
-                return set()
+            def list_document_generations(self):
+                self.calls.append(("existing",))
+                return {}
 
             def delete_stale_generation(self, generation):
                 self.calls.append(("cleanup", generation))
@@ -221,8 +221,8 @@ class E7EvidenceIdentityTests(unittest.TestCase):
             def ensure_index(self, schema):
                 pass
 
-            def list_generation_ids(self, generation):
-                return {documents[0]["id"]}
+            def list_document_generations(self):
+                return {documents[0]["id"]: "generation-1"}
 
             def upload_documents(self, rows):
                 self.uploaded = list(rows)
@@ -247,7 +247,56 @@ class E7EvidenceIdentityTests(unittest.TestCase):
 
         self.assertEqual(embeddings.texts, ["Evidence 1", "Evidence 2"])
         self.assertEqual(result["existing"], 1)
+        self.assertEqual(result["metadata_refreshed"], 0)
         self.assertEqual(result["uploaded"], 2)
+
+    def test_index_sync_reuses_vectors_across_generations(self):
+        from search.evidence import evidence_document_id
+        from search.indexing import EvidenceIndexer
+
+        revision_hash = "a" * 64
+        document = {
+            "id": evidence_document_id("news", "news:42", revision_hash, 0),
+            "source_type": "news",
+            "source_id": "news:42",
+            "content": "Immutable evidence",
+            "event_date": "2026-03-14",
+            "knowledge_date": "2026-03-15",
+            "revision_hash": revision_hash,
+            "chunk_index": 0,
+            "generation": "generation-2",
+            "content_status": "full_text",
+        }
+
+        class FakeSearch:
+            def ensure_index(self, schema):
+                pass
+
+            def list_document_generations(self):
+                return {document["id"]: "generation-1"}
+
+            def upload_documents(self, rows):
+                self.uploaded = list(rows)
+                return len(self.uploaded)
+
+            def delete_stale_generation(self, generation):
+                return 0
+
+        class FailIfEmbedded:
+            def embed(self, texts):
+                raise AssertionError("unchanged evidence must reuse its vector")
+
+        search = FakeSearch()
+        result = EvidenceIndexer(
+            search, FailIfEmbedded(), {"name": "idx-news-filings"}
+        ).sync([document], batch_size=1)
+
+        self.assertEqual(result["existing"], 1)
+        self.assertEqual(result["metadata_refreshed"], 1)
+        self.assertEqual(result["uploaded"], 0)
+        self.assertEqual(search.uploaded[0]["generation"], "generation-2")
+        self.assertNotIn("content", search.uploaded[0])
+        self.assertNotIn("content_vector", search.uploaded[0])
 
     def test_sentiment_enrichment_bulk_loads_cache_once(self):
         from search.sentiment import enrich_with_cached_sentiment
@@ -326,6 +375,25 @@ class E7EvidenceIdentityTests(unittest.TestCase):
         self.assertEqual(payloads[0]["skip"], 0)
         self.assertEqual(payloads[1]["skip"], 2)
         self.assertIn("id ge 'd-'", payloads[0]["filter"])
+
+    def test_search_document_generations_list_without_generation_filter(self):
+        from search.clients import AzureSearchRestClient
+
+        client = AzureSearchRestClient.__new__(AzureSearchRestClient)
+        payloads = []
+
+        def search(payload):
+            payloads.append(payload)
+            if "id ge 'd-'" in payload["filter"]:
+                return {"value": [{"id": "d-a", "generation": "generation-1"}]}
+            return {"value": []}
+
+        client.search = search
+
+        documents = client.list_document_generations()
+
+        self.assertEqual(documents, {"d-a": "generation-1"})
+        self.assertNotIn("generation eq", payloads[0]["filter"])
 
     def test_projection_allows_omitted_nullable_filing_metadata(self):
         from search.evidence import evidence_document_id

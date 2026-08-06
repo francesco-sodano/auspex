@@ -177,19 +177,43 @@ class AzureSearchRestClient:
         batch_size: int = 1000,
         max_documents: int = 250000,
     ) -> set[str]:
-        escaped_generation = generation.replace("'", "''")
+        return set(self._list_document_generations(
+            generation=generation,
+            batch_size=batch_size,
+            max_documents=max_documents,
+        ))
+
+    def list_document_generations(
+        self,
+        *,
+        batch_size: int = 1000,
+        max_documents: int = 250000,
+    ) -> dict[str, str | None]:
+        return self._list_document_generations(
+            generation=None,
+            batch_size=batch_size,
+            max_documents=max_documents,
+        )
+
+    def _list_document_generations(
+        self,
+        *,
+        generation: str | None,
+        batch_size: int,
+        max_documents: int,
+    ) -> dict[str, str | None]:
+        escaped_generation = generation.replace("'", "''") if generation else None
         prefix_characters = sorted(
             "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
         )
 
         def list_prefix(index_prefix):
             index, prefix_character = index_prefix
-            prefix_ids = set()
+            prefix_documents = {}
             lower_bound = f"d{prefix_character}"
-            filter_parts = [
-                f"generation eq '{escaped_generation}'",
-                f"id ge '{lower_bound}'",
-            ]
+            filter_parts = [f"id ge '{lower_bound}'"]
+            if escaped_generation:
+                filter_parts.insert(0, f"generation eq '{escaped_generation}'")
             if index + 1 < len(prefix_characters):
                 filter_parts.append(f"id lt 'd{prefix_characters[index + 1]}'")
             skip = 0
@@ -197,33 +221,41 @@ class AzureSearchRestClient:
                 response = self.search({
                     "search": "*",
                     "filter": " and ".join(filter_parts),
-                    "select": "id",
+                    "select": "id,generation",
                     "top": batch_size,
                     "skip": skip,
                 })
-                page_ids = {item["id"] for item in response.get("value", [])}
-                if not page_ids:
+                page_documents = response.get("value", [])
+                if not page_documents:
                     break
-                previous_count = len(prefix_ids)
-                prefix_ids.update(page_ids)
-                if len(prefix_ids) == previous_count or len(page_ids) < batch_size:
+                previous_count = len(prefix_documents)
+                prefix_documents.update({
+                    item["id"]: item.get("generation")
+                    for item in page_documents
+                })
+                if (
+                    len(prefix_documents) == previous_count
+                    or len(page_documents) < batch_size
+                ):
                     break
-                skip += len(page_ids)
+                skip += len(page_documents)
                 if skip >= 100000:
                     raise RuntimeError(
                         f"Search ID prefix {lower_bound} exceeds the skip limit"
                     )
-            return prefix_ids
+            return prefix_documents
 
-        document_ids = set()
+        document_generations = {}
         with ThreadPoolExecutor(max_workers=8) as executor:
-            for prefix_ids in executor.map(list_prefix, enumerate(prefix_characters)):
-                document_ids.update(prefix_ids)
-                if len(document_ids) > max_documents:
+            for prefix_documents in executor.map(
+                list_prefix, enumerate(prefix_characters)
+            ):
+                document_generations.update(prefix_documents)
+                if len(document_generations) > max_documents:
                     raise RuntimeError(
-                        "Current Search generation exceeds resumable document limit"
+                        "Search index exceeds resumable document limit"
                     )
-        return document_ids
+        return document_generations
 
     def search(self, payload: dict) -> dict:
         return self._rest.request(
