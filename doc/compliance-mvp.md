@@ -27,8 +27,8 @@ Prohibited uses without a new legal classification and control assessment:
 | Azure OpenAI GPT-4o | `gpt-4o:2024-11-20` | E21 narrative extraction | Feature only | newest three documents per security in the active portfolio/theme universe; bounded evidence indexes; immutable cache; prompt `e21_narrative_v1` |
 | Azure OpenAI GPT-4o | `gpt-4o:2024-11-20` | Recommendation explanation | Narration only | action and arithmetic supplied by policy; citation validation; immutable decision log; prompt `e16_grounded_v1` |
 | Azure OpenAI GPT-4o | `gpt-4o:2024-11-20` | Portfolio discussion | Narration only | owner-scoped context; deterministic calculations; grounded citations; prompt `e18_discussion_v1` |
-| Deterministic policy | `e15_v1` | Personalized portfolio actions and amounts | Recommendation | risk-profile policy; coverage and cost gates; no execution |
-| Deterministic score | `e6b_v2` / `e6b_balanced_v1` | Theme-relative score with active-universe fallback | Ranking | point-in-time inputs; manifest and Warehouse reconciliation |
+| Deterministic policy | `policy_v2` | Personalized portfolio actions and amounts | Recommendation | risk-profile policy; coverage, raw-composite, financing and cost gates; no execution |
+| Deterministic score | `opportunity_v1` / `balanced_v1` | Theme-relative six-leg score with one assigned cohort | Ranking | point-in-time inputs; observed-only aggregation; Blom positions; release reconciliation |
 | Deterministic models | `e20_v2`, `e22_v4` | Fundamental anchor and narrative premium | Features | content-addressed code; version checks; immutable evidence links |
 
 The UI identifies the discussion as an AI interaction and labels generated explanations and answers with machine-readable `data-ai-generated="true"` markup. This markup is an MVP signal, not a claim that a future Article 50 technical standard has been certified.

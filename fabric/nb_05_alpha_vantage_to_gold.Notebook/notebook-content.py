@@ -420,12 +420,12 @@ spark.sql("""
     ) USING DELTA
 """)
 manual_theme_seed = spark.createDataFrame([
-    ("AMD", "data_center_buildout", "Compute accelerators used in data-center infrastructure."),
-    ("AVGO", "data_center_buildout", "Networking and custom silicon used in data centers."),
+    ("AMD", "ai_compute_semiconductors", "Semiconductor compute accelerators and processors."),
+    ("AVGO", "ai_compute_semiconductors", "Semiconductor networking, accelerators, and custom silicon."),
     ("CAMT", "ai_compute_semiconductors", "Semiconductor inspection and metrology equipment."),
     ("COHR", "data_center_buildout", "Optical communications components used in data-center interconnects."),
-    ("INTC", "data_center_buildout", "Data-center processors, accelerators, and platform infrastructure."),
-    ("MRVL", "data_center_buildout", "Data-center connectivity, switching, and custom silicon."),
+    ("INTC", "ai_compute_semiconductors", "Semiconductor processors, accelerators, and foundry platforms."),
+    ("MRVL", "ai_compute_semiconductors", "Semiconductor connectivity, switching, and custom silicon."),
     ("NVDA", "ai_compute_semiconductors", "AI accelerators and compute platforms."),
     ("PLTR", "enterprise_technology", "Enterprise data and software platform."),
     ("RGTI", "quantum_computing", "Quantum processors and cloud quantum-computing systems."),
@@ -443,14 +443,14 @@ manual_classifications = (
     )
     .withColumn(
         "classification_id",
-        F.sha2(F.concat_ws("|", F.lit("manual_v1"), "ticker", "theme_id"), 256),
+        F.sha2(F.concat_ws("|", F.lit("manual_v2"), "ticker", "theme_id"), 256),
     )
     .withColumn("provenance", F.lit("manual"))
     .withColumn("confidence", F.lit(1.0))
-    .withColumn("effective_from", F.to_date(F.lit("2026-08-04")))
+    .withColumn("effective_from", F.to_date(F.lit("2026-08-06")))
     .withColumn("effective_to", F.lit(None).cast(DateType()))
-    .withColumn("classification_version", F.lit("manual_v1"))
-    .withColumn("updated_at", F.to_timestamp(F.lit("2026-08-04T00:00:00Z")))
+    .withColumn("classification_version", F.lit("manual_v2"))
+    .withColumn("updated_at", F.to_timestamp(F.lit("2026-08-06T00:00:00Z")))
     .select(
         "classification_id", "security_sk", "ticker", "theme_id", "provenance",
         "confidence", "rationale", "effective_from", "effective_to",

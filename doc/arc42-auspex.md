@@ -139,12 +139,12 @@ The selected classification determines cohort membership only. Explicit classifi
 
 | Ticker | Manual theme | Recorded rationale |
 | --- | --- | --- |
-| AMD | `data_center_buildout` | Compute accelerators used in data-center infrastructure |
-| AVGO | `data_center_buildout` | Networking and custom silicon used in data centers |
+| AMD | `ai_compute_semiconductors` | Semiconductor compute accelerators and processors |
+| AVGO | `ai_compute_semiconductors` | Semiconductor networking, accelerators, and custom silicon |
 | CAMT | `ai_compute_semiconductors` | Semiconductor inspection and metrology equipment |
 | COHR | `data_center_buildout` | Optical communications components used in data-center interconnects |
-| INTC | `data_center_buildout` | Data-center processors, accelerators, and platform infrastructure |
-| MRVL | `data_center_buildout` | Data-center connectivity, switching, and custom silicon |
+| INTC | `ai_compute_semiconductors` | Semiconductor processors, accelerators, and foundry platforms |
+| MRVL | `ai_compute_semiconductors` | Semiconductor connectivity, switching, and custom silicon |
 | NVDA | `ai_compute_semiconductors` | AI accelerators and compute platforms |
 | PLTR | `enterprise_technology` | Enterprise data and software platform |
 | RGTI | `quantum_computing` | Quantum processors and cloud quantum-computing systems |

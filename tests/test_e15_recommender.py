@@ -317,6 +317,36 @@ class E15RecommenderTests(unittest.TestCase):
         self.assertEqual(result["status"], "ready")
         self.assertEqual(result["recommendations"], [])
 
+    def test_service_orders_actionable_cap_trim_before_higher_score_hold(self):
+        identity = SimpleNamespace(product_user=lambda _: SimpleNamespace(
+            user_sk="owner-a", risk_profile="Growth", base_currency="USD",
+        ))
+        portfolio = SimpleNamespace(
+            portfolio_summary=lambda _: {
+                "status": "ready", "base_currency": "USD",
+                "valuation_as_of": "2026-08-06", "total_cash_base": "5000.00",
+                "total_value_base": "100000.00", "holdings": [
+                    {"security_sk": 1, "ticker": "HOLD", "country": "US", "market_value_base": "10000", "weight": "0.10"},
+                    {"security_sk": 2, "ticker": "TRIM", "country": "US", "market_value_base": "18000", "weight": "0.18"},
+                ],
+            },
+            annual_trade_count=lambda *_: 0,
+        )
+        service = RecommendationService(
+            identity,
+            portfolio,
+            InMemoryOpportunitySignalRepository([
+                {"security_sk": 1, "ticker": "HOLD", "opportunity_score": "99", "coverage_status": "PARTIAL", "theme_id": "healthcare", "coverage_reasons": ["missing:theme_proxy_weight"], "as_of": "2026-08-06"},
+                {"security_sk": 2, "ticker": "TRIM", "opportunity_score": "90", "coverage_status": "PARTIAL", "theme_id": "healthcare", "coverage_reasons": ["missing:theme_proxy_weight"], "as_of": "2026-08-06"},
+            ]),
+        )
+
+        result = service.recommendations("principal-a")
+
+        self.assertEqual(result["recommendations"][0]["ticker"], "TRIM")
+        self.assertEqual(result["recommendations"][0]["action"], "TRIM")
+        self.assertEqual(result["recommendations"][1]["action"], "HOLD")
+
     def test_absolute_floor_suppresses_score_driven_increase(self):
         recommendation = build_recommendations(
             PortfolioContext(

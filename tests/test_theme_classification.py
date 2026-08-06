@@ -4,6 +4,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "connectors"))
+ROOT = Path(__file__).resolve().parents[1]
 
 from search.theme_classification import ThemeClassificationService
 from theme_classifier.connector import extract_business_section
@@ -20,6 +21,14 @@ class FakeChat:
 
 
 class ThemeClassificationTests(unittest.TestCase):
+    def test_manual_v2_groups_semiconductor_designers_together(self):
+        notebook = (ROOT / "fabric" / "nb_05_alpha_vantage_to_gold.Notebook" / "notebook-content.py").read_text(encoding="utf-8")
+        for ticker in ("AMD", "AVGO", "CAMT", "INTC", "MRVL", "NVDA"):
+            self.assertIn(f'("{ticker}", "ai_compute_semiconductors"', notebook)
+        for ticker in ("COHR", "VRT"):
+            self.assertIn(f'("{ticker}", "data_center_buildout"', notebook)
+        self.assertIn('F.lit("manual_v2")', notebook)
+
     def test_quantum_and_broad_market_holdings_are_governed_sources(self):
         root = Path(__file__).resolve().parents[1]
         sources = json.loads((root / "connectors" / "shared" / "sources_seed.json").read_text(encoding="utf-8"))

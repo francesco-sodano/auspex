@@ -1379,6 +1379,15 @@ class E12TransactionTests(unittest.TestCase):
         self.assertEqual(summary["total_value_base"], "420.00")
         self.assertEqual(summary["net_contributed_capital_base"], "310.00")
         self.assertEqual(summary["total_earnings_base"], "110.00")
+        self.assertEqual(summary["capital_breakdown_base"], {
+            "external_cash": "0.00",
+            "opening_positions": "300.00",
+            "historical_acquisition_costs": "10.00",
+            "withdrawals": "0.00",
+        })
+        self.assertEqual(summary["current_position_cost_basis_base"], "300.00")
+        self.assertEqual(summary["unrealized_gain_base"], "120.00")
+        self.assertEqual(summary["other_earnings_base"], "-10.00")
         self.assertEqual(summary["coverage"]["missing_capital_fx"], [])
 
     def test_portfolio_summary_marks_old_complete_prices_stale(self):

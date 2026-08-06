@@ -1298,6 +1298,10 @@ class PortfolioService:
             "reporting_currency": reporting_currency,
             "cash_total": valuation["total_cash_base"],
             "net_contributed_capital_total": valuation["net_contributed_capital_base"],
+            "capital_breakdown_base": valuation.get("capital_breakdown_base"),
+            "current_position_cost_basis_base": valuation.get("current_position_cost_basis_base"),
+            "unrealized_gain_base": valuation.get("unrealized_gain_base"),
+            "other_earnings_base": valuation.get("other_earnings_base"),
             "total_fees_total": reporting_total(fees),
             "dividends_total": reporting_total(dividends),
             "interest_total": reporting_total(interest),
@@ -1435,6 +1439,12 @@ class PortfolioService:
 
         cash_by_currency: dict[str, Decimal] = {}
         capital_base = Decimal("0")
+        capital_breakdown = {
+            "external_cash": Decimal("0"),
+            "opening_positions": Decimal("0"),
+            "historical_acquisition_costs": Decimal("0"),
+            "withdrawals": Decimal("0"),
+        }
         positions: dict[int | str, dict] = {}
         missing_valuation_fx: set[str] = set()
         missing_capital_fx: set[str] = set()
@@ -1518,6 +1528,14 @@ class PortfolioService:
                     missing_capital_fx.add(pair)
                 else:
                     capital_base += conversion[0]
+                    if transaction.transaction_type in {"OPENING_CASH", "DEPOSIT"}:
+                        capital_breakdown["external_cash"] += conversion[0]
+                    elif transaction.transaction_type == "WITHDRAWAL":
+                        capital_breakdown["withdrawals"] += -conversion[0]
+                    elif transaction.transaction_type == "OPENING_POSITION":
+                        capital_breakdown["opening_positions"] += conversion[0]
+                    else:
+                        capital_breakdown["historical_acquisition_costs"] += conversion[0]
             if transaction.transaction_type in _SECURITY_TYPES:
                 key = transaction.security_sk or transaction.security_code
                 position = positions.setdefault(key, {
@@ -1531,15 +1549,39 @@ class PortfolioService:
                     "country": transaction.security_country,
                     "quantity": Decimal("0"),
                     "acquisition_cost_source": Decimal("0"),
+                    "acquisition_cost_base": Decimal("0"),
+                    "cost_basis_missing_fx": False,
                 })
                 quantity = Decimal(transaction.quantity)
                 if transaction.transaction_type in {"OPENING_POSITION", "BUY"}:
-                    position["quantity"] += quantity
-                    position["acquisition_cost_source"] += (
+                    source_cost = (
                         Decimal(transaction.source_amount)
                         if transaction.source_amount is not None
                         else quantity * Decimal(transaction.price)
                     )
+                    source_currency = (
+                        transaction.source_currency
+                        or transaction.security_currency
+                        or transaction.currency
+                    )
+                    if source_currency == base_currency:
+                        base_cost = source_cost
+                    elif transaction.currency == base_currency and transaction.gross_amount is not None:
+                        base_cost = Decimal(transaction.gross_amount)
+                    else:
+                        cost_conversion = self._convert(
+                            source_cost,
+                            source_currency,
+                            base_currency,
+                            transaction.event_date,
+                        )
+                        base_cost = cost_conversion[0] if cost_conversion else None
+                    position["quantity"] += quantity
+                    position["acquisition_cost_source"] += source_cost
+                    if base_cost is None:
+                        position["cost_basis_missing_fx"] = True
+                    else:
+                        position["acquisition_cost_base"] += base_cost
                 else:
                     held_quantity = position["quantity"]
                     average_cost = (
@@ -1549,8 +1591,13 @@ class PortfolioService:
                     )
                     position["quantity"] -= quantity
                     position["acquisition_cost_source"] -= average_cost * quantity
+                    if held_quantity > 0:
+                        position["acquisition_cost_base"] -= (
+                            position["acquisition_cost_base"] / held_quantity
+                        ) * quantity
                     if position["quantity"] == 0:
                         position["acquisition_cost_source"] = Decimal("0")
+                        position["acquisition_cost_base"] = Decimal("0")
 
         cash_base = Decimal("0")
         cash_exposure_base: dict[str, Decimal] = {}
@@ -1688,6 +1735,9 @@ class PortfolioService:
                 "opportunity_score": (score or {}).get("opportunity_score"),
                 "score_as_of": (score or {}).get("as_of"),
                 "score_coverage_status": (score or {}).get("coverage_status"),
+                "score_coverage_reasons": list(
+                    (score or {}).get("coverage_reasons") or []
+                ),
                 "score_candidate_count": (score or {}).get("candidate_count"),
                 "score_classification_provenance": (
                     (score or {}).get("classification_provenance")
@@ -1714,6 +1764,24 @@ class PortfolioService:
         complete = not missing_prices and not missing_valuation_fx
         valued_total = cash_base + stocks_base
         total_value = cash_base + stocks_base if complete else None
+        open_positions = [position for position in positions.values() if position["quantity"] != 0]
+        missing_cost_basis = any(
+            position["cost_basis_missing_fx"] for position in open_positions
+        )
+        current_position_cost_basis = sum(
+            (position["acquisition_cost_base"] for position in open_positions),
+            Decimal("0"),
+        )
+        unrealized_gain = (
+            stocks_base - current_position_cost_basis
+            if complete and not missing_cost_basis
+            else None
+        )
+        total_earnings = (
+            total_value - capital_base
+            if total_value is not None and not missing_capital_fx
+            else None
+        )
         if valued_total != 0:
             for holding in holdings:
                 if holding["market_value_base"] is not None:
@@ -1750,11 +1818,20 @@ class PortfolioService:
             "valued_stocks_base": _money(stocks_base),
             "valued_total_base": _money(valued_total),
             "net_contributed_capital_base": _money(capital_base) if not missing_capital_fx else None,
-            "total_earnings_base": (
-                _money(total_value - capital_base)
-                if total_value is not None and not missing_capital_fx
+            "capital_breakdown_base": (
+                {name: _money(value) for name, value in capital_breakdown.items()}
+                if not missing_capital_fx else None
+            ),
+            "current_position_cost_basis_base": (
+                _money(current_position_cost_basis) if not missing_cost_basis else None
+            ),
+            "unrealized_gain_base": _money(unrealized_gain) if unrealized_gain is not None else None,
+            "other_earnings_base": (
+                _money(total_earnings - unrealized_gain)
+                if total_earnings is not None and unrealized_gain is not None
                 else None
             ),
+            "total_earnings_base": _money(total_earnings) if total_earnings is not None else None,
             "cash_weight": _quantity(cash_base / total_value) if total_value else None,
             "holdings": sorted(holdings, key=lambda holding: holding["ticker"]),
             "exposures": {

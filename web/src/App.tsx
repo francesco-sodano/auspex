@@ -158,6 +158,10 @@ type PortfolioHomeSummary = {
   total_value_base: string | null
   net_contributed_capital_base: string | null
   total_earnings_base: string | null
+  capital_breakdown_base: Record<'external_cash' | 'opening_positions' | 'historical_acquisition_costs' | 'withdrawals', string> | null
+  current_position_cost_basis_base: string | null
+  unrealized_gain_base: string | null
+  other_earnings_base: string | null
   cash_weight: string | null
   holdings: Array<{
     security_sk: number | null
@@ -178,6 +182,7 @@ type PortfolioHomeSummary = {
     opportunity_score: string | null
     score_as_of: string | null
     score_coverage_status: 'READY' | 'PARTIAL' | null
+    score_coverage_reasons: string[]
     score_candidate_count: number | null
     score_classification_provenance: 'manual' | 'llm' | 'trs' | null
     theme_id: string | null
@@ -684,6 +689,10 @@ function ProductHome({ user }: { user: AppUser }) {
     const step = recommendation.candidate_count ? 100 / (recommendation.candidate_count + 0.25) : 0
     return Number(recommendation.opportunity_score).toFixed(step >= 1 ? 0 : 1)
   }
+  const coverageNote = (reasons: string[]) => reasons
+    .filter((reason) => reason.startsWith('missing:'))
+    .map((reason) => reason.replace('missing:', '').replaceAll('_', ' '))
+    .join(', ')
   const earnings = summary?.total_earnings_base === null || summary?.total_earnings_base === undefined
     ? null
     : Number(summary.total_earnings_base)
@@ -807,6 +816,7 @@ function ProductHome({ user }: { user: AppUser }) {
             <article><MetricLabel metricKey="cash_available" metadata={metadata} fallback="Cash available" /><strong>{formatMoney(summary?.total_cash_base)}</strong><small>{summary?.cash_weight ? `${(Number(summary.cash_weight) * 100).toFixed(1)}% of portfolio` : 'Cash derived from the ledger'}</small></article>
             <article><MetricLabel metricKey="stocks_value" metadata={metadata} fallback="Stocks value" /><strong>{cashOnly ? 'No stock positions' : formatMoney(summary?.total_stocks_base)}</strong><small>{cashOnly ? 'Add a holding from the ledger when ready' : `Latest covered closes in ${summary?.base_currency}`}</small></article>
           </div>
+          {summary?.capital_breakdown_base && <section className="home-panel capital-reconciliation"><div className="panel-title"><div><h2>Capital and earnings reconciliation</h2><p>Trade-date capital and current market value, shown separately.</p></div></div><dl><div><dt>Opening positions</dt><dd>{formatMoney(summary.capital_breakdown_base.opening_positions)}</dd></div><div><dt>External cash</dt><dd>{formatMoney(summary.capital_breakdown_base.external_cash)}</dd></div><div><dt>Historical acquisition costs</dt><dd>{formatMoney(summary.capital_breakdown_base.historical_acquisition_costs)}</dd></div><div><dt>Current position cost basis</dt><dd>{formatMoney(summary.current_position_cost_basis_base)}</dd></div><div><dt>Unrealized gain / loss</dt><dd>{formatMoney(summary.unrealized_gain_base)}</dd></div><div><dt>Other earnings, fees and cash FX</dt><dd>{formatMoney(summary.other_earnings_base)}</dd></div></dl></section>}
           <section className="home-panel holdings-panel">
             <div className="panel-title"><div><h2>Holdings</h2><p>{summary?.holdings.length || 0} current positions · seven latest sessions</p></div><a className="text-action" href="/ledger">Open ledger <ArrowRight size={14} /></a></div>
             <div className="table-scroll">
@@ -818,7 +828,7 @@ function ProductHome({ user }: { user: AppUser }) {
                   <td>{holding.quantity}<small>Avg {holding.average_acquisition_price ? `${holding.currency} ${holding.average_acquisition_price}` : 'unavailable'}</small></td>
                   <td>{holding.latest_price ? `${holding.price_currency || holding.currency} ${holding.latest_price}` : 'Pending'}<small>{holding.price_as_of || 'Date unavailable'}</small></td>
                   <td>{formatMoney(holding.market_value_base)}<small className={Number(holding.gain_loss_pct) > 0 ? 'positive' : Number(holding.gain_loss_pct) < 0 ? 'negative' : ''}>{holding.gain_loss_pct === null ? 'Return unavailable' : `${Number(holding.gain_loss_pct) >= 0 ? '+' : ''}${Number(holding.gain_loss_pct).toFixed(1)}% vs acquisition`}</small></td>
-                  <td><strong className="holding-score">{formatScore(holding)}</strong><small>{holding.score_coverage_status ? `${holding.score_coverage_status.toLowerCase()}${holding.score_coverage_status === 'PARTIAL' ? ' band' : ''} · ${holding.score_as_of}` : 'Score unavailable'}</small></td>
+                  <td><strong className="holding-score">{formatScore(holding)}</strong><small>{holding.score_coverage_status ? `${holding.score_coverage_status.toLowerCase()}${holding.score_coverage_status === 'PARTIAL' ? ' relative band' : ''} · ${holding.score_as_of}` : 'Score unavailable'}</small>{holding.score_coverage_status === 'PARTIAL' && <small>Ready when available: {coverageNote(holding.score_coverage_reasons) || 'named missing legs'}</small>}</td>
                 </tr>)}</tbody>
               </table>
             </div>

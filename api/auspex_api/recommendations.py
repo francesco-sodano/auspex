@@ -187,6 +187,11 @@ class RecommendationService:
             ) if signal else ["missing:opportunity_score"]
             payload["attribution"] = list(signal.get("attribution") or []) if signal else []
             recommendation_rows.append(payload)
+        recommendation_rows.sort(key=lambda row: (
+            row["action"] == "HOLD",
+            -abs(Decimal(str(row["suggested_amount_base"]))),
+            row["ticker"],
+        ))
         return {
             "status": summary["status"],
             "as_of": as_of,
