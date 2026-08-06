@@ -139,6 +139,15 @@ jobs:
             --edgar-user-agent "${{ vars.EDGAR_USER_AGENT }}"
           python scripts/deploy_fabric_pipeline.py --workspace-id "${FABRIC_WORKSPACE_ID}"
 
+      - name: Refresh rebuildable Fabric schemas
+        run: |
+          python scripts/run_fabric_schema_refresh.py \
+            --workspace-id "${FABRIC_WORKSPACE_ID}" \
+            --subscription-id "${AZURE_SUBSCRIPTION_ID}" \
+            --capacity-resource-group "auspex-${AUSPEX_ENV}-data" \
+            --capacity-name "auspex${AUSPEX_ENV}fab" \
+            --as-of-date "$(date -u +%F)"
+
       - name: Deploy Fabric Warehouse schema
         env:
           FABRIC_WAREHOUSE_SERVER: ${{ vars.FABRIC_WAREHOUSE_SERVER }}

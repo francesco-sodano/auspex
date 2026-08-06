@@ -378,7 +378,7 @@ class OpportunityScoreArtifactTests(unittest.TestCase):
         e8_notebook = (ROOT / "fabric" / "nb_05_alpha_vantage_to_gold.Notebook" / "notebook-content.py").read_text(encoding="utf-8")
 
         self.assertIn(
-            "Files/config/engine/e4c60debd1986f7894d2504326837a0b9da85c2e287e7a3ca5292ab28465b417.py",
+            "Files/config/engine/f2359e9781c04f062a1862d8545b45d89c8b98926b66b2fa07ddaac035b86b7b.py",
             fabric_deploy,
         )
         self.assertIn('ROOT / "engine" / "thesis.py"', fabric_deploy)

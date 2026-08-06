@@ -57,8 +57,17 @@ def main():
         cursor = connection.cursor()
         batches = 0
         for sql_file in SQL_FILES:
-            for batch in sql_batches(sql_file.read_text(encoding="utf-8")):
-                cursor.execute(batch)
+            for batch_index, batch in enumerate(
+                sql_batches(sql_file.read_text(encoding="utf-8")),
+                start=1,
+            ):
+                try:
+                    cursor.execute(batch)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Warehouse deployment failed in {sql_file.name} "
+                        f"batch {batch_index}: {exc}"
+                    ) from exc
                 batches += 1
         cursor.execute("SELECT @@TRANCOUNT")
         open_transactions = int(cursor.fetchone()[0])

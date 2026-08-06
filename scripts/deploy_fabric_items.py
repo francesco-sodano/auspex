@@ -17,7 +17,7 @@ EDGAR_USER_AGENT_TOKEN = "{{EDGAR_USER_AGENT}}"
 FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 STORAGE_SCOPE = "https://storage.azure.com/.default"
 ENGINE_TARGETS = {
-    ROOT / "engine" / "thesis.py": "Files/config/engine/e4c60debd1986f7894d2504326837a0b9da85c2e287e7a3ca5292ab28465b417.py",
+    ROOT / "engine" / "thesis.py": "Files/config/engine/f2359e9781c04f062a1862d8545b45d89c8b98926b66b2fa07ddaac035b86b7b.py",
     ROOT / "engine" / "fundamental_anchor.py": "Files/config/e20/84641443bde957496881c8cce27b4c8a0dda7f2b5b94eca79b4fdd6213a9a14b.py",
     ROOT / "engine" / "narrative_premium.py": "Files/config/e22/9a8314cfd0990f897992c7e26ba9c2daf060f8af7c5c0a78e0d656a3821e2b07.py",
 }

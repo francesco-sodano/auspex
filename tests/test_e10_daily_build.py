@@ -723,6 +723,7 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
             "config-zip",
             "deploy_fabric_items.py",
             "deploy_fabric_pipeline.py",
+            "run_fabric_schema_refresh.py",
             "deploy_warehouse_schema.py",
             "migrate_e19_cosmos_rbac.ps1",
             "ALPHAVANTAGE_API_KEY",
@@ -732,6 +733,25 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
             self.assertIn(value, deploy)
         self.assertIn("AZURE_SUBSCRIPTION_ID", deploy)
         self.assertNotIn("cloudcherry-prod", deploy)
+
+    def test_fabric_schema_refresh_precedes_warehouse_deployment(self):
+        deploy = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertLess(
+            deploy.index("run_fabric_schema_refresh.py"),
+            deploy.index("deploy_warehouse_schema.py"),
+        )
+        refresh = (ROOT / "scripts" / "run_fabric_schema_refresh.py").read_text(
+            encoding="utf-8"
+        )
+        for notebook in (
+            "nb_13_source_history_to_silver",
+            "nb_05_alpha_vantage_to_gold",
+            "nb_09_fundamental_anchor",
+            "nb_04_metrics",
+        ):
+            self.assertIn(notebook, refresh)
 
     def test_portable_fabric_bindings_are_injected_at_deploy_time(self):
         script_path = ROOT / "scripts" / "deploy_fabric_items.py"
@@ -782,6 +802,8 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("FABRIC_WAREHOUSE_SERVER", source)
+        self.assertIn("Warehouse deployment failed in", source)
+        self.assertIn("batch {batch_index}", source)
         self.assertNotRegex(
             source,
             r'(?i)DEFAULT_SERVER\s*=\s*["\'](?!["\'])',
