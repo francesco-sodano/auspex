@@ -49,6 +49,26 @@ def observation(security_sk: int, **overrides) -> OpportunityObservation:
 
 
 class OpportunityScoreEngineTests(unittest.TestCase):
+    @staticmethod
+    def no_leg_inputs():
+        return {
+            "theme_proxy_weight": None,
+            "broad_market_weight": None,
+            "attention_change_30d": None,
+            "insider_net_buy_ratio_90d": None,
+            "insider_cluster_buy_30d": None,
+            "inst_net_flow_qoq": None,
+            "inst_new_initiations": None,
+            "contract_award_usd_trailing_90d": None,
+            "activist_13d_flag": None,
+            "profit_margin": None,
+            "rev_growth_yoy": None,
+            "fcf_yield": None,
+            "net_debt_to_ebitda": None,
+            "fundamental_anchor_z": None,
+            "institutional_holder_count_change_qoq": None,
+        }
+
     def test_active_versions_and_balanced_weights_are_fixed(self):
         self.assertEqual(MODEL_VERSION, "opportunity_v1")
         self.assertEqual(WEIGHT_VERSION, "balanced_v1")
@@ -132,6 +152,30 @@ class OpportunityScoreEngineTests(unittest.TestCase):
         self.assertTrue(all(row.coverage_status == "WITHHELD" for row in results))
         self.assertTrue(all(row.opportunity_score is None for row in results))
         self.assertTrue(all("theme_cohort_below_minimum" in row.coverage_reasons for row in results))
+
+    def test_zero_leg_security_is_withheld_without_cancelling_scoreable_cohort(self):
+        observations = [observation(index) for index in range(1, 10)]
+        observations[0] = observation(1, **self.no_leg_inputs())
+
+        results = {row.security_sk: row for row in score_theme(observations, LEG_WEIGHTS)}
+
+        self.assertEqual(results[1].coverage_status, "WITHHELD")
+        self.assertIsNone(results[1].opportunity_score)
+        self.assertIn("no_available_legs", results[1].coverage_reasons)
+        self.assertTrue(all(results[index].opportunity_score is not None for index in range(2, 10)))
+
+    def test_scoreable_population_must_meet_minimum_cohort(self):
+        observations = [observation(index) for index in range(1, 9)]
+        observations[0] = observation(1, **self.no_leg_inputs())
+
+        results = score_theme(observations, LEG_WEIGHTS)
+
+        self.assertTrue(all(row.coverage_status == "WITHHELD" for row in results))
+        self.assertTrue(all(row.opportunity_score is None for row in results))
+        self.assertTrue(all(
+            "scoreable_cohort_below_minimum" in row.coverage_reasons
+            for row in results
+        ))
 
     def test_replay_is_order_independent_and_all_ties_are_neutral(self):
         observations = [
@@ -378,7 +422,7 @@ class OpportunityScoreArtifactTests(unittest.TestCase):
         e8_notebook = (ROOT / "fabric" / "nb_05_alpha_vantage_to_gold.Notebook" / "notebook-content.py").read_text(encoding="utf-8")
 
         self.assertIn(
-            "Files/config/engine/f2359e9781c04f062a1862d8545b45d89c8b98926b66b2fa07ddaac035b86b7b.py",
+            "Files/config/engine/66f623ea6d0f4bbeadc24099573a3a1272be063577090588db351014e366f254.py",
             fabric_deploy,
         )
         self.assertIn('ROOT / "engine" / "thesis.py"', fabric_deploy)

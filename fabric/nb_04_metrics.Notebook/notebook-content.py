@@ -60,8 +60,8 @@ from pyspark.sql.types import (
     StringType, StructField, StructType, TimestampType,
 )
 
-OPPORTUNITY_ENGINE_LAKEHOUSE_PATH = "Files/config/engine/f2359e9781c04f062a1862d8545b45d89c8b98926b66b2fa07ddaac035b86b7b.py"
-OPPORTUNITY_ENGINE_SHA256 = "f2359e9781c04f062a1862d8545b45d89c8b98926b66b2fa07ddaac035b86b7b"
+OPPORTUNITY_ENGINE_LAKEHOUSE_PATH = "Files/config/engine/66f623ea6d0f4bbeadc24099573a3a1272be063577090588db351014e366f254.py"
+OPPORTUNITY_ENGINE_SHA256 = "66f623ea6d0f4bbeadc24099573a3a1272be063577090588db351014e366f254"
 
 opportunity_engine_source = mssparkutils.fs.head(OPPORTUNITY_ENGINE_LAKEHOUSE_PATH, 1024 * 1024)
 opportunity_engine_bytes = opportunity_engine_source.encode("utf-8")

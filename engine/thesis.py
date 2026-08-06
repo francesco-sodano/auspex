@@ -463,6 +463,45 @@ def score_movement_attribution(
     return movements
 
 
+def _withheld_result(
+    observation: OpportunityObservation,
+    snapshot_hash: str,
+    candidate_count: int,
+    reasons: Iterable[str],
+) -> OpportunityResult:
+    return OpportunityResult(
+        score_id=_sha256({"snapshot": snapshot_hash, "security_sk": observation.security_sk}),
+        cohort_snapshot_hash=snapshot_hash,
+        theme_id=observation.theme_id,
+        security_sk=observation.security_sk,
+        date_sk=observation.date_sk,
+        as_of=observation.as_of,
+        classification_provenance=observation.classification_provenance,
+        classification_id=observation.classification_id,
+        classification_updated_at=observation.classification_updated_at,
+        candidate_count=candidate_count,
+        thesis_linkage_z=None,
+        attention_acceleration_z=None,
+        smart_money_z=None,
+        fundamental_health_z=None,
+        valuation_brake_z=None,
+        crowding_positioning_z=None,
+        thesis_linkage_contribution=None,
+        attention_acceleration_contribution=None,
+        smart_money_contribution=None,
+        fundamental_health_contribution=None,
+        valuation_brake_contribution=None,
+        crowding_positioning_contribution=None,
+        opportunity_score_raw=None,
+        opportunity_score=None,
+        coverage_status="WITHHELD",
+        coverage_reasons=tuple(sorted(set(reasons))),
+        max_knowledge_date=observation.max_knowledge_date,
+        model_version=MODEL_VERSION,
+        weight_version=WEIGHT_VERSION,
+    )
+
+
 def score_theme(
     observations: Iterable[OpportunityObservation],
     leg_weights: dict[str, float],
@@ -481,36 +520,11 @@ def score_theme(
     }
     if candidate_count < MIN_THEME_COHORT:
         return [
-            OpportunityResult(
-                score_id=_sha256({"snapshot": snapshot_hash, "security_sk": observation.security_sk}),
-                cohort_snapshot_hash=snapshot_hash,
-                theme_id=observation.theme_id,
-                security_sk=observation.security_sk,
-                date_sk=observation.date_sk,
-                as_of=observation.as_of,
-                classification_provenance=observation.classification_provenance,
-                classification_id=observation.classification_id,
-                classification_updated_at=observation.classification_updated_at,
-                candidate_count=candidate_count,
-                thesis_linkage_z=None,
-                attention_acceleration_z=None,
-                smart_money_z=None,
-                fundamental_health_z=None,
-                valuation_brake_z=None,
-                crowding_positioning_z=None,
-                thesis_linkage_contribution=None,
-                attention_acceleration_contribution=None,
-                smart_money_contribution=None,
-                fundamental_health_contribution=None,
-                valuation_brake_contribution=None,
-                crowding_positioning_contribution=None,
-                opportunity_score_raw=None,
-                opportunity_score=None,
-                coverage_status="WITHHELD",
-                coverage_reasons=tuple(sorted((*reasons_by_security[observation.security_sk], "theme_cohort_below_minimum"))),
-                max_knowledge_date=observation.max_knowledge_date,
-                model_version=MODEL_VERSION,
-                weight_version=WEIGHT_VERSION,
+            _withheld_result(
+                observation,
+                snapshot_hash,
+                candidate_count,
+                (*reasons_by_security[observation.security_sk], "theme_cohort_below_minimum"),
             )
             for observation in ordered
         ]
@@ -557,15 +571,38 @@ def score_theme(
         )
         for observation in ordered
     }
+    scoreable_security_sks = {
+        security_sk
+        for security_sk, available in available_legs.items()
+        if available
+    }
+    if len(scoreable_security_sks) < MIN_THEME_COHORT:
+        return [
+            _withheld_result(
+                observation,
+                snapshot_hash,
+                candidate_count,
+                (
+                    *reasons_by_security[observation.security_sk],
+                    "scoreable_cohort_below_minimum",
+                    *(
+                        ("no_available_legs",)
+                        if not available_legs[observation.security_sk]
+                        else ()
+                    ),
+                ),
+            )
+            for observation in ordered
+        ]
     full_variance = sum(weight * weight for weight in active_weights.values())
     variance_scales = {}
     raw_scores = {}
     for observation in ordered:
         security_sk = observation.security_sk
         available = available_legs[security_sk]
+        if not available:
+            continue
         available_variance = sum(active_weights[leg_name] ** 2 for leg_name in available)
-        if available_variance <= 0.0:
-            raise ValueError("Opportunity Score requires at least one complete leg")
         variance_scales[security_sk] = math.sqrt(full_variance / available_variance)
         raw_scores[security_sk] = variance_scales[security_sk] * sum(
             active_weights[leg_name] * float(leg_raw[leg_name][security_sk])
@@ -584,7 +621,7 @@ def score_theme(
         }
         percentile_scores = {
             security_sk: round(
-                100.0 * (average_rank[value] - 3 / 8) / (candidate_count + 1 / 4),
+                100.0 * (average_rank[value] - 3 / 8) / (len(raw_scores) + 1 / 4),
                 4,
             )
             for security_sk, value in raw_scores.items()
@@ -594,6 +631,14 @@ def score_theme(
     for observation in ordered:
         security_sk = observation.security_sk
         reasons = reasons_by_security[security_sk]
+        if security_sk not in scoreable_security_sks:
+            results.append(_withheld_result(
+                observation,
+                snapshot_hash,
+                candidate_count,
+                (*reasons, "no_available_legs"),
+            ))
+            continue
         contributions = {
             leg_name: (
                 variance_scales[security_sk]
