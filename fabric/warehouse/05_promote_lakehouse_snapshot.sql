@@ -693,7 +693,15 @@ BEGIN
            )
            OR (
                coverage_status = 'WITHHELD'
-               AND (candidate_count >= 8 OR opportunity_score IS NOT NULL OR opportunity_score_raw IS NOT NULL)
+               AND (
+                   (
+                       candidate_count >= 8
+                       AND coverage_reasons_json NOT LIKE '%"no_available_legs"%'
+                       AND coverage_reasons_json NOT LIKE '%"scoreable_cohort_below_minimum"%'
+                   )
+                   OR opportunity_score IS NOT NULL
+                   OR opportunity_score_raw IS NOT NULL
+               )
            )
            OR (
                opportunity_score_raw IS NOT NULL

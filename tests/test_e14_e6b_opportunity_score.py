@@ -379,6 +379,8 @@ class OpportunityScoreArtifactTests(unittest.TestCase):
         self.assertIn("theme_score_fact_count", notebook)
         self.assertIn("invalid_score_projection_count", notebook)
         self.assertIn("thesis_linkage_contribution IS NULL", notebook)
+        self.assertIn('coverage_reasons_json NOT LIKE \'%"no_available_legs"%\'', notebook)
+        self.assertIn('coverage_reasons_json NOT LIKE \'%"scoreable_cohort_below_minimum"%\'', notebook)
         self.assertIn("institutional_holder_count_120d,\n           activist_13d_flag", notebook)
         self.assertNotIn("narrative_premium=candidate", notebook)
 
@@ -406,6 +408,8 @@ class OpportunityScoreArtifactTests(unittest.TestCase):
             "Warehouse Opportunity Score fact has no completed manifest",
             "WITHIN GROUP (ORDER BY score_id)",
             "thesis_linkage_contribution IS NULL",
+            'coverage_reasons_json NOT LIKE \'%"no_available_legs"%\'',
+            'coverage_reasons_json NOT LIKE \'%"scoreable_cohort_below_minimum"%\'',
             "Warehouse Opportunity Score serving projection lost score facts",
             "Warehouse Opportunity Score attribution projection lost score facts",
         ]:
