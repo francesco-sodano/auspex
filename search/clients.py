@@ -141,6 +141,23 @@ class AzureSearchRestClient:
             raise RuntimeError(f"Search rejected {len(failures)} evidence documents")
         return len(actions)
 
+    def merge_documents(self, documents: Iterable[dict]) -> int:
+        actions = [{"@search.action": "merge", **document} for document in documents]
+        if not actions:
+            return 0
+        response = self._rest.request(
+            "POST",
+            f"indexes/{self.index_name}/docs/index",
+            params={"api-version": SEARCH_API_VERSION},
+            payload={"value": actions},
+        )
+        failures = [item for item in response.get("value", []) if not item.get("status")]
+        if failures:
+            raise RuntimeError(
+                f"Search rejected {len(failures)} evidence metadata merges"
+            )
+        return len(actions)
+
     def delete_documents(
         self,
         document_ids: Iterable[str],

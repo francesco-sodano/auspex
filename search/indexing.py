@@ -145,7 +145,7 @@ class EvidenceIndexer:
                     document.get("published_at")
                 )
                 search_documents.append(search_document)
-            metadata_refreshed += self._search.upload_documents(search_documents)
+            metadata_refreshed += self._search.merge_documents(search_documents)
         pending_documents = [
             document for document in documents if document["id"] not in existing_ids
         ]

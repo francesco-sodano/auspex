@@ -226,6 +226,10 @@ class E7EvidenceIdentityTests(unittest.TestCase):
             def list_document_generations(self):
                 return {documents[0]["id"]: "generation-1"}
 
+            def merge_documents(self, rows):
+                self.merged = list(rows)
+                return len(self.merged)
+
             def upload_documents(self, rows):
                 self.uploaded = list(rows)
                 return len(self.uploaded)
@@ -277,9 +281,12 @@ class E7EvidenceIdentityTests(unittest.TestCase):
             def list_document_generations(self):
                 return {document["id"]: "generation-1"}
 
+            def merge_documents(self, rows):
+                self.merged = list(rows)
+                return len(self.merged)
+
             def upload_documents(self, rows):
-                self.uploaded = list(rows)
-                return len(self.uploaded)
+                raise AssertionError("unchanged evidence must not be uploaded")
 
             def delete_documents(self, document_ids):
                 return 0
@@ -296,9 +303,9 @@ class E7EvidenceIdentityTests(unittest.TestCase):
         self.assertEqual(result["existing"], 1)
         self.assertEqual(result["metadata_refreshed"], 1)
         self.assertEqual(result["uploaded"], 0)
-        self.assertEqual(search.uploaded[0]["generation"], "generation-2")
-        self.assertNotIn("content", search.uploaded[0])
-        self.assertNotIn("content_vector", search.uploaded[0])
+        self.assertEqual(search.merged[0]["generation"], "generation-2")
+        self.assertNotIn("content", search.merged[0])
+        self.assertNotIn("content_vector", search.merged[0])
 
     def test_sentiment_enrichment_bulk_loads_cache_once(self):
         from search.sentiment import enrich_with_cached_sentiment
@@ -428,6 +435,27 @@ class E7EvidenceIdentityTests(unittest.TestCase):
                 {"@search.action": "delete", "id": "d-a"},
                 {"@search.action": "delete", "id": "d-b"},
             ],
+        )
+
+    def test_search_metadata_refresh_uses_strict_merge(self):
+        from search.clients import AzureSearchRestClient
+
+        client = AzureSearchRestClient.__new__(AzureSearchRestClient)
+        client.index_name = "idx-news-filings"
+
+        class FakeRest:
+            def request(self, method, path, *, params, payload):
+                self.payload = payload
+                return {"value": [{"key": "d-a", "status": True}]}
+
+        client._rest = FakeRest()
+
+        merged = client.merge_documents([{"id": "d-a", "generation": "generation-2"}])
+
+        self.assertEqual(merged, 1)
+        self.assertEqual(
+            client._rest.payload["value"],
+            [{"@search.action": "merge", "id": "d-a", "generation": "generation-2"}],
         )
 
     def test_projection_allows_omitted_nullable_filing_metadata(self):
