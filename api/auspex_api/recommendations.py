@@ -9,6 +9,7 @@ from .recommender.policy import (
     financing_policy_from_environment,
     recommendation_payload,
 )
+from .recommender.risk_profile import policy_for_profile
 
 if TYPE_CHECKING:
     from azure.cosmos import ContainerProxy
@@ -153,6 +154,10 @@ class RecommendationService:
             candidates,
             as_of=as_of,
         )
+        risk_policy = policy_for_profile(user.risk_profile)
+        total_value = Decimal(summary["total_value_base"])
+        cash = Decimal(summary["total_cash_base"])
+        required_cash_buffer = total_value * risk_policy.cash_buffer_pct
         recommendation_rows = []
         for recommendation in recommendations:
             if recommendation.action == "HOLD" and recommendation.security_sk not in holdings:
@@ -198,6 +203,17 @@ class RecommendationService:
             "risk_profile": user.risk_profile,
             "base_currency": user.base_currency,
             "reasons": [],
+            "policy_gates": {
+                "cash_buffer_pct": str(risk_policy.cash_buffer_pct),
+                "required_cash_buffer_base": str(required_cash_buffer),
+                "available_cash_base": str(max(Decimal("0"), cash - required_cash_buffer)),
+                "financing_policy_configured": self._financing_policy is not None,
+                "ready_signal_count": sum(
+                    str(row.get("coverage_status") or "") == "READY"
+                    for row in current_signals
+                ),
+                "total_signal_count": len(current_signals),
+            },
             "recommendations": recommendation_rows,
             "disclaimer": "Research only; not financial or tax advice. You decide and execute.",
         }

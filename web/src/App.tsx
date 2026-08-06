@@ -104,6 +104,10 @@ type PortfolioSummary = {
   reporting_currency: 'USD'
   cash_total: string | null
   net_contributed_capital_total: string | null
+  capital_breakdown_base: Record<'external_cash' | 'opening_positions' | 'historical_acquisition_costs' | 'withdrawals', string> | null
+  current_position_cost_basis_base: string | null
+  unrealized_gain_base: string | null
+  other_earnings_base: string | null
   total_fees_total: string | null
   dividends_total: string | null
   interest_total: string | null
@@ -235,6 +239,14 @@ type RecommendationResponse = {
   risk_profile: string
   base_currency: string
   reasons: string[]
+  policy_gates: {
+    cash_buffer_pct: string
+    required_cash_buffer_base: string
+    available_cash_base: string
+    financing_policy_configured: boolean
+    ready_signal_count: number
+    total_signal_count: number
+  }
   disclaimer?: string
   recommendations: Array<{
     recommendation_id: string
@@ -659,6 +671,10 @@ function ProductHome({ user }: { user: AppUser }) {
           risk_profile: user.risk_profile || 'Not configured',
           base_currency: summaryPayload.base_currency,
           reasons: ['recommendation_service_unavailable'],
+          policy_gates: {
+            cash_buffer_pct: '0', required_cash_buffer_base: '0', available_cash_base: '0',
+            financing_policy_configured: false, ready_signal_count: 0, total_signal_count: 0,
+          },
           recommendations: [],
         })
         if (historyResponse.ok) setHistory(historyPayload)
@@ -866,6 +882,7 @@ function ProductHome({ user }: { user: AppUser }) {
                 {explanations[recommendation.recommendation_id]?.status === 'published' && <div className="grounded-output" data-ai-generated="true"><span className="ai-output-label">AI-generated explanation</span><p>{explanations[recommendation.recommendation_id].output.explanation}</p><small>{explanations[recommendation.recommendation_id].output.uncertainty}</small><div className="evidence-list">{explanations[recommendation.recommendation_id].citations.map((citation) => <details className="evidence-item" key={citation.id}><summary>{citation.title || citation.source_name || 'Source evidence'}<small>{citation.knowledge_date ? `Known ${citation.knowledge_date}` : 'Knowledge date unavailable'}</small></summary>{citation.excerpt && <p>{citation.excerpt}</p>}<dl><div><dt>Source</dt><dd>{citation.source_name || citation.source_type || 'Unavailable'}</dd></div><div><dt>Event date</dt><dd>{citation.event_date || 'Unavailable'}</dd></div><div><dt>Knowledge date</dt><dd>{citation.knowledge_date || 'Unavailable'}</dd></div><div><dt>Content</dt><dd>{citation.content_status?.replaceAll('_', ' ') || 'Unavailable'}</dd></div></dl>{citation.url && <a href={citation.url} target="_blank" rel="noreferrer">Open original source <ArrowRight size={12} /></a>}</details>)}</div></div>}
               </article>)}
             </div>}
+            {recommendations && recommendations.status !== 'withheld' && <dl className="policy-gates"><div><dt>Ready signals</dt><dd>{recommendations.policy_gates.ready_signal_count} / {recommendations.policy_gates.total_signal_count}</dd></div><div><dt>Cash above {(Number(recommendations.policy_gates.cash_buffer_pct) * 100).toFixed(0)}% buffer</dt><dd>{new Intl.NumberFormat(undefined, { style: 'currency', currency: recommendations.base_currency }).format(Number(recommendations.policy_gates.available_cash_base))}</dd></div><div><dt>Financing gate</dt><dd>{recommendations.policy_gates.financing_policy_configured ? 'Configured' : 'Fail-closed pending calibration'}</dd></div></dl>}
             <p className="recommendation-disclaimer">{recommendations?.disclaimer || 'Research only; not financial or tax advice. You decide and execute.'}</p>
           </section>
           {(history.events.length > 0 || history.decisions.length > 0) && <section className="home-panel history-panel"><div className="panel-title"><div><h2>Decision history</h2><p>Immutable explanations and your recorded suggestion responses.</p></div></div><ol className="decision-history">{history.events.map((event) => <li key={event.event_id}><span className={`history-state ${event.disposition.toLowerCase()}`}>{event.disposition.toLowerCase()}</span><div><strong>{event.ticker} · {event.action}</strong><p>Suggestion response recorded. No trade was placed.</p></div><time dateTime={event.created_at}>{new Date(event.created_at).toLocaleString()}</time></li>)}{history.decisions.map((decision) => <li key={decision.decision_id}><span className={`history-state ${decision.status}`}>{decision.status}</span><div><strong>{decision.ticker} · grounded explanation</strong><p>{decision.status === 'published' ? 'Evidence-validated explanation recorded.' : `Withheld: ${decision.reasons.join(', ').replaceAll('_', ' ')}`}</p></div><time dateTime={decision.created_at}>{new Date(decision.created_at).toLocaleString()}</time></li>)}</ol></section>}
@@ -978,6 +995,10 @@ function TransactionsPage({ user }: { user: AppUser }) {
     reporting_currency: 'USD',
     cash_total: null,
     net_contributed_capital_total: null,
+    capital_breakdown_base: null,
+    current_position_cost_basis_base: null,
+    unrealized_gain_base: null,
+    other_earnings_base: null,
     total_fees_total: null,
     dividends_total: null,
     interest_total: null,
@@ -1280,6 +1301,7 @@ function TransactionsPage({ user }: { user: AppUser }) {
           <article><MetricLabel metricKey="interest" metadata={metadata} fallback="Interest" /><strong>{formatUsd(summary.interest_total, 'Pending FX')}</strong><small>Gross interest converted to USD</small></article>
           <article><span>Portfolio value by currency</span><strong className="currency-value-list">{summary.currency_exposure.length ? summary.currency_exposure.map((exposure) => <span key={exposure.name}><b>{exposure.name}</b><i>{formatUsd(exposure.market_value_base, 'Pending')} · {(Number(exposure.weight) * 100).toFixed(1)}%</i></span>) : 'Pending valuation'}</strong><small>Underlying currency; values converted to USD</small></article>
         </div>
+        {summary.capital_breakdown_base && <section className="ledger-allocation capital-reconciliation" aria-labelledby="ledger-capital-title"><div className="ledger-allocation-head"><div><span className="eyebrow">Trust the arithmetic</span><h2 id="ledger-capital-title">Capital and earnings reconciliation</h2></div></div><dl><div><dt>Opening positions</dt><dd>{formatUsd(summary.capital_breakdown_base.opening_positions, 'Pending')}</dd></div><div><dt>External cash</dt><dd>{formatUsd(summary.capital_breakdown_base.external_cash, 'Pending')}</dd></div><div><dt>Historical acquisition costs</dt><dd>{formatUsd(summary.capital_breakdown_base.historical_acquisition_costs, 'Pending')}</dd></div><div><dt>Current position cost basis</dt><dd>{formatUsd(summary.current_position_cost_basis_base, 'Pending')}</dd></div><div><dt>Unrealized gain / loss</dt><dd>{formatUsd(summary.unrealized_gain_base, 'Pending')}</dd></div><div><dt>Other earnings, fees and cash FX</dt><dd>{formatUsd(summary.other_earnings_base, 'Pending')}</dd></div></dl></section>}
         <section className="ledger-allocation" aria-labelledby="ledger-allocation-title">
           <div className="ledger-allocation-head"><div><span className="eyebrow">Portfolio allocation</span><h2 id="ledger-allocation-title">Stocks and cash</h2></div><strong>{formatUsd(summary.total_value.value_by_currency?.USD || null, 'Pending valuation')}</strong></div>
           {cashPercent === null || stocksPercent === null ? <p>{summary.allocation.reason === 'negative_cash' ? 'Allocation is unavailable while cash is negative.' : `Allocation is available when coverage is complete${summary.coverage.missing_prices.length ? `; missing prices: ${summary.coverage.missing_prices.join(', ')}` : ''}${summary.coverage.missing_fx.length ? `; missing FX: ${summary.coverage.missing_fx.join(', ')}` : ''}.`}</p> : <>
