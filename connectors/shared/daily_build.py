@@ -311,6 +311,31 @@ def daily_build_orchestrator(context, payload=None):
 		raise
 
 
+def daily_publication_tail_orchestrator(context, payload=None):
+	payload = payload or context.get_input() or {}
+	try:
+		yield context.call_activity("resume_fabric_capacity")
+		evidence = yield context.call_activity("sync_daily_evidence_index")
+		yield context.call_activity(
+			"record_daily_build_completion",
+			{
+				"as_of_date": payload["as_of_date"],
+				"core_notebook_job_ids": payload.get("core_notebook_job_ids", []),
+				"publish_notebook_job_ids": payload.get("publish_notebook_job_ids", []),
+				"diagnostics": payload.get("diagnostics", {}),
+			},
+		)
+		yield context.call_activity("suspend_fabric_capacity")
+		return {"status": "completed", "evidence": evidence}
+	except Exception as exc:
+		yield context.call_activity(
+			"record_daily_build_failure",
+			{"as_of_date": payload.get("as_of_date"), "error": str(exc)},
+		)
+		yield context.call_activity("suspend_fabric_capacity")
+		raise
+
+
 def promote_daily_warehouse_snapshot(
 	*,
 	as_of_date,

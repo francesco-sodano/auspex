@@ -34,6 +34,7 @@ from shared.daily_build import (
 	alpha_vantage_profiles,
 	daily_build_instance_action,
 	daily_build_orchestrator,
+	daily_publication_tail_orchestrator,
 	promote_daily_warehouse_snapshot,
 	scheduled_source_ids,
 )
@@ -652,6 +653,11 @@ async def daily_build_schedule(timer: func.TimerRequest, client):
 @app.orchestration_trigger(context_name="context")
 def daily_build(context):
 	return daily_build_orchestrator(context)
+
+
+@app.orchestration_trigger(context_name="context")
+def daily_publication_tail(context):
+	return daily_publication_tail_orchestrator(context)
 
 
 @app.activity_trigger(input_name="payload")

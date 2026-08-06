@@ -25,6 +25,7 @@ from shared.daily_build import (
     alpha_vantage_profiles,
     daily_build_instance_action,
     daily_build_orchestrator,
+    daily_publication_tail_orchestrator,
     json_safe_activity_result,
     scheduled_source_ids,
 )
@@ -74,6 +75,37 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
 
         self.assertEqual(result["release"]["as_of_date"], "2026-08-06")
         self.assertEqual(json.loads(json.dumps(result)), result)
+
+    def test_publication_tail_runs_only_search_telemetry_and_suspension(self):
+        orchestration = daily_publication_tail_orchestrator(
+            FakeContext(),
+            {
+                "as_of_date": "2026-08-06",
+                "diagnostics": {"financing_partial": 5310},
+            },
+        )
+
+        self.assertEqual(next(orchestration), ("activity", "resume_fabric_capacity", None))
+        self.assertEqual(
+            orchestration.send({"status": "Active"}),
+            ("activity", "sync_daily_evidence_index", None),
+        )
+        completion = orchestration.send({"status": "ok", "generation": "e7-test"})
+        self.assertEqual(completion[1], "record_daily_build_completion")
+        self.assertEqual(completion[2]["diagnostics"], {"financing_partial": 5310})
+        self.assertEqual(
+            orchestration.send({"status": "recorded"}),
+            ("activity", "suspend_fabric_capacity", None),
+        )
+        with self.assertRaises(StopIteration) as completed:
+            orchestration.send({"status": "Paused"})
+        self.assertEqual(
+            completed.exception.value,
+            {
+                "status": "completed",
+                "evidence": {"status": "ok", "generation": "e7-test"},
+            },
+        )
 
     def _complete_notebook_pipeline(self, orchestration, action, pipeline_name):
         for index, notebook in enumerate(NOTEBOOK_PIPELINES[pipeline_name]):
