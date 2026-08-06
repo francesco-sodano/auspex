@@ -741,6 +741,14 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertLess(
+            deploy.index("ensure_fabric_workspace_access.py"),
+            deploy.index("Seed required ETF linkage inputs"),
+        )
+        self.assertLess(
+            deploy.index("Seed required ETF linkage inputs"),
+            deploy.index("deploy_fabric_items.py"),
+        )
+        self.assertLess(
             deploy.index("run_fabric_schema_refresh.py"),
             deploy.index("deploy_warehouse_schema.py"),
         )
