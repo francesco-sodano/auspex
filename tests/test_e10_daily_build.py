@@ -2,6 +2,7 @@ import json
 import importlib.util
 import sys
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -24,6 +25,7 @@ from shared.daily_build import (
     alpha_vantage_profiles,
     daily_build_instance_action,
     daily_build_orchestrator,
+    json_safe_activity_result,
     scheduled_source_ids,
 )
 
@@ -63,6 +65,15 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
         self.assertIn("score_movement_rows", function_app)
         self.assertIn("financing_ready", daily_build)
         self.assertIn('"diagnostics": warehouse.get("diagnostics", {})', daily_build)
+
+    def test_warehouse_activity_result_serializes_sql_dates(self):
+        result = json_safe_activity_result({
+            "status": "promoted",
+            "release": {"as_of_date": date(2026, 8, 6)},
+        })
+
+        self.assertEqual(result["release"]["as_of_date"], "2026-08-06")
+        self.assertEqual(json.loads(json.dumps(result)), result)
 
     def _complete_notebook_pipeline(self, orchestration, action, pipeline_name):
         for index, notebook in enumerate(NOTEBOOK_PIPELINES[pipeline_name]):

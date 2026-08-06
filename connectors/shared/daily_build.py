@@ -32,6 +32,19 @@ def daily_build_instance_action(status) -> str:
 	return "skip"
 
 
+def json_safe_activity_result(value):
+	if isinstance(value, date):
+		return value.isoformat()
+	if isinstance(value, dict):
+		return {
+			key: json_safe_activity_result(item)
+			for key, item in value.items()
+		}
+	if isinstance(value, (list, tuple)):
+		return [json_safe_activity_result(item) for item in value]
+	return value
+
+
 def schedule_is_due(schedule, as_of_date):
 	if isinstance(as_of_date, str):
 		as_of_date = date.fromisoformat(as_of_date)
@@ -396,7 +409,7 @@ def promote_daily_warehouse_snapshot(
 			(as_of_date, as_of_date, as_of_date, as_of_date),
 		)
 		financing_ready, financing_partial, max_pc1, movement_rows = cursor.fetchone()
-		return {
+		return json_safe_activity_result({
 			"status": "promoted",
 			"release": release,
 			"portfolio": {
@@ -412,7 +425,7 @@ def promote_daily_warehouse_snapshot(
 				),
 				"score_movement_rows": int(movement_rows),
 			},
-		}
+		})
 	finally:
 		connection.close()
 
