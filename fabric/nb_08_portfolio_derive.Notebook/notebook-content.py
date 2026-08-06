@@ -840,10 +840,17 @@ portfolio_theme_ids = (
     .select("theme_id")
     .distinct()
 )
+priced_security_keys = (
+    spark.table("fact_market_daily")
+    .select("security_sk")
+    .filter(F.col("security_sk").isNotNull())
+    .distinct()
+)
 required_coverage_symbols = (
     current_theme_membership
     .join(portfolio_theme_ids, "theme_id", "inner")
     .select("security_sk")
+    .join(priced_security_keys, "security_sk", "inner")
     .unionByName(portfolio_security_keys)
     .distinct()
     .join(current_securities.select("security_sk", "ticker"), "security_sk", "inner")
