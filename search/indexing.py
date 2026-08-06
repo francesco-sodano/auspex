@@ -117,6 +117,7 @@ class EvidenceIndexer:
         self._search.ensure_index(self._schema)
         indexed_generations = self._search.list_document_generations()
         projection_ids = {document["id"] for document in documents}
+        stale_ids = set(indexed_generations) - projection_ids
         existing_ids = projection_ids.intersection(indexed_generations)
         reusable_documents = [
             document
@@ -180,7 +181,7 @@ class EvidenceIndexer:
                         search_document["content_vector"] = vector
                         search_documents.append(search_document)
                     uploaded += self._search.upload_documents(search_documents)
-        deleted = self._search.delete_stale_generation(generation)
+        deleted = self._search.delete_documents(sorted(stale_ids))
         return {
             "generation": generation,
             "documents": len(documents),

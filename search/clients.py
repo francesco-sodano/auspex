@@ -141,6 +141,36 @@ class AzureSearchRestClient:
             raise RuntimeError(f"Search rejected {len(failures)} evidence documents")
         return len(actions)
 
+    def delete_documents(
+        self,
+        document_ids: Iterable[str],
+        batch_size: int = 1000,
+    ) -> int:
+        ids = list(document_ids)
+        deleted = 0
+        for offset in range(0, len(ids), batch_size):
+            batch = ids[offset:offset + batch_size]
+            response = self._rest.request(
+                "POST",
+                f"indexes/{self.index_name}/docs/index",
+                params={"api-version": SEARCH_API_VERSION},
+                payload={
+                    "value": [
+                        {"@search.action": "delete", "id": document_id}
+                        for document_id in batch
+                    ]
+                },
+            )
+            failures = [
+                item for item in response.get("value", []) if not item.get("status")
+            ]
+            if failures:
+                raise RuntimeError(
+                    f"Search rejected {len(failures)} evidence-document deletions"
+                )
+            deleted += len(batch)
+        return deleted
+
     def delete_stale_generation(self, generation: str, batch_size: int = 1000) -> int:
         escaped_generation = generation.replace("'", "''")
         deleted = 0
@@ -154,21 +184,7 @@ class AzureSearchRestClient:
             stale_ids = [item["id"] for item in response.get("value", [])]
             if not stale_ids:
                 return deleted
-            delete_response = self._rest.request(
-                "POST",
-                f"indexes/{self.index_name}/docs/index",
-                params={"api-version": SEARCH_API_VERSION},
-                payload={
-                    "value": [
-                        {"@search.action": "delete", "id": document_id}
-                        for document_id in stale_ids
-                    ]
-                },
-            )
-            failures = [item for item in delete_response.get("value", []) if not item.get("status")]
-            if failures:
-                raise RuntimeError(f"Search rejected {len(failures)} stale-document deletions")
-            deleted += len(stale_ids)
+            deleted += self.delete_documents(stale_ids, batch_size=batch_size)
 
     def list_generation_ids(
         self,

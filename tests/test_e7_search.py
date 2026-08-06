@@ -152,11 +152,12 @@ class E7EvidenceIdentityTests(unittest.TestCase):
 
             def list_document_generations(self):
                 self.calls.append(("existing",))
-                return {}
+                return {"d-stale": "generation-0"}
 
-            def delete_stale_generation(self, generation):
-                self.calls.append(("cleanup", generation))
-                return 3
+            def delete_documents(self, document_ids):
+                document_ids = list(document_ids)
+                self.calls.append(("cleanup", document_ids))
+                return len(document_ids)
 
         class FakeEmbeddings:
             def embed(self, texts):
@@ -197,7 +198,8 @@ class E7EvidenceIdentityTests(unittest.TestCase):
         )
         self.assertEqual(search.calls[2][1][0]["content_vector"], [0.0, 1.0])
         self.assertEqual(search.calls[2][1][0]["event_date"], "2026-03-14T00:00:00Z")
-        self.assertEqual(result["deleted_stale"], 3)
+        self.assertEqual(search.calls[-1], ("cleanup", ["d-stale"]))
+        self.assertEqual(result["deleted_stale"], 1)
 
     def test_index_sync_skips_existing_generation_documents(self):
         from search.evidence import evidence_document_id
@@ -228,7 +230,7 @@ class E7EvidenceIdentityTests(unittest.TestCase):
                 self.uploaded = list(rows)
                 return len(self.uploaded)
 
-            def delete_stale_generation(self, generation):
+            def delete_documents(self, document_ids):
                 return 0
 
         class FakeEmbeddings:
@@ -279,7 +281,7 @@ class E7EvidenceIdentityTests(unittest.TestCase):
                 self.uploaded = list(rows)
                 return len(self.uploaded)
 
-            def delete_stale_generation(self, generation):
+            def delete_documents(self, document_ids):
                 return 0
 
         class FailIfEmbedded:
@@ -394,6 +396,39 @@ class E7EvidenceIdentityTests(unittest.TestCase):
 
         self.assertEqual(documents, {"d-a": "generation-1"})
         self.assertNotIn("generation eq", payloads[0]["filter"])
+
+    def test_search_deletes_explicit_document_ids_in_batches(self):
+        from search.clients import AzureSearchRestClient
+
+        client = AzureSearchRestClient.__new__(AzureSearchRestClient)
+        client.index_name = "idx-news-filings"
+
+        class FakeRest:
+            def __init__(self):
+                self.payloads = []
+
+            def request(self, method, path, *, params, payload):
+                self.payloads.append(payload)
+                return {
+                    "value": [
+                        {"key": item["id"], "status": True}
+                        for item in payload["value"]
+                    ]
+                }
+
+        client._rest = FakeRest()
+
+        deleted = client.delete_documents(["d-a", "d-b", "d-c"], batch_size=2)
+
+        self.assertEqual(deleted, 3)
+        self.assertEqual(len(client._rest.payloads), 2)
+        self.assertEqual(
+            client._rest.payloads[0]["value"],
+            [
+                {"@search.action": "delete", "id": "d-a"},
+                {"@search.action": "delete", "id": "d-b"},
+            ],
+        )
 
     def test_projection_allows_omitted_nullable_filing_metadata(self):
         from search.evidence import evidence_document_id
