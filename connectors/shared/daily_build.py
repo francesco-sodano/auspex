@@ -11,7 +11,7 @@ from azure.identity import DefaultAzureCredential
 _ARM_SCOPE = "https://management.azure.com/.default"
 _FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 _TERMINAL_FAILURE_STATES = {"cancelled", "deduped", "failed"}
-_RETRYABLE_DAILY_BUILD_STATES = {"Failed", "Canceled", "Terminated"}
+_RETRYABLE_DAILY_BUILD_STATES = {"failed", "canceled", "terminated"}
 _NOTEBOOK_PIPELINES = {
 	pipeline["display_name"]: pipeline["notebooks"]
 	for pipeline in json.loads(
@@ -27,7 +27,7 @@ def daily_build_instance_action(status) -> str:
 	runtime_status = getattr(runtime_status, "value", runtime_status)
 	if runtime_status is None:
 		return "start"
-	if str(runtime_status) in _RETRYABLE_DAILY_BUILD_STATES:
+	if str(runtime_status).lower() in _RETRYABLE_DAILY_BUILD_STATES:
 		return "purge_and_start"
 	return "skip"
 

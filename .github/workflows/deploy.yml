@@ -141,9 +141,19 @@ jobs:
       - name: Resume Fabric capacity for deployment
         shell: bash
         run: |
+          CAPACITY_ID="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/auspex-${AUSPEX_ENV}-data/providers/Microsoft.Fabric/capacities/auspex${AUSPEX_ENV}fab"
           az rest --method post \
-            --url "https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/auspex-${AUSPEX_ENV}-data/providers/Microsoft.Fabric/capacities/auspex${AUSPEX_ENV}fab/resume?api-version=2023-11-01" \
+            --url "https://management.azure.com${CAPACITY_ID}/resume?api-version=2023-11-01" \
             --output none
+          for attempt in {1..30}; do
+            STATE=$(az resource show --ids "${CAPACITY_ID}" --api-version 2023-11-01 --query properties.state -o tsv)
+            if [ "${STATE}" = "Active" ]; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Fabric capacity did not become Active" >&2
+          exit 1
 
       - name: Deploy Fabric items and daily pipelines
         run: |

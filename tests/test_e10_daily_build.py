@@ -49,7 +49,7 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
 
         self.assertEqual(daily_build_instance_action(status("Running")), "skip")
         self.assertEqual(daily_build_instance_action(status("Completed")), "skip")
-        for value in ("Failed", "Canceled", "Terminated"):
+        for value in ("Failed", "failed", "Canceled", "canceled", "Terminated"):
             self.assertEqual(
                 daily_build_instance_action(status(value)),
                 "purge_and_start",
