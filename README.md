@@ -34,6 +34,17 @@ All Azure resources are deployed in Switzerland North where supported. Azure Sta
 | `scripts/` | Repeatable Fabric, Warehouse, RBAC, and recovery tools |
 | `tests/` | Unit, contract, PIT, idempotency, isolation, and deployment tests |
 
+The incremental company-opportunity foundation lives in `engine/company_package.py`,
+`engine/company_windows.py`, `engine/company_narrative.py`, and
+`engine/research_universe.py`. It defines content-addressed per-company package
+revisions, compact active-data windows, six-leg evidence lineage, a cited AI
+narrative contract, and a research universe independent of portfolio holdings.
+Cosmos `dirty_company_events` and `company_packages` provide replay-safe change
+tracking and immutable/current package storage. The existing daily Fabric build
+remains active until connector change emission and the incremental package worker
+are implemented and validated; these contracts do not yet change production
+scheduling.
+
 ## Prerequisites
 
 - Azure subscription with permission to deploy subscription-scope Bicep and role assignments

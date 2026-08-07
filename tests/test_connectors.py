@@ -587,6 +587,86 @@ class BronzeWriterTests(unittest.TestCase):
 
 
 class ControlPlaneTests(unittest.TestCase):
+    def test_company_package_revision_is_immutable_and_current_pointer_updates(self):
+        from tests.test_company_package import package
+
+        created = []
+        current = []
+
+        class FakeContainer:
+            def create_item(self, item):
+                created.append(item)
+
+            def upsert_item(self, item):
+                current.append(item)
+
+        control_plane = object.__new__(CosmosControlPlane)
+        control_plane._db = type("FakeDatabase", (), {
+            "get_container_client": lambda self, name: FakeContainer(),
+        })()
+
+        fingerprint = control_plane.publish_company_package(package())
+
+        self.assertEqual(created[0]["id"], f"package:{fingerprint}")
+        self.assertEqual(created[0]["document_type"], "revision")
+        self.assertEqual(current[0]["id"], "current")
+        self.assertEqual(current[0]["revision_id"], created[0]["id"])
+
+    def test_dirty_company_event_is_idempotent_and_append_only(self):
+        written = []
+
+        class FakeContainer:
+            def create_item(self, item):
+                if written:
+                    raise CosmosResourceExistsError("already exists")
+                written.append(item)
+
+        control_plane = object.__new__(CosmosControlPlane)
+        control_plane._db = type("FakeDatabase", (), {
+            "get_container_client": lambda self, name: FakeContainer(),
+        })()
+        values = {
+            "security_sk": 42,
+            "source_class": "filing",
+            "source_id": "sec_8k",
+            "source_record_id": "0001-26-000001",
+            "revision_hash": "a" * 64,
+            "knowledge_date": "2026-08-07T10:00:00Z",
+        }
+
+        first = control_plane.mark_company_dirty(**values)
+        replay = control_plane.mark_company_dirty(**values)
+
+        self.assertEqual(first, replay)
+        self.assertEqual(len(written), 1)
+        self.assertEqual(written[0]["security_sk"], 42)
+        self.assertEqual(written[0]["status"], "pending")
+
+    def test_dirty_company_events_complete_against_package_fingerprint(self):
+        patches = []
+
+        class FakeContainer:
+            def patch_item(self, **kwargs):
+                patches.append(kwargs)
+
+        control_plane = object.__new__(CosmosControlPlane)
+        control_plane._db = type("FakeDatabase", (), {
+            "get_container_client": lambda self, name: FakeContainer(),
+        })()
+
+        control_plane.complete_company_changes(
+            security_sk=42,
+            change_ids=["dirty:a", "dirty:b"],
+            package_fingerprint="f" * 64,
+        )
+
+        self.assertEqual([patch["item"] for patch in patches], ["dirty:a", "dirty:b"])
+        self.assertTrue(all(patch["partition_key"] == 42 for patch in patches))
+        self.assertTrue(all(
+            patch["patch_operations"][-1]["value"] == "f" * 64
+            for patch in patches
+        ))
+
     def test_completed_run_conflict_replays_stored_pagination_result(self):
         class FakeContainer:
             def create_item(self, item):

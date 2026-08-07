@@ -184,6 +184,58 @@ resource narrativeFeatureCacheContainer 'Microsoft.DocumentDB/databaseAccounts/s
   }
 }
 
+resource dirtyCompanyEventsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-05-15' = {
+  parent: database
+  name: 'dirty_company_events'
+  properties: {
+    resource: {
+      id: 'dirty_company_events'
+      partitionKey: {
+        paths: ['/security_sk']
+        kind: 'Hash'
+      }
+      indexingPolicy: {
+        indexingMode: 'consistent'
+        automatic: true
+        compositeIndexes: [
+          [
+            {
+              path: '/status'
+              order: 'ascending'
+            }
+            {
+              path: '/knowledge_date'
+              order: 'ascending'
+            }
+            {
+              path: '/id'
+              order: 'ascending'
+            }
+          ]
+        ]
+      }
+    }
+  }
+}
+
+resource companyPackagesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-05-15' = {
+  parent: database
+  name: 'company_packages'
+  properties: {
+    resource: {
+      id: 'company_packages'
+      partitionKey: {
+        paths: ['/security_sk']
+        kind: 'Hash'
+      }
+      indexingPolicy: {
+        indexingMode: 'consistent'
+        automatic: true
+      }
+    }
+  }
+}
+
 var ingestionContainerNames = [
   'sources'
   'watermarks'
@@ -191,6 +243,8 @@ var ingestionContainerNames = [
   'dedup'
   'sentiment_cache'
   'narrative_feature_cache'
+  'dirty_company_events'
+  'company_packages'
 ]
 
 // Data-plane RBAC: ingestion Function App MI — contributor only on control-plane containers.
@@ -209,6 +263,8 @@ resource ingestFuncCosmosRoles 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAss
     dedupContainer
     sentimentCacheContainer
     narrativeFeatureCacheContainer
+    dirtyCompanyEventsContainer
+    companyPackagesContainer
   ]
 }]
 
@@ -386,6 +442,17 @@ resource webApiIngestionUniverseCosmosRole 'Microsoft.DocumentDB/databaseAccount
     scope: '${cosmosAccount.id}/dbs/${databaseName}/colls/ingestion_universe'
   }
   dependsOn: [ingestionUniverseContainer]
+}
+
+resource webApiCompanyPackagesCosmosRole 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = {
+  parent: cosmosAccount
+  name: guid(cosmosAccount.id, webApiFuncPrincipalId, cosmosDataReaderRoleId, 'company_packages')
+  properties: {
+    roleDefinitionId: '${cosmosAccount.id}/sqlRoleDefinitions/${cosmosDataReaderRoleId}'
+    principalId: webApiFuncPrincipalId
+    scope: '${cosmosAccount.id}/dbs/${databaseName}/colls/company_packages'
+  }
+  dependsOn: [companyPackagesContainer]
 }
 
 resource ingestFuncSecurityCatalogCosmosRole 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = {

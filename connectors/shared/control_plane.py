@@ -1,5 +1,7 @@
 """Cosmos DB control-plane helpers — watermarks, run log, dedup, source registry."""
 from datetime import datetime, timezone
+import hashlib
+from itertools import islice
 from typing import Optional
 
 from azure.cosmos import CosmosClient
@@ -7,6 +9,7 @@ from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosResourceNot
 from azure.identity import DefaultAzureCredential
 
 from .models import RunResult, Watermark
+from engine.company_package import CompanyOpportunityPackage, package_document
 
 
 def _now_utc() -> str:
@@ -106,6 +109,123 @@ class CosmosControlPlane:
             query="SELECT * FROM c WHERE c.id != '_ledger_revision'",
             enable_cross_partition_query=True,
         ))
+
+    # ------------------------------------------------------------------
+    # Incremental company package changes
+    # ------------------------------------------------------------------
+
+    def mark_company_dirty(
+        self,
+        *,
+        security_sk: int,
+        source_class: str,
+        source_id: str,
+        source_record_id: str,
+        revision_hash: str,
+        knowledge_date: str,
+    ) -> str:
+        if security_sk <= 0:
+            raise ValueError("security_sk must be positive")
+        identity_parts = (
+            str(security_sk),
+            source_class.strip(),
+            source_id.strip(),
+            source_record_id.strip(),
+            revision_hash.strip(),
+            knowledge_date.strip(),
+        )
+        if any(not value for value in identity_parts):
+            raise ValueError("dirty company event identity is incomplete")
+        datetime.fromisoformat(knowledge_date.replace("Z", "+00:00"))
+        digest = hashlib.sha256("|".join(identity_parts).encode("utf-8")).hexdigest()
+        event_id = f"dirty:{digest}"
+        try:
+            self._container("dirty_company_events").create_item({
+                "id": event_id,
+                "security_sk": security_sk,
+                "source_class": source_class,
+                "source_id": source_id,
+                "source_record_id": source_record_id,
+                "revision_hash": revision_hash,
+                "knowledge_date": knowledge_date,
+                "status": "pending",
+                "created_at": _now_utc(),
+                "processed_at": None,
+                "package_fingerprint": None,
+            })
+        except CosmosResourceExistsError:
+            pass
+        return event_id
+
+    def list_pending_company_changes(self, limit: int = 1000) -> list[dict]:
+        if limit < 1 or limit > 10000:
+            raise ValueError("dirty company event limit must be between 1 and 10000")
+        documents = self._container("dirty_company_events").query_items(
+            query=(
+                "SELECT * FROM c WHERE c.status = 'pending' "
+                "ORDER BY c.knowledge_date, c.id"
+            ),
+            enable_cross_partition_query=True,
+        )
+        return list(islice(documents, limit))
+
+    def complete_company_changes(
+        self,
+        *,
+        security_sk: int,
+        change_ids: list[str],
+        package_fingerprint: str,
+    ) -> None:
+        if security_sk <= 0 or not package_fingerprint.strip():
+            raise ValueError("company package completion identity is incomplete")
+        if not change_ids or len(change_ids) != len(set(change_ids)):
+            raise ValueError("company package completion requires unique change ids")
+        processed_at = _now_utc()
+        container = self._container("dirty_company_events")
+        for change_id in change_ids:
+            container.patch_item(
+                item=change_id,
+                partition_key=security_sk,
+                patch_operations=[
+                    {"op": "set", "path": "/status", "value": "processed"},
+                    {"op": "set", "path": "/processed_at", "value": processed_at},
+                    {
+                        "op": "set",
+                        "path": "/package_fingerprint",
+                        "value": package_fingerprint,
+                    },
+                ],
+            )
+
+    def publish_company_package(self, package: CompanyOpportunityPackage) -> str:
+        revision = package_document(package)
+        container = self._container("company_packages")
+        try:
+            container.create_item(revision)
+        except CosmosResourceExistsError:
+            existing = container.read_item(
+                item=revision["id"],
+                partition_key=package.security_sk,
+            )
+            if any(existing.get(key) != value for key, value in revision.items()):
+                raise RuntimeError("company package revision identity has conflicting content")
+        current = {
+            **revision,
+            "id": "current",
+            "document_type": "current",
+            "revision_id": revision["id"],
+        }
+        container.upsert_item(current)
+        return revision["package_fingerprint"]
+
+    def get_current_company_package(self, security_sk: int) -> Optional[dict]:
+        try:
+            return self._container("company_packages").read_item(
+                item="current",
+                partition_key=security_sk,
+            )
+        except CosmosResourceNotFoundError:
+            return None
 
     # ------------------------------------------------------------------
     # Watermarks

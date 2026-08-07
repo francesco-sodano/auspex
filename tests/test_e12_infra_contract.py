@@ -6,6 +6,30 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class E12InfrastructureContractTests(unittest.TestCase):
+    def test_dirty_company_events_are_company_partitioned_and_ingestion_owned(self):
+        cosmos = (ROOT / "infra" / "modules" / "cosmos.bicep").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("resource dirtyCompanyEventsContainer", cosmos)
+        self.assertIn("name: 'dirty_company_events'", cosmos)
+        self.assertIn("paths: ['/security_sk']", cosmos)
+        self.assertIn("'dirty_company_events'", cosmos)
+
+    def test_company_packages_have_ingestion_write_and_web_read_roles(self):
+        cosmos = (ROOT / "infra" / "modules" / "cosmos.bicep").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("resource companyPackagesContainer", cosmos)
+        self.assertIn("name: 'company_packages'", cosmos)
+        self.assertIn("paths: ['/security_sk']", cosmos)
+        self.assertIn("resource webApiCompanyPackagesCosmosRole", cosmos)
+        self.assertIn(
+            "scope: '${cosmosAccount.id}/dbs/${databaseName}/colls/company_packages'",
+            cosmos,
+        )
+
     def test_portfolio_transactions_are_owner_partitioned_and_narrowly_scoped(self):
         cosmos = (ROOT / "infra" / "modules" / "cosmos.bicep").read_text(
             encoding="utf-8"

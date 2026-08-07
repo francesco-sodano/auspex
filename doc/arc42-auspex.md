@@ -366,6 +366,33 @@ sequenceDiagram
 
 The state machine serializes publication boundaries. Each notebook is started and monitored through the Fabric Job Scheduler API, with a Durable checkpoint between notebooks and Durable timers for polling. The tracked Fabric Data Pipeline remains a deployable/manual representation of the same order, but unattended execution does not invoke it: Fabric pipeline notebook activities run under the pipeline's last modified user and can fail when a managed-identity caller cannot acquire that user's token. Direct Notebook Job Scheduler execution is the supported service-principal/managed-identity boundary. This identity distinction follows Microsoft's [Fabric notebook security-context guidance](https://learn.microsoft.com/fabric/data-engineering/how-to-use-notebook#security-context-of-running-notebook). Narrative page cursors must advance. Warehouse release IDs are deterministic by date and an existing successful release is treated as idempotent completion. The timer uses one deterministic instance ID per UTC date. Failed, canceled, or terminated instances are purged and restarted at the next configured window; running or completed instances are not duplicated. Current windows are 01:00, 04:00, and 07:00 UTC. The build date is knowledge time: a 5 August build normally ingests the completed 4 August market session.
 
+### Incremental company-package transition
+
+The replacement runtime is being introduced behind versioned contracts before the
+daily build is changed. `company_opportunity_v1` is one current-state package per
+security with append-on-change revisions. It contains the assigned theme, all six
+leg states and contributions, explicit missing-data reasons, compact source cursors,
+PIT bounds, exact evidence references, and a deterministic 90-day direction. A
+directional leg cannot be packaged without resolvable evidence lineage.
+
+Active computation is bounded independently from evidence retention: prices use 30
+days, attention uses a current/prior 30-day news comparison, insider/contracts and
+material events use 90 days, institutional/crowding state keeps two snapshots,
+fundamentals keep eight current/comparable snapshots, and classification/theme/VTI
+linkage keep their latest snapshots. The original source identity and legally
+permitted evidence remain separately retained under deployer-approved licence,
+privacy, conduct, and records policies.
+
+`dirty_company_events` records each new company/source revision once, and
+`company_packages` stores immutable package revisions plus one current pointer per
+security. The research universe is independent of portfolio holdings; held
+securities are an always-include override rather than the source of eligibility.
+The company narrative contract is citation-bound and cannot change the deterministic
+direction or horizon. Runtime connector emission, dirty-theme normalization, cited
+narrative execution, and discovery serving are not yet active; the current full
+daily build remains the production path until those stages pass replay, PIT,
+lineage, and serving-convergence validation.
+
 ### Ledger write
 
 1. API resolves the authenticated owner and validates the parent plus cost components.
