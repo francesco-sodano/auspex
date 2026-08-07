@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+from .company_package import LEG_WEIGHTS
+
 
 @dataclass(frozen=True)
 class ActiveWindowPolicy:
@@ -95,3 +97,8 @@ def validate_active_window_policies() -> None:
             raise ValueError("active lookback must be positive")
         if policy.snapshot_count is not None and policy.snapshot_count < 1:
             raise ValueError("active snapshot count must be positive")
+    covered_legs = {
+        leg for policy in ACTIVE_WINDOW_POLICIES.values() for leg in policy.legs
+    }
+    if covered_legs != set(LEG_WEIGHTS):
+        raise ValueError("active window policies do not cover the six-leg contract")

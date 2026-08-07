@@ -4,6 +4,7 @@ from typing import Callable
 
 from .auth import AuthenticationError
 from .models import AppUser
+from .company_packages import CompanyPackageNotFoundError
 from .services import (
     AuthorizationError,
     InvalidTransitionError,
@@ -28,6 +29,8 @@ def execute(operation: Callable[[], object], success_status: int = 200) -> HttpR
     except AuthorizationError as exc:
         return HttpResult({"error": "forbidden", "message": str(exc)}, 403)
     except UserNotFoundError as exc:
+        return HttpResult({"error": "not_found", "message": str(exc)}, 404)
+    except CompanyPackageNotFoundError as exc:
         return HttpResult({"error": "not_found", "message": str(exc)}, 404)
     except InvalidTransitionError as exc:
         return HttpResult({"error": "invalid_transition", "message": str(exc)}, 409)

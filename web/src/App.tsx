@@ -9,6 +9,7 @@ import {
   LogOut,
   Mail,
   MessageCircle,
+  Search,
   Pencil,
   Plus,
   RotateCcw,
@@ -275,6 +276,59 @@ type RecommendationResponse = {
       direction: 'RAISED' | 'LOWERED' | 'NEUTRAL'
     }>
   }>
+}
+
+type CompanyOpportunity = {
+  package_version: string
+  package_fingerprint: string
+  security_sk: number
+  ticker: string
+  company_name: string
+  as_of: string
+  outlook_horizon_days: number
+  outlook_direction: 'ACCELERATING' | 'STABLE' | 'DETERIORATING' | 'UNCERTAIN'
+  theme_id: string
+  candidate_count: number
+  coverage_status: 'READY' | 'PARTIAL' | 'WITHHELD'
+  coverage_reasons: string[]
+  opportunity_score_raw: number | null
+  opportunity_score: number | null
+  max_knowledge_date: string
+  legs: Array<{
+    leg_name: string
+    normalized_value: number | null
+    contribution: number | null
+    direction: 'RAISED' | 'LOWERED' | 'NEUTRAL' | 'UNAVAILABLE'
+    coverage_reasons: string[]
+    evidence_ids: string[]
+  }>
+  evidence: Array<{
+    evidence_id: string
+    source_type: string
+    event_date: string
+    knowledge_date: string
+    excerpt: string | null
+  }>
+  narrative?: {
+    summary: string
+    uncertainty: string
+    citation_ids: string[]
+    citations: Array<{
+      evidence_id: string
+      source_type: string
+      event_date: string
+      knowledge_date: string
+      excerpt: string | null
+    }>
+  }
+  research_only: boolean
+}
+
+type CompanyOpportunityResponse = {
+  generated_at: string
+  count: number
+  opportunities: CompanyOpportunity[]
+  disclaimer: string
 }
 
 type MetricMetadata = {
@@ -556,7 +610,7 @@ function RegistrationRequired() {
   )
 }
 
-type AppPage = 'home' | 'discussion' | 'account' | 'onboarding' | 'ledger' | 'admin'
+type AppPage = 'home' | 'opportunities' | 'discussion' | 'account' | 'onboarding' | 'ledger' | 'admin'
 
 function AccountHeader({ user, currentPage }: { user: AppUser; currentPage: AppPage }) {
   const identity = user.contact_email || 'Microsoft personal account'
@@ -565,6 +619,7 @@ function AccountHeader({ user, currentPage }: { user: AppUser; currentPage: AppP
       <a className="brand-home" href="/" aria-label="Auspex home"><Brand /></a>
       <nav className="product-nav" aria-label="Primary navigation">
         <a href="/" aria-current={currentPage === 'home' ? 'page' : undefined}>Home</a>
+        {user.onboarded && <a href="/opportunities" aria-current={currentPage === 'opportunities' ? 'page' : undefined}>Discover</a>}
         {user.onboarded && <a href="/discussion" aria-current={currentPage === 'discussion' ? 'page' : undefined}>Discussion</a>}
         <a href={user.onboarded ? '/ledger' : '/onboarding'} aria-current={currentPage === 'onboarding' || currentPage === 'ledger' ? 'page' : undefined}>{user.onboarded ? 'Ledger' : 'Set up'}</a>
       </nav>
@@ -1349,6 +1404,75 @@ function TransactionsPage({ user }: { user: AppUser }) {
   )
 }
 
+function OpportunitiesPage({ user }: { user: AppUser }) {
+  const [response, setResponse] = useState<CompanyOpportunityResponse | null>(null)
+  const [error, setError] = useState('')
+  const [theme, setTheme] = useState('all')
+  const [direction, setDirection] = useState('all')
+
+  useEffect(() => {
+    fetch('/api/opportunities?limit=200')
+      .then(async (result) => {
+        const payload = await result.json()
+        if (!result.ok) throw new Error(payload.message || 'Opportunities could not be loaded.')
+        setResponse(payload)
+      })
+      .catch((reason) => setError(reason instanceof Error ? reason.message : 'Opportunities could not be loaded.'))
+  }, [])
+
+  const themes = Array.from(new Set(
+    response?.opportunities.map((opportunity) => opportunity.theme_id) || [],
+  )).sort()
+  const opportunities = response?.opportunities.filter((opportunity) => (
+    (theme === 'all' || opportunity.theme_id === theme)
+    && (direction === 'all' || opportunity.outlook_direction === direction)
+  )) || []
+
+  return <main className="product-page opportunities-page">
+    <AccountHeader user={user} currentPage="opportunities" />
+    <section className="opportunities-main">
+      <header className="opportunities-heading">
+        <div><span className="eyebrow">Fresh company research</span><h1>Discover opportunities</h1><p>Every company is evaluated independently from your portfolio using compact current data and six evidence-backed legs.</p></div>
+        <span className="research-label">90-day direction · research only</span>
+      </header>
+      <section className="opportunity-toolbar" aria-label="Opportunity filters">
+        <label><span>Theme</span><select value={theme} onChange={(event) => setTheme(event.target.value)}><option value="all">All themes</option>{themes.map((value) => <option key={value} value={value}>{value.replaceAll('_', ' ')}</option>)}</select></label>
+        <label><span>Direction</span><select value={direction} onChange={(event) => setDirection(event.target.value)}><option value="all">All directions</option>{['ACCELERATING', 'STABLE', 'DETERIORATING', 'UNCERTAIN'].map((value) => <option key={value} value={value}>{value.toLowerCase()}</option>)}</select></label>
+        <div><span>Current set</span><strong>{opportunities.length} companies</strong></div>
+        <div><span>Generated</span><strong>{response?.generated_at ? new Date(response.generated_at).toLocaleString() : 'Loading'}</strong></div>
+      </section>
+      {error && <p className="error" role="alert">{error}</p>}
+      {!response && !error && <p className="opportunity-state">Reading fresh company packages…</p>}
+      {response && <div className="opportunity-grid">
+        {opportunities.map((opportunity) => {
+          const evidence = new Map(opportunity.evidence.map((item) => [item.evidence_id, item]))
+          return <article className={`opportunity-card direction-${opportunity.outlook_direction.toLowerCase()}`} key={opportunity.security_sk}>
+            <header>
+              <div><span className="opportunity-ticker">{opportunity.ticker}</span><h2>{opportunity.company_name}</h2><p>{opportunity.theme_id.replaceAll('_', ' ')} · {opportunity.candidate_count} peers</p></div>
+              <div className="opportunity-score"><strong>{opportunity.opportunity_score === null ? '—' : Number(opportunity.opportunity_score).toFixed(0)}</strong><span>{opportunity.outlook_direction.toLowerCase()}</span></div>
+            </header>
+            <div className="opportunity-meta"><span>{opportunity.coverage_status.toLowerCase()} coverage</span><span>Known through {opportunity.max_knowledge_date}</span><span>As of {opportunity.as_of}</span></div>
+            {opportunity.narrative && <section className="company-narrative"><span className="eyebrow">Company outlook</span><p>{opportunity.narrative.summary}</p><small>{opportunity.narrative.uncertainty}</small></section>}
+            <section className="six-leg-panel"><h3>Six-leg validation</h3><ol>{opportunity.legs.map((leg) => {
+              const contribution = Number(leg.contribution || 0)
+              return <li key={leg.leg_name}>
+                <div><strong>{leg.leg_name.replaceAll('_', ' ')}</strong><span className={leg.direction === 'RAISED' ? 'positive' : leg.direction === 'LOWERED' ? 'negative' : ''}>{leg.contribution === null ? 'Unavailable' : `${contribution >= 0 ? '+' : ''}${contribution.toFixed(2)}`}</span></div>
+                <span className="leg-axis"><i className={contribution >= 0 ? 'positive-bar' : 'negative-bar'} style={{ width: `${Math.min(50, Math.abs(contribution) * 60)}%`, left: contribution >= 0 ? '50%' : `${50 - Math.min(50, Math.abs(contribution) * 60)}%` }} /></span>
+                <small>{leg.direction.toLowerCase()}{leg.coverage_reasons.length ? ` · ${leg.coverage_reasons.join(', ').replaceAll('_', ' ')}` : ''}</small>
+                {leg.evidence_ids.length > 0 && <details><summary>{leg.evidence_ids.length} source reference{leg.evidence_ids.length === 1 ? '' : 's'}</summary>{leg.evidence_ids.map((id) => { const item = evidence.get(id); return item ? <p key={id}><b>{item.source_type.replaceAll('_', ' ')}</b> · known {item.knowledge_date}<br />{item.excerpt}</p> : null })}</details>}
+              </li>
+            })}</ol></section>
+            {opportunity.coverage_reasons.length > 0 && <p className="opportunity-coverage">Coverage notes: {opportunity.coverage_reasons.join(', ').replaceAll('_', ' ')}</p>}
+            <footer><span>Model {opportunity.package_version}</span><span>{opportunity.package_fingerprint.slice(0, 12)}</span></footer>
+          </article>
+        })}
+      </div>}
+      {response && opportunities.length === 0 && <section className="home-empty"><Search size={26} /><h1>No companies match these filters.</h1><p>Change the theme or direction filter to inspect the current research universe.</p></section>}
+      {response && <p className="opportunity-disclaimer">{response.disclaimer}</p>}
+    </section>
+  </main>
+}
+
 const suggestedDiscussionQuestions = [
   'Why trim my largest position?',
   'What changed in my portfolio?',
@@ -1631,6 +1755,7 @@ function App() {
     const validPath = path === '/'
       || path.startsWith('/account')
       || path.startsWith('/onboarding')
+      || (path.startsWith('/opportunities') && user.onboarded)
       || (path.startsWith('/discussion') && user.onboarded)
       || (path.startsWith('/ledger') && user.onboarded)
       || (path.startsWith('/admin') && user.role === 'admin')
@@ -1659,6 +1784,7 @@ function App() {
   if (user.status !== 'active') return <AccessState user={user} />
   if (window.location.pathname.startsWith('/admin') && user.role === 'admin') return <AdminReview currentUser={user} />
   if (window.location.pathname.startsWith('/onboarding')) return <Onboarding user={user} onComplete={completeOnboarding} />
+  if (window.location.pathname.startsWith('/opportunities') && user.onboarded) return <OpportunitiesPage user={user} />
   if (window.location.pathname.startsWith('/discussion') && user.onboarded) return <DiscussionPage user={user} />
   if (window.location.pathname.startsWith('/ledger') && user.onboarded) return <TransactionsPage user={user} />
   if (window.location.pathname.startsWith('/account')) return <AccessState user={user} />

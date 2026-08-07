@@ -30,6 +30,10 @@ from auspex_api.recommendation_events import (
     RecommendationExperienceService,
 )
 from auspex_api.services import IdentityService
+from auspex_api.company_packages import (
+    CompanyPackageService,
+    CosmosCompanyPackageRepository,
+)
 from search.clients import AzureOpenAIChat, AzureSearchRestClient
 from search.retrieval import EvidenceSearchService
 
@@ -203,6 +207,23 @@ def _notification_service() -> NotificationPreferenceService:
     )
 
 
+@lru_cache(maxsize=1)
+def _company_package_service() -> CompanyPackageService:
+    endpoint = os.environ.get("COSMOS_ENDPOINT", "").strip()
+    if not endpoint:
+        raise RuntimeError("COSMOS_ENDPOINT is required")
+    cosmos = CosmosClient(endpoint, credential=DefaultAzureCredential())
+    database = cosmos.get_database_client(
+        os.environ.get("COSMOS_DATABASE_NAME", "auspex")
+    )
+    return CompanyPackageService(
+        _identity_service(),
+        CosmosCompanyPackageRepository(database.get_container_client(
+            os.environ.get("COMPANY_PACKAGES_CONTAINER", "company_packages")
+        )),
+    )
+
+
 def _principal(req: func.HttpRequest) -> str | None:
     return req.headers.get("x-ms-client-principal")
 
@@ -243,6 +264,36 @@ def onboarding(req: func.HttpRequest) -> func.HttpResponse:
         _principal(req),
         _request_json(req),
     ).public_profile())
+    return _json_response(result.payload, result.status_code)
+
+
+@app.route(route="opportunities", methods=["GET"])
+def opportunities(req: func.HttpRequest) -> func.HttpResponse:
+    def operation():
+        try:
+            limit = int(req.params.get("limit", "50"))
+        except ValueError as exc:
+            raise ValueError("limit must be an integer") from exc
+        return _company_package_service().list_opportunities(
+            _principal(req),
+            limit=limit,
+            theme_id=req.params.get("theme_id"),
+            coverage_status=req.params.get("coverage_status"),
+            outlook_direction=req.params.get("outlook_direction"),
+        )
+    result = execute(operation)
+    return _json_response(result.payload, result.status_code)
+
+
+@app.route(route="opportunities/{security_sk}", methods=["GET"])
+def opportunity(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        security_sk = int(req.route_params.get("security_sk", "0"))
+    except ValueError:
+        security_sk = 0
+    result = execute(lambda: _company_package_service().get_opportunity(
+        _principal(req), security_sk
+    ))
     return _json_response(result.payload, result.status_code)
 
 

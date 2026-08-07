@@ -227,6 +227,33 @@ class CosmosControlPlane:
         except CosmosResourceNotFoundError:
             return None
 
+    def list_current_company_packages(self) -> list[dict]:
+        return list(self._container("company_packages").query_items(
+            query=(
+                "SELECT * FROM c WHERE c.id = 'current' "
+                "AND c.document_type = 'current'"
+            ),
+            enable_cross_partition_query=True,
+        ))
+
+    def attach_company_narrative(
+        self,
+        *,
+        security_sk: int,
+        package_fingerprint: str,
+        narrative: dict,
+    ) -> None:
+        current = self.get_current_company_package(security_sk)
+        if current is None or current.get("package_fingerprint") != package_fingerprint:
+            raise RuntimeError("company narrative package identity is stale")
+        self._container("company_packages").patch_item(
+            item="current",
+            partition_key=security_sk,
+            patch_operations=[
+                {"op": "set", "path": "/narrative", "value": narrative},
+            ],
+        )
+
     # ------------------------------------------------------------------
     # Watermarks
     # ------------------------------------------------------------------

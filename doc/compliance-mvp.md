@@ -29,7 +29,7 @@ Prohibited uses without a new legal classification and control assessment:
 | Azure OpenAI GPT-4o | `gpt-4o:2024-11-20` | Portfolio discussion | Narration only | owner-scoped context; deterministic calculations; grounded citations; prompt `e18_discussion_v1` |
 <!-- BEGIN GENERATED DETERMINISTIC INVENTORY -->
 | Deterministic policy | `policy_v2` | Personalized portfolio actions and amounts | Recommendation | risk-profile policy; coverage, raw-composite, financing and cost gates; no execution |
-| Deterministic score | `opportunity_v1` / `balanced_v1` | Theme-relative six-leg score with one assigned cohort | Ranking | point-in-time inputs; observed-only aggregation; Blom positions; release reconciliation |
+| Deterministic company engine | `company_opportunity_v1` / `fresh_balanced_v1` | Fresh 90-day six-leg company outlook across the research universe | Research classification | compact active windows; per-leg evidence lineage; PIT checks; theme-relative normalization; append-on-change packages |
 <!-- END GENERATED DETERMINISTIC INVENTORY -->
 | Deterministic models | `e20_v2`, `e22_v4` | Fundamental anchor and narrative premium | Features | content-addressed code; version checks; immutable evidence links |
 

@@ -499,6 +499,17 @@ resource ingestFuncPortfolioTransactionsCosmosRole 'Microsoft.DocumentDB/databas
   dependsOn: [portfolioTransactionsContainer]
 }
 
+resource ingestFuncAppUsersResetReadRole 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = {
+  parent: cosmosAccount
+  name: guid(cosmosAccount.id, ingestFuncPrincipalId, cosmosDataReaderRoleId, 'app_users-reset-read')
+  properties: {
+    roleDefinitionId: '${cosmosAccount.id}/sqlRoleDefinitions/${cosmosDataReaderRoleId}'
+    principalId: ingestFuncPrincipalId
+    scope: '${cosmosAccount.id}/dbs/${databaseName}/colls/app_users'
+  }
+  dependsOn: [appUsersContainer]
+}
+
 resource cosmosDiag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
   name: 'diag-${accountName}'
   scope: cosmosAccount

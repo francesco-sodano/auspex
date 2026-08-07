@@ -9,20 +9,21 @@ import json
 import math
 from typing import Optional
 
-from .thesis import (
-    LEG_RESULT_FIELDS,
-    LEG_WEIGHTS,
-    MODEL_VERSION,
-    WEIGHT_VERSION,
-    OpportunityResult,
-)
-
-
 PACKAGE_VERSION = "company_opportunity_v1"
+MODEL_VERSION = "company_opportunity_v1"
+WEIGHT_VERSION = "fresh_balanced_v1"
 OUTLOOK_HORIZON_DAYS = 90
 OUTLOOK_DIRECTIONS = {"ACCELERATING", "STABLE", "DETERIORATING", "UNCERTAIN"}
 COVERAGE_STATUSES = {"READY", "PARTIAL", "WITHHELD"}
 LEG_DIRECTIONS = {"RAISED", "LOWERED", "NEUTRAL", "UNAVAILABLE"}
+LEG_WEIGHTS = {
+    "thesis_linkage": 0.20,
+    "attention_acceleration": 0.15,
+    "smart_money": 0.20,
+    "fundamental_health": 0.20,
+    "valuation_brake": 0.15,
+    "crowding_positioning": 0.10,
+}
 
 
 @dataclass(frozen=True)
@@ -145,89 +146,6 @@ def package_document(package: CompanyOpportunityPackage) -> dict:
         "package_fingerprint": fingerprint,
         **payload,
     }
-
-
-def build_company_package(
-    result: OpportunityResult,
-    *,
-    ticker: str,
-    company_name: str,
-    leg_available_component_weights: dict[str, float],
-    leg_evidence: dict[str, tuple[EvidenceRef, ...]],
-    leg_coverage_reasons: dict[str, tuple[str, ...]] | None = None,
-    source_cursors: tuple[CompanySourceCursor, ...] = (),
-) -> CompanyOpportunityPackage:
-    if set(leg_available_component_weights) != set(LEG_WEIGHTS):
-        raise ValueError("component availability must cover all six legs")
-    unknown_evidence_legs = set(leg_evidence) - set(LEG_WEIGHTS)
-    if unknown_evidence_legs:
-        raise ValueError("evidence mapping contains an unknown leg")
-    leg_coverage_reasons = leg_coverage_reasons or {}
-    if set(leg_coverage_reasons) - set(LEG_WEIGHTS):
-        raise ValueError("coverage mapping contains an unknown leg")
-
-    evidence_by_id: dict[str, EvidenceRef] = {}
-    legs = []
-    for leg_name in LEG_WEIGHTS:
-        normalized_value = getattr(result, LEG_RESULT_FIELDS[leg_name])
-        contribution = getattr(result, f"{leg_name}_contribution")
-        references = tuple(leg_evidence.get(leg_name, ()))
-        for reference in references:
-            existing = evidence_by_id.get(reference.evidence_id)
-            if existing is not None and existing != reference:
-                raise ValueError("evidence id has conflicting company package records")
-            evidence_by_id[reference.evidence_id] = reference
-        direction = (
-            "UNAVAILABLE"
-            if normalized_value is None or contribution is None
-            else "RAISED"
-            if contribution > 0
-            else "LOWERED"
-            if contribution < 0
-            else "NEUTRAL"
-        )
-        legs.append(CompanyLegState(
-            leg_name=leg_name,
-            normalized_value=normalized_value,
-            contribution=contribution,
-            direction=direction,
-            available_component_weight=leg_available_component_weights[leg_name],
-            coverage_reasons=tuple(sorted(set(leg_coverage_reasons.get(leg_name, ())))),
-            evidence_ids=tuple(sorted(reference.evidence_id for reference in references)),
-            max_knowledge_date=(
-                max(reference.knowledge_date for reference in references)
-                if references
-                else None
-            ),
-        ))
-    package = CompanyOpportunityPackage(
-        package_version=PACKAGE_VERSION,
-        security_sk=result.security_sk,
-        ticker=ticker.strip().upper(),
-        company_name=company_name.strip(),
-        as_of=result.as_of,
-        outlook_horizon_days=OUTLOOK_HORIZON_DAYS,
-        outlook_direction=classify_outlook(
-            result.opportunity_score_raw,
-            result.coverage_status,
-        ),
-        theme_id=result.theme_id,
-        classification_provenance=result.classification_provenance,
-        classification_id=result.classification_id,
-        candidate_count=result.candidate_count,
-        coverage_status=result.coverage_status,
-        coverage_reasons=tuple(sorted(set(result.coverage_reasons))),
-        opportunity_score_raw=result.opportunity_score_raw,
-        opportunity_score=result.opportunity_score,
-        model_version=result.model_version,
-        weight_version=result.weight_version,
-        max_knowledge_date=result.max_knowledge_date,
-        source_cursors=source_cursors,
-        legs=tuple(legs),
-        evidence=tuple(sorted(evidence_by_id.values(), key=lambda row: row.evidence_id)),
-    )
-    validate_company_package(package)
-    return package
 
 
 def validate_company_package(package: CompanyOpportunityPackage) -> None:

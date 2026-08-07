@@ -30,6 +30,7 @@ from shared.daily_build import (
     json_safe_activity_result,
     scheduled_source_ids,
 )
+from company_engine.orchestrator import company_engine_orchestrator
 
 
 class FakeContext:
@@ -74,15 +75,40 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "timezone-aware"):
             daily_build_run_namespace("2026-08-07", datetime(2026, 8, 7, 1))
 
-    def test_timer_passes_unique_attempt_namespace_to_orchestrator(self):
+    def test_timer_starts_only_the_standalone_company_engine(self):
         function_app = (ROOT / "connectors" / "function_app.py").read_text(
             encoding="utf-8"
         )
 
-        self.assertIn(
-            '"run_namespace": daily_build_run_namespace(as_of_date, triggered_at)',
-            function_app,
+        timer = function_app[function_app.index("async def daily_build_schedule"):]
+        timer = timer[:timer.index("@app.orchestration_trigger")]
+        self.assertIn('instance_id = f"company-engine-{as_of_date}"', timer)
+        self.assertIn('"company_engine"', timer)
+        self.assertNotIn('"daily_build"', timer)
+        self.assertNotIn('"source_ids"', timer)
+
+    def test_company_engine_orchestrator_has_one_non_fabric_activity(self):
+        orchestration = company_engine_orchestrator(
+            FakeContext(), {"as_of_date": "2026-08-07"}
         )
+
+        self.assertEqual(
+            next(orchestration),
+            ("activity", "refresh_company_engine", {"as_of_date": "2026-08-07"}),
+        )
+        with self.assertRaises(StopIteration) as completed:
+            orchestration.send({"status": "completed", "companies": 28})
+        self.assertEqual(completed.exception.value["companies"], 28)
+
+    def test_destructive_reset_is_explicit_and_durable(self):
+        function_app = (ROOT / "connectors" / "function_app.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("def legacy_engine_reset(context):", function_app)
+        self.assertIn("execute_legacy_engine_reset", function_app)
+        self.assertIn("RESET_CONFIRMATION_TOKEN", function_app)
+        self.assertIn("/tmp/auspex-portfolio-preservation.json", function_app)
 
     def test_connector_execution_requires_attempt_namespace(self):
         orchestration = daily_build_orchestrator(
@@ -733,11 +759,8 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
             "00:00:05",
         )
 
-    def test_scheduled_profiles_consume_every_symbol_page(self):
+    def test_legacy_paging_remains_manual_but_is_not_in_scheduled_payload(self):
         function_app = (ROOT / "connectors" / "function_app.py").read_text(
-            encoding="utf-8"
-        )
-        daily_build = (ROOT / "connectors" / "shared" / "daily_build.py").read_text(
             encoding="utf-8"
         )
 
@@ -748,18 +771,12 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
         self.assertNotIn('any(result.get("has_more") for result in results)', function_app)
         self.assertIn("page_offset += page_limit", function_app)
         self.assertIn('run_id_parts.append(f"offset-{page_offset}")', function_app)
-        self.assertIn('os.environ.get("DAILY_BUILD_PRICE_PAGE_SIZE", "50")', function_app)
-        self.assertIn('os.environ.get("DAILY_BUILD_SEC_PAGE_SIZE", "50")', function_app)
-        self.assertIn('("sec_13f", "sec_13dg", "sec_8k", "sec_s1")', function_app)
-        self.assertIn('"sec_companyfacts": {', function_app)
-        self.assertIn('"optional_source_ids"', function_app)
-        self.assertIn('"source_profile_options"', function_app)
-        self.assertIn("profile_options", daily_build)
-        self.assertIn("optional_connector_failures", daily_build)
-        self.assertIn("OptionalConnectorFailed", function_app)
-        self.assertIn('os.environ.get("DAILY_BUILD_NARRATIVE_PAGE_SIZE", "5")', function_app)
-        self.assertIn('os.environ.get("DAILY_BUILD_NARRATIVE_MAX_WORKERS", "1")', function_app)
         self.assertIn("await client.purge_instance_history(instance_id)", function_app)
+        timer = function_app[function_app.index("async def daily_build_schedule"):]
+        timer = timer[:timer.index("@app.orchestration_trigger")]
+        self.assertNotIn("DAILY_BUILD_PRICE_PAGE_SIZE", timer)
+        self.assertNotIn("DAILY_BUILD_SEC_PAGE_SIZE", timer)
+        self.assertNotIn("DAILY_BUILD_NARRATIVE_PAGE_SIZE", timer)
 
     def test_source_cadence_and_alpha_vantage_profiles_are_scoped(self):
         sources = [

@@ -9,6 +9,7 @@
     "PORTFOLIO_TRANSACTIONS_CONTAINER": "portfolio_transactions",
     "SECURITY_CATALOG_CONTAINER": "security_catalog",
     "MARKET_DATA_CONTAINER": "market_data",
+    "COMPANY_PACKAGES_CONTAINER": "company_packages",
     "INGESTION_UNIVERSE_CONTAINER": "ingestion_universe",
     "DECISION_LOG_CONTAINER": "decision_log",
     "AI_SEARCH_ENDPOINT": "https://auspex-dev-search.search.windows.net",

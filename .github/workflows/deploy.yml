@@ -84,6 +84,8 @@ jobs:
         run: |
           mkdir -p /tmp/auspex-ingestion /tmp/auspex-api
           cp -R connectors/. /tmp/auspex-ingestion/
+          mkdir -p /tmp/auspex-ingestion/scripts
+          cp scripts/__init__.py scripts/reset_legacy_engine.py /tmp/auspex-ingestion/scripts/
           cp -R api/. /tmp/auspex-api/
           for shared in search engine agent prompts; do
             cp -R "${shared}" "/tmp/auspex-ingestion/${shared}"

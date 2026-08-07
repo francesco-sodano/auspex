@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from api.auspex_api.recommender.policy import MODEL_VERSION as POLICY_VERSION
-from engine.thesis import MODEL_VERSION as SCORE_VERSION, WEIGHT_VERSION
+from engine.company_package import MODEL_VERSION as SCORE_VERSION, WEIGHT_VERSION
 
 
 BEGIN = "<!-- BEGIN GENERATED DETERMINISTIC INVENTORY -->"
@@ -18,7 +18,7 @@ def render():
     return "\n".join([
         BEGIN,
         f"| Deterministic policy | `{POLICY_VERSION}` | Personalized portfolio actions and amounts | Recommendation | risk-profile policy; coverage, raw-composite, financing and cost gates; no execution |",
-        f"| Deterministic score | `{SCORE_VERSION}` / `{WEIGHT_VERSION}` | Theme-relative six-leg score with one assigned cohort | Ranking | point-in-time inputs; observed-only aggregation; Blom positions; release reconciliation |",
+        f"| Deterministic company engine | `{SCORE_VERSION}` / `{WEIGHT_VERSION}` | Fresh 90-day six-leg company outlook across the research universe | Research classification | compact active windows; per-leg evidence lineage; PIT checks; theme-relative normalization; append-on-change packages |",
         END,
     ])
 

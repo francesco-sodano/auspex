@@ -106,8 +106,9 @@ class SecCompanyFactsConnector(BaseConnector):
                     timeout=_SEC_TIMEOUT_SECONDS,
                     before_attempt=self._before_sec_request,
                 )
-            except httpx.HTTPStatusError as exc:
-                if getattr(exc.response, "status_code", None) != 404:
+            except Exception as exc:
+                response = getattr(exc, "response", None)
+                if getattr(response, "status_code", None) != 404:
                     raise
                 records.append({
                     "fetched_at": fetched_at,

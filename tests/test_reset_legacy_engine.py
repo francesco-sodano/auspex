@@ -1,6 +1,6 @@
 import unittest
 
-from scripts.reset_legacy_engine import (
+from engine.legacy_reset import (
     CONFIRMATION_TOKEN,
     OneLakeObject,
     WarehouseObject,

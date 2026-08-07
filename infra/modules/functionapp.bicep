@@ -374,6 +374,10 @@ var ingestionExtraSettings = isIngestion ? [
     value: 'ingestion_universe'
   }
   {
+    name: 'COMPANY_PACKAGES_CONTAINER'
+    value: 'company_packages'
+  }
+  {
     name: 'AI_SEARCH_ENDPOINT'
     value: aiSearchEndpoint
   }

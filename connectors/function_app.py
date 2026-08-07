@@ -28,6 +28,9 @@ from sec_form4.connector import SecForm4Connector
 from sec_form4.blueprint import bp as sec_form4_bp
 from sec_s1.connector import SecS1Connector
 from theme_classifier.connector import ThemeClassifierConnector
+from company_engine.orchestrator import company_engine_orchestrator
+from company_engine.provider import FreshCompanyProvider
+from company_engine.service import CompanyEngineService
 from shared.clients import get_bronze_writer, get_control_plane
 from shared.daily_build import (
 	FabricDailyBuildClient,
@@ -53,6 +56,10 @@ from search.sentiment import (
 	SentimentService,
 	enrich_with_cached_sentiment,
 	page_evidence_documents,
+)
+from engine.legacy_reset import (
+	CONFIRMATION_TOKEN as RESET_CONFIRMATION_TOKEN,
+	LegacyEngineReset,
 )
 
 app = df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
@@ -582,7 +589,7 @@ def _daily_build_client() -> FabricDailyBuildClient:
 async def daily_build_schedule(timer: func.TimerRequest, client):
 	triggered_at = datetime.now(timezone.utc)
 	as_of_date = triggered_at.date().isoformat()
-	instance_id = f"daily-build-{as_of_date}"
+	instance_id = f"company-engine-{as_of_date}"
 	logging.info(
 		"DailyBuildScheduleTriggered instance_id=%s past_due=%s",
 		instance_id,
@@ -604,51 +611,10 @@ async def daily_build_schedule(timer: func.TimerRequest, client):
 		await client.purge_instance_history(instance_id)
 		logging.info("DailyBuildSchedulePurged instance_id=%s", instance_id)
 	await client.start_new(
-		"daily_build",
+		"company_engine",
 		instance_id,
 		{
 			"as_of_date": as_of_date,
-			"run_namespace": daily_build_run_namespace(as_of_date, triggered_at),
-			"source_ids": scheduled_source_ids(_SOURCE_SEEDS.values(), as_of_date),
-			"optional_source_ids": [
-				source["source_id"]
-				for source in _SOURCE_SEEDS.values()
-				if source.get("enabled") and not source.get("required", True)
-			],
-			"source_profile_options": {
-				"alpha_vantage": {
-					profile: {"symbol_limit": int(config["symbol_limit"])}
-					for profile, config in (_SOURCE_SEEDS["alpha_vantage"].get("profiles") or {}).items()
-					if config.get("symbol_limit")
-				}
-			},
-			"source_options": {
-				**{
-					source_id: {
-						"filing_limit": int(
-							os.environ.get("DAILY_BUILD_SEC_PAGE_SIZE", "50")
-						)
-					}
-					for source_id in ("sec_13f", "sec_13dg", "sec_8k", "sec_s1")
-				},
-				"prices_eod": {
-					"symbol_limit": int(
-						os.environ.get("DAILY_BUILD_PRICE_PAGE_SIZE", "50")
-					),
-				},
-				"sec_companyfacts": {
-					"symbol_limit": int(
-						os.environ.get("DAILY_BUILD_SEC_PAGE_SIZE", "50")
-					),
-				},
-			},
-			"poll_seconds": int(os.environ.get("DAILY_BUILD_POLL_SECONDS", "30")),
-			"narrative_page_size": int(
-				os.environ.get("DAILY_BUILD_NARRATIVE_PAGE_SIZE", "5")
-			),
-			"narrative_max_workers": int(
-				os.environ.get("DAILY_BUILD_NARRATIVE_MAX_WORKERS", "1")
-			),
 		},
 	)
 	logging.info("DailyBuildScheduleStarted instance_id=%s", instance_id)
@@ -657,6 +623,74 @@ async def daily_build_schedule(timer: func.TimerRequest, client):
 @app.orchestration_trigger(context_name="context")
 def daily_build(context):
 	return daily_build_orchestrator(context)
+
+
+@app.orchestration_trigger(context_name="context")
+def company_engine(context):
+	return company_engine_orchestrator(context)
+
+
+@app.orchestration_trigger(context_name="context")
+def legacy_engine_reset(context):
+	payload = context.get_input() or {}
+	result = yield context.call_activity("execute_legacy_engine_reset", payload)
+	return result
+
+
+@lru_cache(maxsize=1)
+def _company_engine_service() -> CompanyEngineService:
+	return CompanyEngineService(
+		get_control_plane(),
+		FreshCompanyProvider(
+			alpha_vantage_api_key=os.environ["ALPHAVANTAGE_API_KEY"],
+			finnhub_api_key=os.environ["FINNHUB_API_KEY"],
+			requests_per_minute=int(
+				os.environ.get("ALPHAVANTAGE_REQUESTS_PER_MINUTE", "75")
+			),
+		),
+	)
+
+
+@app.activity_trigger(input_name="payload")
+def refresh_company_engine(payload: dict):
+	as_of = datetime.fromisoformat(payload["as_of_date"]).date()
+	result = _company_engine_service().refresh(as_of)
+	logging.info(
+		"CompanyEngineCompleted as_of=%s companies=%s changed=%s ready=%s partial=%s withheld=%s",
+		result["as_of"],
+		result["companies"],
+		result["changed_packages"],
+		result["ready"],
+		result["partial"],
+		result["withheld"],
+	)
+	return result
+
+
+@app.activity_trigger(input_name="payload")
+def execute_legacy_engine_reset(payload: dict):
+	if payload.get("confirmation") != RESET_CONFIRMATION_TOKEN:
+		raise ValueError("legacy reset confirmation is invalid")
+	reset = LegacyEngineReset(
+		cosmos_endpoint=os.environ["COSMOS_ENDPOINT"],
+		cosmos_database=os.environ.get("COSMOS_DATABASE_NAME", "auspex"),
+		workspace_id=os.environ["ONELAKE_WORKSPACE_ID"],
+		lakehouse_id=os.environ["ONELAKE_LAKEHOUSE_NAME"],
+		warehouse_server=os.environ["FABRIC_WAREHOUSE_SERVER"],
+		warehouse_database=os.environ.get("FABRIC_WAREHOUSE_DATABASE", "auspex_gold"),
+		search_endpoint=os.environ["AI_SEARCH_ENDPOINT"],
+	)
+	plan, preserved = reset.inspect()
+	result = reset.apply(
+		plan,
+		Path("/tmp/auspex-portfolio-preservation.json"),
+		preserved,
+	)
+	logging.warning(
+		"LegacyEngineResetCompleted preservation_sha256=%s",
+		result["preservation_sha256"],
+	)
+	return result
 
 
 @app.orchestration_trigger(context_name="context")
