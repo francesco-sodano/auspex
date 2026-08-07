@@ -1142,6 +1142,30 @@ class E8ConnectorTests(unittest.TestCase):
 
         self.assertEqual(connector.watermark_source_id, "alpha_vantage:news_daily")
 
+    def test_alpha_vantage_skips_window_already_covered_by_watermark(self):
+        os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
+        writer = FakeUniverseBronzeWriter(["AAPL"])
+        connector = AlphaVantageConnector(
+            FakeControlPlane(),
+            writer,
+            profile="news_daily",
+        )
+
+        with patch(
+            "alpha_vantage.connector.http_get",
+            side_effect=AssertionError("covered window must not call provider"),
+        ):
+            batch = connector.fetch(Watermark(
+                source_id="alpha_vantage:news_daily",
+                last_event_ts=date.today().isoformat(),
+            ))
+
+        self.assertEqual(batch.records, [])
+        self.assertFalse(batch.has_more)
+        self.assertEqual(batch.new_wm.last_event_ts, date.today().isoformat())
+        self.assertEqual(writer.requested_universes, [])
+        self.assertEqual(batch.watermark_from, (date.today() + timedelta(days=1)).isoformat())
+
     def test_alpha_vantage_profile_uses_registry_chunk_size_and_rejects_empty_universe(self):
         os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
         os.environ["AV_RPM"] = "100000"

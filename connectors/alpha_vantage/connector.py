@@ -118,6 +118,20 @@ class AlphaVantageConnector(BaseConnector):
         to_date = date.today()
         fetched_at = utc_now_iso()
 
+        if from_date > to_date:
+            return Batch(
+                records=[],
+                new_wm=Watermark(
+                    source_id=self.watermark_source_id,
+                    last_event_ts=to_date.isoformat(),
+                    last_cursor=to_date.isoformat(),
+                ),
+                window=self._window_id(from_date, to_date, [], 0),
+                partition_date=to_date.isoformat(),
+                watermark_from=from_date.isoformat(),
+                has_more=False,
+            )
+
         if not self._symbol_functions:
             symbols = []
         elif self._symbols is not None:

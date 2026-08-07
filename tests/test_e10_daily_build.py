@@ -84,6 +84,17 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
             function_app,
         )
 
+    def test_connector_execution_requires_attempt_namespace(self):
+        orchestration = daily_build_orchestrator(
+            FakeContext(),
+            {"as_of_date": "2026-08-07", "source_ids": ["prices_eod"]},
+        )
+
+        self.assertEqual(next(orchestration), ("activity", "resume_fabric_capacity", None))
+        failure = orchestration.send({"status": "Active"})
+        self.assertEqual(failure[1], "record_daily_build_failure")
+        self.assertIn("run_namespace is required", failure[2]["error"])
+
     def test_completion_telemetry_includes_engine_diagnostics(self):
         function_app = (ROOT / "connectors" / "function_app.py").read_text(encoding="utf-8")
         daily_build = (ROOT / "connectors" / "shared" / "daily_build.py").read_text(encoding="utf-8")
@@ -382,6 +393,7 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
             {
                 "as_of_date": "2026-07-29",
                 "source_ids": ["sec_form4"],
+                "run_namespace": "test-required-failure",
             },
         )
 
@@ -394,7 +406,7 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
                 {
                     "source_id": "sec_form4",
                     "as_of_date": "2026-07-29",
-                    "run_namespace": None,
+                    "run_namespace": "test-required-failure",
                     "profiles": [None],
                     "options": {},
                     "single_page": False,
@@ -425,6 +437,7 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
             {
                 "as_of_date": "2026-08-05",
                 "source_ids": ["theme_classifier"],
+                "run_namespace": "test-optional-failure",
                 "optional_source_ids": ["theme_classifier"],
             },
         )
@@ -456,6 +469,7 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
             {
                 "as_of_date": "2026-08-05",
                 "source_ids": ["alpha_vantage"],
+                "run_namespace": "test-profile-pagination",
                 "source_profiles": {"alpha_vantage": ["news_daily"]},
                 "source_profile_options": {
                     "alpha_vantage": {"news_daily": {"symbol_limit": 2}},

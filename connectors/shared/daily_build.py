@@ -143,12 +143,16 @@ def _run_fabric_pipeline(
 
 def daily_build_orchestrator(context, payload=None):
 	payload = payload or context.get_input() or {}
+	source_ids = payload.get("source_ids", [])
+	run_namespace = str(payload.get("run_namespace") or "").strip()
 	connector_failures = []
 	optional_connector_failures = []
 	optional_source_ids = set(payload.get("optional_source_ids") or [])
 	try:
 		yield context.call_activity("resume_fabric_capacity")
-		for source_id in payload.get("source_ids", []):
+		if source_ids and not run_namespace:
+			raise RuntimeError("run_namespace is required for connector execution")
+		for source_id in source_ids:
 			profile_override = (payload.get("source_profiles") or {}).get(source_id)
 			profiles = profile_override or (
 				alpha_vantage_profiles(payload["as_of_date"])
@@ -178,7 +182,7 @@ def daily_build_orchestrator(context, payload=None):
 					activity_payload = {
 						"source_id": source_id,
 						"as_of_date": payload["as_of_date"],
-						"run_namespace": payload.get("run_namespace"),
+						"run_namespace": run_namespace,
 						"profiles": [profile] if profile else [None],
 						"options": page_options,
 						"single_page": bool(page_limit),
@@ -216,7 +220,7 @@ def daily_build_orchestrator(context, payload=None):
 						"commit_scheduled_watermark",
 						{
 							"watermark_source_id": watermark_source_id,
-							"run_id": f"{payload.get('run_namespace') or 'daily-' + payload['as_of_date']}-{watermark_source_id}-watermark",
+							"run_id": f"{run_namespace}-{watermark_source_id}-watermark",
 							"last_event_ts": last_event_ts,
 							"last_cursor": last_cursor,
 						},

@@ -673,6 +673,9 @@ def resume_fabric_capacity(payload):
 @app.activity_trigger(input_name="payload")
 def run_scheduled_connector(payload: dict):
 	source_id = payload["source_id"]
+	run_namespace = str(payload.get("run_namespace") or "").strip()
+	if not run_namespace:
+		raise ValueError("run_namespace is required")
 	profiles = (
 		payload.get("profiles") or alpha_vantage_profiles(payload["as_of_date"])
 		if source_id == "alpha_vantage"
@@ -690,7 +693,6 @@ def run_scheduled_connector(payload: dict):
 		page_limit = int(options.get(page_field) or configured_limit or 0)
 		page_offset = int(options.get(offset_field) or 0)
 		while True:
-			run_namespace = payload.get("run_namespace") or f"daily-{payload['as_of_date']}"
 			run_id_parts = [f"{run_namespace}-{source_id}", profile]
 			if page_limit:
 				run_id_parts.append(f"offset-{page_offset}")
