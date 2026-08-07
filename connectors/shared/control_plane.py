@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from azure.cosmos import CosmosClient
-from azure.cosmos.exceptions import CosmosResourceNotFoundError
+from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosResourceNotFoundError
 from azure.identity import DefaultAzureCredential
 
 from .models import RunResult, Watermark
@@ -145,19 +145,36 @@ class CosmosControlPlane:
     # Run log
     # ------------------------------------------------------------------
 
-    def start_run(self, run_id: str, source_id: str) -> None:
-        self._container("runs").create_item(
-            {
-                "id": run_id,
-                "source_id": source_id,
-                "started_at": _now_utc(),
-                "ended_at": None,
-                "status": "running",
-                "records_in": 0,
-                "bytes": 0,
-                "error": None,
-            }
-        )
+    def start_run(self, run_id: str, source_id: str) -> Optional[RunResult]:
+        container = self._container("runs")
+        try:
+            container.create_item(
+                {
+                    "id": run_id,
+                    "source_id": source_id,
+                    "started_at": _now_utc(),
+                    "ended_at": None,
+                    "status": "running",
+                    "records_in": 0,
+                    "bytes": 0,
+                    "error": None,
+                }
+            )
+            return None
+        except CosmosResourceExistsError:
+            existing = container.read_item(item=run_id, partition_key=source_id)
+            replay_fields = {"has_more", "last_event_ts", "last_cursor"}
+            if existing.get("ended_at") is None or not replay_fields.issubset(existing):
+                return None
+            return RunResult(
+                status=existing["status"],
+                records_in=int(existing.get("records_in") or 0),
+                bytes_written=int(existing.get("bytes") or 0),
+                error=existing.get("error"),
+                has_more=existing.get("has_more"),
+                last_event_ts=existing.get("last_event_ts"),
+                last_cursor=existing.get("last_cursor"),
+            )
 
     def end_run(self, run_id: str, source_id: str, result: RunResult) -> None:
         self._container("runs").patch_item(
@@ -169,6 +186,9 @@ class CosmosControlPlane:
                 {"op": "set", "path": "/records_in", "value": result.records_in},
                 {"op": "set", "path": "/bytes", "value": result.bytes_written},
                 {"op": "set", "path": "/error", "value": result.error},
+                {"op": "set", "path": "/has_more", "value": result.has_more},
+                {"op": "set", "path": "/last_event_ts", "value": result.last_event_ts},
+                {"op": "set", "path": "/last_cursor", "value": result.last_cursor},
             ],
         )
 

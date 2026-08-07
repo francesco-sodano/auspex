@@ -38,7 +38,9 @@ class BaseConnector(ABC):
         started = False
         result = RunResult.failed("run did not complete")
         try:
-            self._cp.start_run(ctx.run_id, ctx.source_id)
+            replayed_result = self._cp.start_run(ctx.run_id, ctx.source_id)
+            if replayed_result is not None:
+                return replayed_result
             started = True
             result = self._execute(ctx)
         except Exception as exc:

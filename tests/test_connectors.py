@@ -32,6 +32,10 @@ class CosmosResourceNotFoundError(Exception):
     pass
 
 
+class CosmosResourceExistsError(Exception):
+    pass
+
+
 class DataLakeServiceClient:
     pass
 
@@ -76,6 +80,7 @@ class HttpxResponse:
 azure_identity_mod.DefaultAzureCredential = DefaultAzureCredential
 azure_cosmos_mod.CosmosClient = CosmosClient
 azure_cosmos_exceptions_mod.CosmosResourceNotFoundError = CosmosResourceNotFoundError
+azure_cosmos_exceptions_mod.CosmosResourceExistsError = CosmosResourceExistsError
 azure_storage_filedatalake_mod.DataLakeServiceClient = DataLakeServiceClient
 httpx_mod.TimeoutException = HttpxTimeoutException
 httpx_mod.NetworkError = HttpxNetworkError
@@ -97,7 +102,7 @@ from shared.base_connector import BaseConnector
 from shared.bronze_writer import BronzeWriter
 from shared.control_plane import CosmosControlPlane
 from shared.envelope import deterministic_batch_id
-from shared.models import Batch, RunContext, Watermark
+from shared.models import Batch, RunContext, RunResult, Watermark
 from alpha_vantage.connector import AlphaVantageConnector
 from benchmark_prices.connector import BenchmarkPricesConnector
 from contracts.connector import ContractsConnector
@@ -238,6 +243,27 @@ def sample_batch():
 
 
 class BaseConnectorTests(unittest.TestCase):
+    def test_completed_run_redelivery_returns_stored_result_without_refetching(self):
+        class ReplayControlPlane(FakeControlPlane):
+            def start_run(self, run_id, source_id):
+                return RunResult.skipped(
+                    has_more=True,
+                    last_event_ts="2026-08-07",
+                    last_cursor="2026-08-07",
+                )
+
+        connector = DummyConnector(
+            ReplayControlPlane(),
+            FakeBronzeWriter(),
+            fetch_error=AssertionError("redelivery must not refetch"),
+        )
+
+        result = connector.run(RunContext(run_id="replayed", source_id="dummy"))
+
+        self.assertEqual(result.status, "skipped")
+        self.assertTrue(result.has_more)
+        self.assertEqual(result.last_cursor, "2026-08-07")
+
     def test_projection_runs_only_after_successful_bronze_write(self):
         cp = FakeControlPlane()
         connector = ProjectingDummyConnector(cp, FakeBronzeWriter(), batch=sample_batch())
@@ -561,6 +587,37 @@ class BronzeWriterTests(unittest.TestCase):
 
 
 class ControlPlaneTests(unittest.TestCase):
+    def test_completed_run_conflict_replays_stored_pagination_result(self):
+        class FakeContainer:
+            def create_item(self, item):
+                raise CosmosResourceExistsError("already exists")
+
+            def read_item(self, item, partition_key):
+                return {
+                    "id": item,
+                    "source_id": partition_key,
+                    "status": "empty",
+                    "ended_at": "2026-08-07T07:00:00Z",
+                    "records_in": 0,
+                    "bytes": 0,
+                    "error": None,
+                    "has_more": False,
+                    "last_event_ts": "2026-08-07",
+                    "last_cursor": "2026-08-07",
+                }
+
+        container = FakeContainer()
+        control_plane = object.__new__(CosmosControlPlane)
+        control_plane._db = type("FakeDatabase", (), {
+            "get_container_client": lambda self, name: container,
+        })()
+
+        result = control_plane.start_run("run-1", "prices_eod")
+
+        self.assertEqual(result.status, "empty")
+        self.assertFalse(result.has_more)
+        self.assertEqual(result.last_cursor, "2026-08-07")
+
     def test_dedup_marker_never_expires(self):
         written = []
 
