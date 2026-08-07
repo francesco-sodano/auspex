@@ -1,7 +1,7 @@
 import os
 import time
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -30,6 +30,16 @@ def daily_build_instance_action(status) -> str:
 	if str(runtime_status).lower() in _RETRYABLE_DAILY_BUILD_STATES:
 		return "purge_and_start"
 	return "skip"
+
+
+def daily_build_run_namespace(as_of_date: str, triggered_at: datetime) -> str:
+	if triggered_at.tzinfo is None:
+		raise ValueError("triggered_at must be timezone-aware")
+	triggered_utc = triggered_at.astimezone(timezone.utc)
+	return (
+		f"daily-{date.fromisoformat(as_of_date).isoformat()}-trigger-"
+		f"{triggered_utc.strftime('%Y%m%dT%H%M%S%fZ')}"
+	)
 
 
 def json_safe_activity_result(value):

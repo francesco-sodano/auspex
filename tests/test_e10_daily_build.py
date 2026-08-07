@@ -2,7 +2,7 @@ import json
 import importlib.util
 import sys
 import unittest
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -25,6 +25,7 @@ from shared.daily_build import (
     alpha_vantage_profiles,
     daily_build_instance_action,
     daily_build_orchestrator,
+    daily_build_run_namespace,
     daily_publication_tail_orchestrator,
     json_safe_activity_result,
     scheduled_source_ids,
@@ -57,6 +58,31 @@ class DailyBuildOrchestratorTests(unittest.TestCase):
                 daily_build_instance_action(status(value)),
                 "purge_and_start",
             )
+
+    def test_scheduler_attempt_namespaces_are_unique_and_utc_stable(self):
+        first = daily_build_run_namespace(
+            "2026-08-07", datetime(2026, 8, 7, 1, tzinfo=timezone.utc)
+        )
+        retry = daily_build_run_namespace(
+            "2026-08-07", datetime(2026, 8, 7, 4, tzinfo=timezone.utc)
+        )
+
+        self.assertEqual(first, "daily-2026-08-07-trigger-20260807T010000000000Z")
+        self.assertNotEqual(first, retry)
+
+    def test_scheduler_attempt_namespace_rejects_naive_time(self):
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            daily_build_run_namespace("2026-08-07", datetime(2026, 8, 7, 1))
+
+    def test_timer_passes_unique_attempt_namespace_to_orchestrator(self):
+        function_app = (ROOT / "connectors" / "function_app.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            '"run_namespace": daily_build_run_namespace(as_of_date, triggered_at)',
+            function_app,
+        )
 
     def test_completion_telemetry_includes_engine_diagnostics(self):
         function_app = (ROOT / "connectors" / "function_app.py").read_text(encoding="utf-8")

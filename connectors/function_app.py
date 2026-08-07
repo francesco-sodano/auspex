@@ -34,6 +34,7 @@ from shared.daily_build import (
 	alpha_vantage_profiles,
 	daily_build_instance_action,
 	daily_build_orchestrator,
+	daily_build_run_namespace,
 	daily_publication_tail_orchestrator,
 	promote_daily_warehouse_snapshot,
 	scheduled_source_ids,
@@ -578,7 +579,8 @@ def _daily_build_client() -> FabricDailyBuildClient:
 )
 @app.durable_client_input(client_name="client")
 async def daily_build_schedule(timer: func.TimerRequest, client):
-	as_of_date = datetime.now(timezone.utc).date().isoformat()
+	triggered_at = datetime.now(timezone.utc)
+	as_of_date = triggered_at.date().isoformat()
 	instance_id = f"daily-build-{as_of_date}"
 	logging.info(
 		"DailyBuildScheduleTriggered instance_id=%s past_due=%s",
@@ -605,6 +607,7 @@ async def daily_build_schedule(timer: func.TimerRequest, client):
 		instance_id,
 		{
 			"as_of_date": as_of_date,
+			"run_namespace": daily_build_run_namespace(as_of_date, triggered_at),
 			"source_ids": scheduled_source_ids(_SOURCE_SEEDS.values(), as_of_date),
 			"optional_source_ids": [
 				source["source_id"]
