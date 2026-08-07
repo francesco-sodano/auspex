@@ -4,6 +4,8 @@ import os
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
+import httpx
+
 from shared.base_connector import BaseConnector
 from shared.models import Batch, Watermark
 from shared.retry import http_get
@@ -86,13 +88,24 @@ class SecCompanyFactsConnector(BaseConnector):
                 })
                 continue
 
-            response = http_get(
-                _COMPANY_FACTS_URL.format(cik=cik),
-                headers=headers,
-                max_attempts=_SEC_MAX_ATTEMPTS,
-                timeout=_SEC_TIMEOUT_SECONDS,
-                before_attempt=self._before_sec_request,
-            )
+            try:
+                response = http_get(
+                    _COMPANY_FACTS_URL.format(cik=cik),
+                    headers=headers,
+                    max_attempts=_SEC_MAX_ATTEMPTS,
+                    timeout=_SEC_TIMEOUT_SECONDS,
+                    before_attempt=self._before_sec_request,
+                )
+            except httpx.HTTPStatusError as exc:
+                if getattr(exc.response, "status_code", None) != 404:
+                    raise
+                records.append({
+                    "fetched_at": fetched_at,
+                    "context": {"symbol": symbol, "cik": cik},
+                    "status": "missing_companyfacts",
+                    "payload": None,
+                })
+                continue
             records.append({
                 "fetched_at": fetched_at,
                 "context": {"symbol": symbol, "cik": cik},

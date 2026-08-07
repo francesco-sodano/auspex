@@ -109,6 +109,7 @@ from sec_13f.connector import Sec13FConnector
 from sec_13dg.connector import Sec13DgConnector
 from sec_8k.connector import Sec8KConnector
 from sec_s1.connector import SecS1Connector
+from sec_companyfacts.connector import SecCompanyFactsConnector
 
 
 class FakeControlPlane:
@@ -1101,6 +1102,40 @@ class SecForm4ConnectorTests(unittest.TestCase):
 
 
 class E8ConnectorTests(unittest.TestCase):
+    def test_companyfacts_404_is_row_level_absence_but_500_propagates(self):
+        os.environ["EDGAR_USER_AGENT"] = "Auspex/1.0 test@example.com"
+        connector = SecCompanyFactsConnector(
+            FakeControlPlane(),
+            FakeUniverseBronzeWriter(["MISSING"]),
+            symbols=["MISSING"],
+            since_date=date.today().isoformat(),
+        )
+        request = HttpxRequest("GET", "https://data.sec.gov/companyfacts")
+
+        with patch.object(
+            connector, "_fetch_ticker_to_cik", return_value={"MISSING": "0001821866"}
+        ), patch(
+            "sec_companyfacts.connector.http_get",
+            side_effect=HttpxHttpStatusError(
+                "not found", request=request, response=HttpxResponse(404, request)
+            ),
+        ):
+            batch = connector.fetch(None)
+
+        self.assertEqual(batch.records[0]["status"], "missing_companyfacts")
+        self.assertEqual(batch.records[0]["context"]["cik"], "0001821866")
+        self.assertIsNone(batch.records[0]["payload"])
+
+        with patch.object(
+            connector, "_fetch_ticker_to_cik", return_value={"MISSING": "0001821866"}
+        ), patch(
+            "sec_companyfacts.connector.http_get",
+            side_effect=HttpxHttpStatusError(
+                "server error", request=request, response=HttpxResponse(500, request)
+            ),
+        ), self.assertRaisesRegex(HttpxHttpStatusError, "server error"):
+            connector.fetch(None)
+
     def test_alpha_vantage_profiles_select_cadence_functions_and_universe_tiers(self):
         os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
         os.environ["AV_RPM"] = "100000"
