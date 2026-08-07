@@ -163,6 +163,14 @@ The ingestion Function starts at 01:00 UTC and retries a failed UTC-dated instan
 
 Application Insights alerts cover build failure, missing completion by 05:00 UTC, and capacity running longer than four hours.
 
+Each timer attempt receives a unique UTC run namespace so the 04:00 and 07:00
+recovery windows cannot collide with earlier Cosmos run-log entries. Bronze batch
+IDs remain deterministic, allowing later attempts to skip already-landed pages
+without rewriting data. Date-driven connectors terminate covered windows before
+pagination or provider calls, SEC Company Facts `404` responses are retained as
+explicit sparse coverage, and completed activity results are replayed from the run
+log if Durable redelivers an activity.
+
 ## Validate
 
 ```powershell
