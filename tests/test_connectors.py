@@ -1337,6 +1337,28 @@ class E8ConnectorTests(unittest.TestCase):
         self.assertEqual(writer.requested_universes, [])
         self.assertEqual(batch.watermark_from, (date.today() + timedelta(days=1)).isoformat())
 
+    def test_alpha_vantage_honors_explicit_historical_end_date(self):
+        os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
+        os.environ["AV_RPM"] = "100000"
+        captured = []
+
+        def fake_http_get(url, params=None, **kwargs):
+            captured.append(params)
+            return FakeHttpResponse({"feed": []})
+
+        with patch("alpha_vantage.connector.http_get", side_effect=fake_http_get):
+            batch = AlphaVantageConnector(
+                FakeControlPlane(),
+                FakeUniverseBronzeWriter(["AAPL"]),
+                profile="news_daily",
+                since_date="2026-01-02",
+                to_date="2026-01-03",
+            ).fetch(None)
+
+        self.assertEqual(captured[0]["time_from"], "20260102T0000")
+        self.assertEqual(batch.new_wm.last_event_ts, "2026-01-03")
+        self.assertIn("2026-01-02-to-2026-01-03", batch.window)
+
     def test_alpha_vantage_profile_uses_registry_chunk_size_and_rejects_empty_universe(self):
         os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
         os.environ["AV_RPM"] = "100000"

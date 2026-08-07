@@ -93,6 +93,7 @@ _CONNECTORS = {
 		symbols=body.get("symbols") or None,
 		etf_symbols=body.get("etf_symbols") or None,
 		since_date=body.get("since_date") or None,
+		to_date=body.get("to_date") or None,
 		symbol_offset=body.get("symbol_offset") or 0,
 		symbol_limit=body.get("symbol_limit") or None,
 		include_etfs=body.get("include_etfs"),

@@ -73,6 +73,7 @@ class AlphaVantageConnector(BaseConnector):
         symbols: list = None,
         etf_symbols: list = None,
         since_date: str = None,
+        to_date: str = None,
         symbol_offset: int = 0,
         symbol_limit: int = None,
         include_etfs: Optional[bool] = None,
@@ -92,6 +93,7 @@ class AlphaVantageConnector(BaseConnector):
         self._symbols = symbols
         self._etf_symbols = etf_symbols or (source_config or {}).get("etf_symbols") or []
         self._since_date = since_date
+        self._to_date = to_date
         self._symbol_offset = max(0, int(symbol_offset or 0))
         configured_limit = ((source_config or {}).get("profiles") or {}).get(profile, {}).get("symbol_limit")
         effective_limit = symbol_limit if symbol_limit is not None else configured_limit
@@ -115,7 +117,7 @@ class AlphaVantageConnector(BaseConnector):
             from_date = date.fromisoformat(since.last_event_ts[:10]) + timedelta(days=1)
         else:
             from_date = date.today() - timedelta(days=_DEFAULT_LOOKBACK_DAYS)
-        to_date = date.today()
+        to_date = date.fromisoformat(self._to_date) if self._to_date else date.today()
         fetched_at = utc_now_iso()
 
         if from_date > to_date:
