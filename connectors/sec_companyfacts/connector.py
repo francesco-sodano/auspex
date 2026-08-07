@@ -49,6 +49,21 @@ class SecCompanyFactsConnector(BaseConnector):
 
     def fetch(self, since: Optional[Watermark]) -> Batch:
         from_date, to_date = self._date_window(since)
+        new_wm = Watermark(
+            source_id=self.source_id,
+            last_event_ts=to_date.isoformat(),
+            last_cursor=to_date.isoformat(),
+        )
+        if from_date > to_date:
+            return Batch(
+                records=[],
+                new_wm=new_wm,
+                window=self._window_id(from_date, to_date, [], 0),
+                partition_date=to_date.isoformat(),
+                watermark_from=from_date.isoformat(),
+                has_more=False,
+            )
+
         symbols = self._selected_symbols()
         total_symbols = len(symbols)
         has_more = False
@@ -58,12 +73,7 @@ class SecCompanyFactsConnector(BaseConnector):
             has_more = self._symbol_offset + len(symbols) < total_symbols
 
         window = self._window_id(from_date, to_date, symbols, total_symbols)
-        new_wm = Watermark(
-            source_id=self.source_id,
-            last_event_ts=to_date.isoformat(),
-            last_cursor=to_date.isoformat(),
-        )
-        if from_date > to_date or not symbols:
+        if not symbols:
             return Batch(
                 records=[],
                 new_wm=new_wm,

@@ -45,6 +45,24 @@ class PricesEodConnector(BaseConnector):
         self._min_interval_s = 60 / self._requests_per_minute_value
 
     def fetch(self, since: Optional[Watermark]) -> Batch:
+        if self._since_date:
+            from_date = date.fromisoformat(self._since_date)
+        elif since and since.last_event_ts:
+            from_date = date.fromisoformat(since.last_event_ts[:10]) + timedelta(days=1)
+        else:
+            from_date = date.today() - timedelta(days=_DEFAULT_LOOKBACK_DAYS)
+        to_date = date.fromisoformat(self._to_date) if self._to_date else date.today()
+        new_wm = Watermark(source_id=self.source_id)
+        if from_date > to_date:
+            return Batch(
+                records=[],
+                new_wm=new_wm,
+                window=self._window_id(from_date, to_date, [], 0),
+                partition_date=to_date.isoformat(),
+                watermark_from=from_date.isoformat(),
+                has_more=False,
+            )
+
         symbols = self._symbols if self._symbols is not None else [
             *self._bw.read_universe("alpha_vantage", "coverage"),
             *self._bw.read_portfolio_universe(),
@@ -57,29 +75,9 @@ class PricesEodConnector(BaseConnector):
             symbols = symbols[self._symbol_offset:end]
             has_more = self._symbol_offset + len(symbols) < total_symbols
 
-        if self._since_date:
-            from_date = date.fromisoformat(self._since_date)
-        elif since and since.last_event_ts:
-            from_date = date.fromisoformat(since.last_event_ts[:10]) + timedelta(days=1)
-        else:
-            from_date = date.today() - timedelta(days=_DEFAULT_LOOKBACK_DAYS)
-
-        to_date = date.fromisoformat(self._to_date) if self._to_date else date.today()
-
-        new_wm = Watermark(source_id=self.source_id)
         window = self._window_id(from_date, to_date, symbols, total_symbols)
 
         if not symbols:
-            return Batch(
-                records=[],
-                new_wm=new_wm,
-                window=window,
-                partition_date=to_date.isoformat(),
-                watermark_from=from_date.isoformat(),
-                has_more=has_more,
-            )
-
-        if from_date > to_date:
             return Batch(
                 records=[],
                 new_wm=new_wm,

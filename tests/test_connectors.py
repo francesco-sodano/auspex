@@ -654,6 +654,26 @@ class BackfillRunnerContractTests(unittest.TestCase):
 
 
 class PricesEodConnectorTests(unittest.TestCase):
+    def test_covered_price_window_stops_before_universe_pagination(self):
+        os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
+        writer = FakeUniverseBronzeWriter(["AAPL", "MSFT"])
+        connector = PricesEodConnector(
+            FakeControlPlane(), writer, symbol_limit=1
+        )
+
+        with patch(
+            "prices_eod.connector.http_get",
+            side_effect=AssertionError("covered window must not call provider"),
+        ):
+            batch = connector.fetch(Watermark(
+                source_id="prices_eod",
+                last_event_ts=date.today().isoformat(),
+            ))
+
+        self.assertEqual(batch.records, [])
+        self.assertFalse(batch.has_more)
+        self.assertEqual(writer.requested_universes, [])
+
     def test_partial_trading_session_fails_instead_of_advancing_watermark(self):
         os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
         os.environ["AV_RPM"] = "100000"
@@ -1102,6 +1122,26 @@ class SecForm4ConnectorTests(unittest.TestCase):
 
 
 class E8ConnectorTests(unittest.TestCase):
+    def test_covered_companyfacts_window_stops_before_universe_pagination(self):
+        os.environ["EDGAR_USER_AGENT"] = "Auspex/1.0 test@example.com"
+        writer = FakeUniverseBronzeWriter(["AAPL", "MSFT"])
+        connector = SecCompanyFactsConnector(
+            FakeControlPlane(), writer, symbol_limit=1
+        )
+
+        with patch(
+            "sec_companyfacts.connector.http_get",
+            side_effect=AssertionError("covered window must not call SEC"),
+        ):
+            batch = connector.fetch(Watermark(
+                source_id="sec_companyfacts",
+                last_event_ts=date.today().isoformat(),
+            ))
+
+        self.assertEqual(batch.records, [])
+        self.assertFalse(batch.has_more)
+        self.assertEqual(writer.requested_universes, [])
+
     def test_companyfacts_404_is_row_level_absence_but_500_propagates(self):
         os.environ["EDGAR_USER_AGENT"] = "Auspex/1.0 test@example.com"
         connector = SecCompanyFactsConnector(
