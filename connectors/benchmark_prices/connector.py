@@ -45,13 +45,6 @@ class BenchmarkPricesConnector(BaseConnector):
         self._min_interval_s = 60 / self._requests_per_minute_value
 
     def fetch(self, since: Optional[Watermark]) -> Batch:
-        symbol_source = self._symbols if self._symbols is not None else self._etf_symbols
-        all_symbols = sorted({str(symbol).upper() for symbol in symbol_source if symbol})
-        total_symbols = len(all_symbols)
-        end = None if self._symbol_limit is None else self._symbol_offset + self._symbol_limit
-        symbols = all_symbols[self._symbol_offset:end]
-        has_more = self._symbol_offset + len(symbols) < total_symbols
-
         if self._since_date:
             from_date = date.fromisoformat(self._since_date)
         elif since and since.last_event_ts:
@@ -59,14 +52,30 @@ class BenchmarkPricesConnector(BaseConnector):
         else:
             from_date = date.today() - timedelta(days=_DEFAULT_LOOKBACK_DAYS)
         to_date = date.fromisoformat(self._to_date) if self._to_date else date.today()
-
         new_wm = Watermark(
             source_id=self.source_id,
             last_event_ts=to_date.isoformat(),
             last_cursor=to_date.isoformat(),
         )
+        if from_date > to_date:
+            return Batch(
+                records=[],
+                new_wm=new_wm,
+                window=self._window_id(from_date, to_date, [], 0),
+                partition_date=to_date.isoformat(),
+                watermark_from=from_date.isoformat(),
+                has_more=False,
+            )
+
+        symbol_source = self._symbols if self._symbols is not None else self._etf_symbols
+        all_symbols = sorted({str(symbol).upper() for symbol in symbol_source if symbol})
+        total_symbols = len(all_symbols)
+        end = None if self._symbol_limit is None else self._symbol_offset + self._symbol_limit
+        symbols = all_symbols[self._symbol_offset:end]
+        has_more = self._symbol_offset + len(symbols) < total_symbols
+
         window = self._window_id(from_date, to_date, symbols, total_symbols)
-        if not symbols or from_date > to_date:
+        if not symbols:
             return Batch(
                 records=[],
                 new_wm=new_wm,

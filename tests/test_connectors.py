@@ -1122,6 +1122,45 @@ class SecForm4ConnectorTests(unittest.TestCase):
 
 
 class E8ConnectorTests(unittest.TestCase):
+    def test_covered_news_window_stops_before_universe_and_provider_calls(self):
+        os.environ["FINNHUB_API_KEY"] = "test-key"
+        writer = FakeUniverseBronzeWriter(["AAPL", "MSFT"])
+        connector = NewsConnector(FakeControlPlane(), writer, symbol_limit=1)
+
+        with patch(
+            "news.connector.http_get",
+            side_effect=AssertionError("covered window must not call Finnhub"),
+        ):
+            batch = connector.fetch(Watermark(
+                source_id="news",
+                last_event_ts=date.today().isoformat(),
+            ))
+
+        self.assertEqual(batch.records, [])
+        self.assertFalse(batch.has_more)
+        self.assertEqual(writer.requested_universes, [])
+
+    def test_covered_benchmark_window_stops_before_provider_calls(self):
+        os.environ["ALPHAVANTAGE_API_KEY"] = "test-key"
+        connector = BenchmarkPricesConnector(
+            FakeControlPlane(),
+            FakeBronzeWriter(),
+            etf_symbols=["VTI", "QTUM"],
+            symbol_limit=1,
+        )
+
+        with patch(
+            "benchmark_prices.connector.http_get",
+            side_effect=AssertionError("covered window must not call provider"),
+        ):
+            batch = connector.fetch(Watermark(
+                source_id="benchmark_prices",
+                last_event_ts=date.today().isoformat(),
+            ))
+
+        self.assertEqual(batch.records, [])
+        self.assertFalse(batch.has_more)
+
     def test_covered_companyfacts_window_stops_before_universe_pagination(self):
         os.environ["EDGAR_USER_AGENT"] = "Auspex/1.0 test@example.com"
         writer = FakeUniverseBronzeWriter(["AAPL", "MSFT"])

@@ -49,6 +49,24 @@ class NewsConnector(BaseConnector):
         else:
             from_date = to_date - timedelta(days=_DEFAULT_LOOKBACK_DAYS)
         from_date = self._bounded_from_date(from_date, to_date)
+        new_wm = Watermark(
+            source_id=self.source_id,
+            last_event_ts=to_date.isoformat(),
+            last_cursor=to_date.isoformat(),
+        )
+        if from_date > to_date:
+            return Batch(
+                records=[],
+                new_wm=new_wm,
+                window=(
+                    f"{from_date}-to-{to_date}-symbols-0-of-0"
+                    f"-offset-{self._symbol_offset}-limit-{self._symbol_limit or 'all'}-empty"
+                ),
+                partition_date=to_date.isoformat(),
+                watermark_from=from_date.isoformat(),
+                has_more=False,
+            )
+
         symbols = self._symbols if self._symbols is not None else [
             *self._bw.read_universe("alpha_vantage", "active"),
             *self._bw.read_portfolio_universe(),
@@ -74,7 +92,6 @@ class NewsConnector(BaseConnector):
             for article in data or []:
                 records.append({"symbol": symbol, "article": article})
 
-        new_wm = Watermark(source_id=self.source_id, last_event_ts=to_date.isoformat(), last_cursor=to_date.isoformat())
         symbol_digest = hashlib.sha256("\n".join(symbols).encode("utf-8")).hexdigest()[:16] if symbols else "empty"
         return Batch(
             records=records,
