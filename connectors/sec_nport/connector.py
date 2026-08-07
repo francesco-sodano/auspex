@@ -76,6 +76,28 @@ class SecNportConnector(BaseConnector):
 
     def fetch(self, since: Optional[Watermark]) -> Batch:
         start_date, end_date = self._date_range(since)
+        mapping_fingerprint = hashlib.sha256(
+            json.dumps(self._etf_series, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:16]
+        limit_token = str(self._filing_limit) if self._filing_limit is not None else "all"
+        window = (
+            f"{start_date}-to-{end_date}-series-{mapping_fingerprint}"
+            f"-offset-{self._filing_offset}-limit-{limit_token}"
+        )
+        if start_date > end_date:
+            return Batch(
+                records=[],
+                new_wm=Watermark(
+                    source_id=self.source_id,
+                    last_event_ts=end_date,
+                    last_cursor=end_date,
+                ),
+                window=window,
+                partition_date=end_date,
+                watermark_from=start_date,
+                has_more=False,
+            )
+
         headers = {
             "User-Agent": self._user_agent,
             "Accept": "application/json",
@@ -143,14 +165,6 @@ class SecNportConnector(BaseConnector):
                 record["accession_no"],
             )
         )
-        mapping_fingerprint = hashlib.sha256(
-            json.dumps(self._etf_series, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()[:16]
-        limit_token = str(self._filing_limit) if self._filing_limit is not None else "all"
-        window = (
-            f"{start_date}-to-{end_date}-series-{mapping_fingerprint}"
-            f"-offset-{self._filing_offset}-limit-{limit_token}"
-        )
         return Batch(
             records=records,
             new_wm=Watermark(
@@ -177,8 +191,6 @@ class SecNportConnector(BaseConnector):
         end = date.fromisoformat(self._to_date) if self._to_date else date.today()
         if end > date.today():
             raise ValueError("sec_nport to_date cannot be in the future")
-        if start > end:
-            raise ValueError("sec_nport since_date must be on or before to_date")
         return start.isoformat(), end.isoformat()
 
     def _normalize_mappings(self, mappings: object) -> list[dict]:

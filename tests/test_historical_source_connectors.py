@@ -123,6 +123,29 @@ class HistoricalSourceConnectorTests(unittest.TestCase):
         self.assertEqual(record["holdings"][0]["cusip"], "123456789")
         self.assertNotEqual(record["event_date"], record["filing_date"])
 
+    def test_nport_covered_window_stops_before_sec_calls(self):
+        mapping = [{
+            "symbol": "QQQ", "cik": "0001067839",
+            "series_id": "S000101292", "class_id": "C000271435",
+        }]
+        connector = SecNportConnector(
+            FakeControlPlane(), FakeUniverseBronzeWriter([]), etf_series=mapping,
+        )
+
+        with patch.object(
+            connector,
+            "_filings_for_cik",
+            side_effect=AssertionError("covered window must not call SEC"),
+        ):
+            batch = connector.fetch(type("Watermark", (), {
+                "last_cursor": date.today().isoformat(),
+                "last_event_ts": date.today().isoformat(),
+            })())
+
+        self.assertEqual(batch.records, [])
+        self.assertFalse(batch.has_more)
+        self.assertEqual(batch.new_wm.last_event_ts, date.today().isoformat())
+
     def test_nport_retains_unmatched_downloaded_primary_xml(self):
         mapping = [{
             "symbol": "QQQ", "cik": "0001067839",
