@@ -17,6 +17,7 @@ CONFIRMATION_TOKEN = _MODULE.CONFIRMATION_TOKEN
 LegacyEngineReset = _MODULE.LegacyEngineReset
 OneLakeObject = _MODULE.OneLakeObject
 WarehouseObject = _MODULE.WarehouseObject
+_retry_operation = _MODULE._retry_operation
 build_reset_plan = _MODULE.build_reset_plan
 preservation_manifest = _MODULE.preservation_manifest
 require_confirmation = _MODULE.require_confirmation

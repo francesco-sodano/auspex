@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import time
 
 import httpx
 from azure.cosmos import CosmosClient
@@ -19,10 +20,20 @@ from mssql_python import connect
 
 CONFIRMATION_TOKEN = "DELETE-LEGACY-AUSPEX-ENGINE"
 PRESERVED_COSMOS_CONTAINERS = {"app_users", "portfolio_transactions"}
-PRESERVED_FABRIC_ITEM_TYPES = {"Lakehouse", "Warehouse"}
+PRESERVED_FABRIC_ITEM_TYPES = {"Lakehouse", "SQLEndpoint", "Warehouse"}
 FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 SEARCH_SCOPE = "https://search.azure.com/.default"
 SEARCH_API_VERSION = "2024-07-01"
+TRANSIENT_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+TRANSIENT_ERROR_MARKERS = (
+    "connection aborted",
+    "connection reset",
+    "remote end closed connection",
+    "service unavailable",
+    "temporarily unavailable",
+    "timed out",
+    "timeout",
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +41,9 @@ class WarehouseObject:
     schema_name: str
     object_name: str
     object_type: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "object_type", self.object_type.strip())
 
 
 @dataclass(frozen=True)
@@ -285,9 +299,12 @@ class LegacyEngineReset:
             "SELECT * FROM c", enable_cross_partition_query=True
         ))
         for document in documents:
-            container.delete_item(
-                item=document["id"],
-                partition_key=_path_value(document, partition_path),
+            _retry_operation(
+                lambda document=document: container.delete_item(
+                    item=document["id"],
+                    partition_key=_path_value(document, partition_path),
+                ),
+                missing_ok=True,
             )
 
     def _warehouse_objects(self) -> list[WarehouseObject]:
@@ -328,9 +345,15 @@ class LegacyEngineReset:
 
     def _delete_onelake_path(self, item: OneLakeObject) -> None:
         if item.is_directory:
-            self.file_system.get_directory_client(item.path).delete_directory()
+            _retry_operation(
+                lambda: self.file_system.get_directory_client(item.path).delete_directory(),
+                missing_ok=True,
+            )
         else:
-            self.file_system.get_file_client(item.path).delete_file()
+            _retry_operation(
+                lambda: self.file_system.get_file_client(item.path).delete_file(),
+                missing_ok=True,
+            )
 
     def _onelake_exists(self, item: OneLakeObject) -> bool:
         try:
@@ -393,7 +416,6 @@ class LegacyEngineReset:
                 return
             if status in {"failed", "cancelled", "canceled"}:
                 raise RuntimeError(f"Azure operation {status}: {result.text[:1000]}")
-            import time
             time.sleep(int(result.headers.get("Retry-After", "2")))
         raise RuntimeError("Azure operation did not complete within the reset timeout")
 
@@ -402,6 +424,33 @@ def _drop_order(object_type: str) -> int:
     return {"V": 0, "P": 1, "FN": 2, "IF": 2, "TF": 2, "U": 3}.get(
         object_type, 99
     )
+
+
+def _retry_operation(
+    operation,
+    *,
+    missing_ok: bool = False,
+    attempts: int = 8,
+    sleeper=time.sleep,
+):
+    if attempts < 1:
+        raise ValueError("retry attempts must be positive")
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except Exception as exc:
+            status_code = getattr(exc, "status_code", None)
+            if missing_ok and status_code == 404:
+                return None
+            message = str(exc).lower()
+            transient = (
+                status_code in TRANSIENT_STATUS_CODES
+                or isinstance(exc, (ConnectionError, TimeoutError))
+                or any(marker in message for marker in TRANSIENT_ERROR_MARKERS)
+            )
+            if not transient or attempt == attempts - 1:
+                raise
+            sleeper(min(2 ** attempt, 16))
 
 
 def _path_value(document: dict, path: str):
