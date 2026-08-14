@@ -2,229 +2,75 @@ name: Deploy
 
 on:
   workflow_dispatch:
-    inputs:
-      environment:
-        description: GitHub environment and Auspex suffix
-        required: true
-        type: choice
-        options: [dev, prod]
 
 permissions:
   contents: read
   id-token: write
 
 concurrency:
-  group: auspex-${{ inputs.environment }}
+  group: auspex-${{ vars.AZD_ENVIRONMENT_NAME || 'prod' }}
   cancel-in-progress: false
 
 jobs:
+  validate:
+    uses: ./.github/workflows/ci.yml
+
   deploy:
+    needs: validate
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
+    environment: prod
+    timeout-minutes: 120
     env:
-      AUSPEX_ENV: ${{ inputs.environment }}
-      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      FABRIC_WORKSPACE_ID: ${{ vars.FABRIC_WORKSPACE_ID }}
+      AZURE_ENV_NAME: ${{ vars.AZD_ENVIRONMENT_NAME || 'prod' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: web/package-lock.json
+      - uses: Azure/setup-azd@v2
       - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Resume existing Fabric capacity before infrastructure update
-        shell: bash
+      - name: Authenticate Azure Developer CLI
         run: |
-          CAPACITY_ID="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/auspex-${AUSPEX_ENV}-data/providers/Microsoft.Fabric/capacities/auspex${AUSPEX_ENV}fab"
-          if az resource show --ids "${CAPACITY_ID}" --api-version 2023-11-01 --only-show-errors >/dev/null 2>&1; then
-            az rest --method post \
-              --url "https://management.azure.com${CAPACITY_ID}/resume?api-version=2023-11-01" \
-              --output none
-          fi
-
-      - name: Deploy infrastructure
-        shell: bash
+          azd auth login \
+            --client-id "${{ vars.AZURE_CLIENT_ID }}" \
+            --tenant-id "${{ vars.AZURE_TENANT_ID }}" \
+            --federated-credential-provider github
+      - name: Configure deployment environment
         env:
-          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
-          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-          MICROSOFT_AUTH_CLIENT_SECRET: ${{ secrets.MICROSOFT_AUTH_CLIENT_SECRET }}
+          AUSPEX_PRICE_API_KEY: ${{ secrets.AUSPEX_PRICE_API_KEY }}
+          AUSPEX_NEWS_API_KEY: ${{ secrets.AUSPEX_NEWS_API_KEY }}
         run: |
-          az deployment sub create \
-            --name "auspex-${AUSPEX_ENV}-${GITHUB_RUN_ID}" \
-            --location switzerlandnorth \
-            --template-file infra/main.bicep \
-            --parameters \
-              env="${AUSPEX_ENV}" \
-              fabricAdminUpn="${{ vars.FABRIC_ADMIN_UPN }}" \
-              alertEmailAddress="${{ vars.ALERT_EMAIL_ADDRESS }}" \
-              edgarUserAgent="${{ vars.EDGAR_USER_AGENT }}" \
-              alphaVantageApiKey="${ALPHAVANTAGE_API_KEY}" \
-              finnhubApiKey="${FINNHUB_API_KEY}" \
-              onelakeWorkspaceId="${FABRIC_WORKSPACE_ID}" \
-              onelakeLakehouseName="${{ vars.FABRIC_LAKEHOUSE_ID }}" \
-              fabricWarehouseServer="${{ vars.FABRIC_WAREHOUSE_SERVER }}" \
-              fabricWarehouseDatabase="${{ vars.FABRIC_WAREHOUSE_DATABASE }}" \
-              microsoftAuthClientId="${{ vars.MICROSOFT_AUTH_CLIENT_ID }}" \
-              microsoftAuthClientSecret="${MICROSOFT_AUTH_CLIENT_SECRET}" \
-              repositoryUrl="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
-              repositoryBranch="${GITHUB_REF_NAME}" \
-            --only-show-errors
-
-      - name: Build Function packages
-        shell: bash
+          test -n "${{ vars.AUSPEX_AUTH_TENANT_ID }}"
+          test -n "${{ vars.AUSPEX_AUTH_CLIENT_ID }}"
+          test -n "${{ vars.AUSPEX_OWNER_OBJECT_ID }}"
+          azd env new "${AZURE_ENV_NAME}" --no-prompt
+          azd env set AZURE_SUBSCRIPTION_ID "${{ vars.AZURE_SUBSCRIPTION_ID }}"
+          azd env set AZURE_LOCATION "${{ vars.AZURE_LOCATION }}"
+          azd env set AZURE_OPENAI_LOCATION "${{ vars.AZURE_OPENAI_LOCATION }}"
+          azd env set AUSPEX_PYPI_INDEX_URL "${{ vars.AUSPEX_PYPI_INDEX_URL || 'https://pypi.org/simple' }}"
+          azd env set AUSPEX_AUTH_TENANT_ID "${{ vars.AUSPEX_AUTH_TENANT_ID }}"
+          azd env set AUSPEX_AUTH_CLIENT_ID "${{ vars.AUSPEX_AUTH_CLIENT_ID }}"
+          azd env set AUSPEX_OWNER_OBJECT_ID "${{ vars.AUSPEX_OWNER_OBJECT_ID }}"
+          azd env set AUSPEX_ALERT_EMAIL "${{ vars.AUSPEX_ALERT_EMAIL }}"
+          azd env set AUSPEX_EDGAR_USER_AGENT "${{ vars.AUSPEX_EDGAR_USER_AGENT }}"
+          azd env set AUSPEX_PRICE_API_KEY "${AUSPEX_PRICE_API_KEY}"
+          azd env set AUSPEX_NEWS_API_KEY "${AUSPEX_NEWS_API_KEY}"
+          azd env set AUSPEX_EXISTING_KEY_VAULT_NAME "${{ vars.AUSPEX_EXISTING_KEY_VAULT_NAME }}"
+          azd env set AUSPEX_EXISTING_KEY_VAULT_RESOURCE_GROUP "${{ vars.AUSPEX_EXISTING_KEY_VAULT_RESOURCE_GROUP }}"
+          azd env set AUSPEX_EXISTING_LEDGER_ACCOUNT_NAME "${{ vars.AUSPEX_EXISTING_LEDGER_ACCOUNT_NAME }}"
+          azd env set AUSPEX_EXISTING_LEDGER_RESOURCE_GROUP "${{ vars.AUSPEX_EXISTING_LEDGER_RESOURCE_GROUP }}"
+          azd env set AUSPEX_LEDGER_DATABASE_NAME "${{ vars.AUSPEX_LEDGER_DATABASE_NAME || 'auspex' }}"
+          azd env set AUSPEX_MONTHLY_BUDGET "${{ vars.AUSPEX_MONTHLY_BUDGET || '165' }}"
+          azd env set AUSPEX_EXTRACTION_MODEL_CAPACITY "${{ vars.AUSPEX_EXTRACTION_MODEL_CAPACITY || '200' }}"
+          azd env set AUSPEX_NARRATIVE_MODEL_CAPACITY "${{ vars.AUSPEX_NARRATIVE_MODEL_CAPACITY || '30' }}"
+          azd env set AUSPEX_MANAGE_ENTRA_REDIRECT_URI "${{ vars.AUSPEX_MANAGE_ENTRA_REDIRECT_URI || 'true' }}"
+      - name: Provision and deploy
+        run: azd up --no-prompt
+      - name: Verify endpoint
         run: |
-          mkdir -p /tmp/auspex-ingestion /tmp/auspex-api
-          cp -R connectors/. /tmp/auspex-ingestion/
-          mkdir -p /tmp/auspex-ingestion/scripts
-          cp scripts/__init__.py scripts/reset_legacy_engine.py /tmp/auspex-ingestion/scripts/
-          cp -R api/. /tmp/auspex-api/
-          for shared in search engine agent prompts; do
-            cp -R "${shared}" "/tmp/auspex-ingestion/${shared}"
-            cp -R "${shared}" "/tmp/auspex-api/${shared}"
-          done
-          python -m pip install --target /tmp/auspex-ingestion/.python_packages/lib/site-packages -r connectors/requirements.txt
-          python -m pip install --target /tmp/auspex-api/.python_packages/lib/site-packages -r api/requirements.txt
-          find /tmp/auspex-ingestion /tmp/auspex-api -type d -name __pycache__ -prune -exec rm -rf {} +
-          find /tmp/auspex-ingestion /tmp/auspex-api -name local.settings.json -delete
-          (cd /tmp/auspex-ingestion && zip -qr /tmp/auspex-ingestion.zip .)
-          (cd /tmp/auspex-api && zip -qr /tmp/auspex-api.zip .)
-
-      - name: Deploy Function apps
-        shell: bash
-        run: |
-          az functionapp deployment source config-zip \
-            --resource-group "auspex-${AUSPEX_ENV}-ingest" \
-            --name "auspex-${AUSPEX_ENV}-func" \
-            --src /tmp/auspex-ingestion.zip \
-            --only-show-errors
-          az functionapp deployment source config-zip \
-            --resource-group "auspex-${AUSPEX_ENV}-web" \
-            --name "auspex-${AUSPEX_ENV}-wapi" \
-            --src /tmp/auspex-api.zip \
-            --only-show-errors
-
-      - name: Grant ingestion identity Fabric workspace access
-        shell: bash
-        run: |
-          pip install azure-identity httpx
-          INGEST_PRINCIPAL_ID=$(az functionapp identity show \
-            --resource-group "auspex-${AUSPEX_ENV}-ingest" \
-            --name "auspex-${AUSPEX_ENV}-func" \
-            --query principalId -o tsv)
-          python scripts/ensure_fabric_workspace_access.py \
-            --workspace-id "${FABRIC_WORKSPACE_ID}" \
-            --principal-id "${INGEST_PRINCIPAL_ID}" \
-            --role Contributor
-
-      - name: Seed required ETF linkage inputs
-        shell: bash
-        run: |
-          FUNCTION_KEY=$(az functionapp keys list \
-            --resource-group "auspex-${AUSPEX_ENV}-ingest" \
-            --name "auspex-${AUSPEX_ENV}-func" \
-            --query masterKey -o tsv)
-          echo "::add-mask::${FUNCTION_KEY}"
-          curl --fail --retry 5 --retry-all-errors \
-            --request POST \
-            --header "x-functions-key: ${FUNCTION_KEY}" \
-            --header "Content-Type: application/json" \
-            --data "{\"source_id\":\"etf_holdings\",\"run_id\":\"deploy-etf-holdings-${GITHUB_RUN_ID}\",\"mode\":\"backfill\",\"to_date\":\"$(date -u +%F)\"}" \
-            "https://auspex-${AUSPEX_ENV}-func.azurewebsites.net/api/run"
-
-      - name: Resume Fabric capacity for deployment
-        shell: bash
-        run: |
-          CAPACITY_ID="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/auspex-${AUSPEX_ENV}-data/providers/Microsoft.Fabric/capacities/auspex${AUSPEX_ENV}fab"
-          az rest --method post \
-            --url "https://management.azure.com${CAPACITY_ID}/resume?api-version=2023-11-01" \
-            --output none
-          for attempt in {1..30}; do
-            STATE=$(az resource show --ids "${CAPACITY_ID}" --api-version 2023-11-01 --query properties.state -o tsv)
-            if [ "${STATE}" = "Active" ]; then
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "Fabric capacity did not become Active" >&2
-          exit 1
-
-      - name: Deploy Fabric items and daily pipelines
-        run: |
-          pip install azure-identity httpx
-          python scripts/deploy_fabric_items.py \
-            --workspace-id "${FABRIC_WORKSPACE_ID}" \
-            --lakehouse-id "${{ vars.FABRIC_LAKEHOUSE_ID }}" \
-            --edgar-user-agent "${{ vars.EDGAR_USER_AGENT }}"
-          python scripts/deploy_fabric_pipeline.py --workspace-id "${FABRIC_WORKSPACE_ID}"
-
-      - name: Refresh rebuildable Fabric schemas
-        run: |
-          python scripts/run_fabric_schema_refresh.py \
-            --workspace-id "${FABRIC_WORKSPACE_ID}" \
-            --subscription-id "${AZURE_SUBSCRIPTION_ID}" \
-            --capacity-resource-group "auspex-${AUSPEX_ENV}-data" \
-            --capacity-name "auspex${AUSPEX_ENV}fab" \
-            --as-of-date "$(date -u +%F)"
-
-      - name: Deploy Fabric Warehouse schema
-        env:
-          FABRIC_WAREHOUSE_SERVER: ${{ vars.FABRIC_WAREHOUSE_SERVER }}
-          FABRIC_WAREHOUSE_DATABASE: ${{ vars.FABRIC_WAREHOUSE_DATABASE }}
-        run: |
-          pip install -r scripts/requirements.txt
-          python scripts/deploy_warehouse_schema.py
-
-      - name: Suspend Fabric capacity after deployment
-        if: always()
-        shell: bash
-        run: |
-          az rest --method post \
-            --url "https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/auspex-${AUSPEX_ENV}-data/providers/Microsoft.Fabric/capacities/auspex${AUSPEX_ENV}fab/suspend?api-version=2023-11-01" \
-            --output none
-
-      - name: Narrow Cosmos data-plane roles
-        shell: pwsh
-        run: |
-          ./scripts/migrate_e19_cosmos_rbac.ps1 `
-            -SubscriptionId "${{ vars.AZURE_SUBSCRIPTION_ID }}" `
-            -Environment "${{ inputs.environment }}"
-
-      - name: Build and deploy web
-        shell: bash
-        run: |
-          npm ci --prefix web
-          npm run lint --prefix web
-          npm run build --prefix web
-          npm install --global @azure/static-web-apps-cli
-          SWA_TOKEN=$(az staticwebapp secrets list \
-            --resource-group "auspex-${AUSPEX_ENV}-web" \
-            --name "auspex-${AUSPEX_ENV}-swa" \
-            --query properties.apiKey -o tsv)
-          echo "::add-mask::${SWA_TOKEN}"
-          swa deploy web/dist --deployment-token "${SWA_TOKEN}" --env production
-
-      - name: Verify deployed Functions and endpoint
-        shell: bash
-        run: |
-          az functionapp function list \
-            --resource-group "auspex-${AUSPEX_ENV}-ingest" \
-            --name "auspex-${AUSPEX_ENV}-func" \
-            --query "length(@)" -o tsv
-          az functionapp function list \
-            --resource-group "auspex-${AUSPEX_ENV}-web" \
-            --name "auspex-${AUSPEX_ENV}-wapi" \
-            --query "length(@)" -o tsv
-          HOST=$(az staticwebapp show \
-            --resource-group "auspex-${AUSPEX_ENV}-web" \
-            --name "auspex-${AUSPEX_ENV}-swa" \
-            --query defaultHostname -o tsv)
-          curl --fail --retry 5 --retry-all-errors "https://${HOST}/"
+          URI="$(azd env get-value SERVICE_API_URI)"
+          curl --fail --retry 20 --retry-all-errors "${URI}/healthz"
+          STATUS="$(curl --silent --show-error --output /tmp/unauthenticated.json \
+            --write-out '%{http_code}' "${URI}/api/securities")"
+          test "${STATUS}" = "401"

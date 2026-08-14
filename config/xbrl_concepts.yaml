@@ -1,0 +1,77 @@
+# XBRL us-gaap concept aliases - arc42 5.5 "Fundamental health"
+#
+# Tagging varies by issuer; auspex.scoring.legs walks each metric's alias list in order
+# and uses the first concept present in a security's XBRL companyfacts for the requested
+# fiscal period. This table is expected to need occasional additions (arc42 5.5).
+schema_version: "4.0"
+config_type: xbrl_concepts
+
+concepts:
+  revenues:
+    - Revenues
+    - RevenueFromContractWithCustomerExcludingAssessedTax
+    - RevenueFromContractWithCustomerIncludingAssessedTax
+    - SalesRevenueNet
+    - Revenue
+
+  gross_profit:
+    - GrossProfit
+
+  operating_income:
+    - OperatingIncomeLoss
+    - ProfitLossFromOperatingActivities
+
+  net_cash_from_operations:
+    - NetCashProvidedByUsedInOperatingActivities
+    - NetCashProvidedByUsedInOperatingActivitiesContinuingOperations
+    - CashFlowsFromUsedInOperatingActivities
+    - CashFlowsFromUsedInOperatingActivitiesContinuingOperations
+
+  capex:
+    - PaymentsToAcquirePropertyPlantAndEquipment
+    - PaymentsToAcquireProductiveAssets
+    - PurchaseOfPropertyPlantAndEquipmentIntangibleAssetsOtherThanGoodwillInvestmentPropertyAndOtherNoncurrentAssets
+
+  cash_and_equivalents:
+    - CashAndCashEquivalentsAtCarryingValue
+    - CashAndCashEquivalentsAtCarryingValueIncludingDiscontinuedOperations
+    - CashAndCashEquivalents
+
+  short_term_investments:
+    - ShortTermInvestments
+    - MarketableSecuritiesCurrent
+
+  total_debt:
+    - DebtCurrent
+    - LongTermDebtNoncurrent
+    - LongTermDebt
+    - DebtInstrumentCarryingAmount
+    - Borrowings
+
+  total_assets:
+    - Assets
+
+  stockholders_equity:
+    - StockholdersEquity
+    - StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest
+    - Equity
+    - EquityAttributableToOwnersOfParent
+
+  ebitda_operating_income:
+    - OperatingIncomeLoss
+    - ProfitLossFromOperatingActivities
+
+  depreciation_amortization:
+    - DepreciationDepletionAndAmortization
+    - DepreciationAmortizationAndAccretionNet
+    - AdjustmentsForDepreciationAndAmortisationExpense
+
+  shares_outstanding:
+    - CommonStockSharesOutstanding
+    - EntityCommonStockSharesOutstanding
+    - NumberOfSharesIssued
+
+  diluted_eps:
+    - EarningsPerShareDiluted
+    - EarningsPerShareDilutedIncludingExtraordinaryItems
+    - DilutedEarningsLossPerShare

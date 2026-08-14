@@ -1,0 +1,955 @@
+"""`auspex` console entrypoint (arc42 §6.1, §6.3, §7).
+
+Subcommands (matching the IaC job container commands in
+``infra/modules/containerapps.bicep``, e.g. ``python -m auspex nightly``):
+- ``bootstrap``    — one-time cold start (arc42 §6.3)
+- ``nightly``      — nightly 20-step pipeline for a given date (arc42 §6.1)
+- ``performance``   — weekly self-measurement job (arc42 §5.8)
+- ``serve``         — run the FastAPI app (arc42 §7 app-auspex-api)
+
+Supports both the ``auspex`` console script and ``python -m auspex`` module
+invocation (see ``src/auspex/__main__.py``).
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import sys
+from datetime import date, datetime, timedelta
+
+from auspex.persistence.repositories import CosmosRepository
+
+logger = logging.getLogger("auspex.cli")
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="auspex", description="Auspex — personal AI financial research assistant")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # No CLI args: user_id is resolved via PortfolioAdapter.resolve_owner_user_sk()
+    # at run time, never operator-supplied (see _bootstrap_command docstring).
+    subparsers.add_parser("bootstrap", help="one-time cold start (arc42 §6.3)")
+    recover_parser = subparsers.add_parser(
+        "bootstrap-recover",
+        help="resume only missing extraction, score dates, metrics, and validation",
+    )
+    recover_parser.add_argument(
+        "--replay-all",
+        action="store_true",
+        help="recompute the full 18-month score window instead of only incomplete dates",
+    )
+    subparsers.add_parser(
+        "bootstrap-audit",
+        help="report historical score coverage without modifying data",
+    )
+    subparsers.add_parser(
+        "seed-edgar-watermarks",
+        help="advance missing filing/Form 4 watermarks after a historical bootstrap",
+    )
+
+    nightly_parser = subparsers.add_parser(
+        "nightly", help="run the nightly 20-step pipeline (arc42 §6.1, job-auspex-pipeline)"
+    )
+    nightly_parser.add_argument("--date", type=str, default=None, help="YYYY-MM-DD, defaults to today (UTC)")
+
+    perf_parser = subparsers.add_parser(
+        "performance", help="run the weekly self-measurement job (arc42 §5.8, job-auspex-performance)"
+    )
+    perf_parser.add_argument("--date", type=str, default=None)
+
+    serve_parser = subparsers.add_parser("serve", help="run the FastAPI app (app-auspex-api)")
+    serve_parser.add_argument("--host", type=str, default="0.0.0.0")
+    serve_parser.add_argument("--port", type=int, default=8080)
+
+    return parser
+
+
+def _parse_date(value: str | None) -> date:
+    if value is None:
+        return datetime.now().date()
+    return date.fromisoformat(value)
+
+
+async def _aclose_unique(*resources) -> None:
+    closed: set[int] = set()
+    for resource in resources:
+        if resource is None or id(resource) in closed:
+            continue
+        closed.add(id(resource))
+        close = getattr(resource, "aclose", None)
+        if close is not None:
+            await close()
+
+
+async def _run_pipeline_command(as_of_date: date) -> int:
+    from auspex.config import (
+        build_config_version,
+        load_cohorts,
+        load_fees,
+        load_label_mappings,
+        load_policy,
+        load_taxonomy,
+        load_universe,
+        load_weights,
+        load_xbrl_concepts,
+    )
+    from auspex.models.common import utc_now
+    from auspex.models.config_version import ConfigVersion
+    from auspex.models.policy import Recommendation
+    from auspex.models.portfolio import PortfolioProjection
+    from auspex.models.run import RunManifest
+    from auspex.models.scoring import LegChange, ScoreSnapshot
+    from auspex.models.user_settings import UserSettings
+    from auspex.persistence.blob_client import get_blob_context
+    from auspex.persistence.cosmos_client import get_cosmos_context, get_source_ledger_context
+    from auspex.persistence.repositories import (
+        CosmosChannelAExtractionSink,
+        CosmosChannelBDigestSink,
+        CosmosDocumentSink,
+        CosmosFundamentalSink,
+        CosmosFxSink,
+        CosmosNarrativeSink,
+        CosmosPriceSink,
+        CosmosWatermarkStore,
+    )
+    from auspex.pipeline.context import PipelineContext, PipelineProviders, PipelineRepos
+    from auspex.portfolio.adapter import PortfolioAdapter
+    from auspex.portfolio.mapping import load_portfolio_mapping
+    from auspex.providers.factory import build_default_providers
+    from auspex.providers.openai_provider import AzureOpenAIClient
+    from auspex.providers.secrets import get_secret_resolver
+    from auspex.settings import get_settings
+
+    universe = load_universe()
+    config = {
+        "weights": load_weights(),
+        "policy": load_policy(),
+        "xbrl_concepts": load_xbrl_concepts(),
+        "label_mappings": load_label_mappings(),
+        "cohorts": load_cohorts(),
+        "taxonomy": load_taxonomy(),
+        "fees": load_fees(),
+    }
+    config_version = build_config_version(f"{as_of_date.isoformat()}-a", utc_now())
+
+    cosmos = get_cosmos_context()
+    blob = get_blob_context()
+    settings = get_settings()
+
+    # Read-only binding to the existing, owner-owned portfolio ledger (arc42 §5.7,
+    # a separate Cosmos account from Auspex's own — resolved *before*
+    # any provider/repo wiring so a bad binding fails fast. `resolve_owner_user_sk`
+    # is also the single source of truth for the `user_id` this run writes under:
+    # every user_id-partitioned container (recommendations, portfolio_projection,
+    # conversations) must agree with whatever the API resolves for the
+    # authenticated owner's requests (arc42 §11), and the source ledger read
+    # itself is partitioned on that same value. Binding absence or ambiguity (no
+    # config/portfolio_mapping.yaml, no resolvable/unique app_users document,
+    # etc) is therefore a hard failure — degrading to an empty portfolio or a
+    # placeholder user_id would silently write data under a user_sk nobody could
+    # ever read back or reconcile against the real ledger.
+    source_ledger = None
+    try:
+        mapping = load_portfolio_mapping()
+        source_ledger = get_source_ledger_context()
+        portfolio_reader = PortfolioAdapter(source_ledger, mapping)
+        user_id = await portfolio_reader.resolve_owner_user_sk()
+    except Exception as exc:  # noqa: BLE001 - fatal: no unambiguous owner to bind writes to
+        logger.error(
+            "nightly: could not resolve the portfolio owner via PortfolioAdapter — cannot proceed "
+            "without an unambiguous user_sk for user-scoped writes: %s",
+            exc,
+            exc_info=True,
+        )
+        await _aclose_unique(source_ledger, blob, cosmos)
+        return 1
+
+    # Persist the config version bundle actually used by this run (arc42
+    # §5.11) — every `scores` row cites `config_version_id`, so without this
+    # write no historical score could be reproduced under its original
+    # weights/policy/taxonomy. No pipeline step performs this write; it must
+    # happen here, once, before the run starts.
+    config_version_repo = CosmosRepository(cosmos, "config_versions", ConfigVersion)
+    await config_version_repo.upsert(config_version)
+
+    # Default provider set (arc42 §3.1): Alpha Vantage serves both price and FX
+    # from the one `AUSPEX_PRICE_API_KEY_SECRET`-named Key Vault secret; Finnhub
+    # serves news from `AUSPEX_NEWS_API_KEY_SECRET`. A provider whose secret
+    # cannot be resolved comes back None and its collector step is skipped
+    # rather than aborting the run (arc42 §6.1).
+    secret_resolver = get_secret_resolver(settings.key_vault_url)
+    default_providers = await build_default_providers(settings, secret_resolver)
+
+    # Channel A/B extraction + narrative generation (arc42 §5.4, §6.3 "Runtime
+    # budget"), paced against the confirmed `gpt-4.1-mini` deployment quota
+    # (450,000 TPM in Sweden Central) via a token-bucket in AzureOpenAIClient
+    # itself. Absent if the endpoint can't be reached, in which case Channel
+    # A/B/narrative steps are skipped rather than aborting the run.
+    openai_client = None
+    try:
+        openai_client = AzureOpenAIClient(
+            endpoint=settings.aoai_endpoint,
+            api_version=settings.aoai_api_version,
+            tokens_per_minute=settings.aoai_tokens_per_minute,
+            tokens_per_minute_by_deployment={
+                settings.aoai_deployment_narrative: settings.aoai_narrative_tokens_per_minute,
+                settings.aoai_deployment_answer: settings.aoai_narrative_tokens_per_minute,
+            },
+        )
+    except Exception:  # noqa: BLE001 - degrade to no LLM extraction, do not abort the run
+        logger.warning(
+            "could not construct Azure OpenAI client; extraction/narrative steps will be skipped", exc_info=True
+        )
+
+    providers = PipelineProviders(
+        price_provider=default_providers.price_and_fx,
+        fx_provider=default_providers.price_and_fx,
+        news_provider=default_providers.news,
+        edgar_client=default_providers.edgar,
+        openai_client=openai_client,
+        portfolio_reader=portfolio_reader,
+    )
+
+    # Reuse the ready-made Cosmos sink adapters from auspex.persistence.repositories
+    # (arc42 §5.3, §5.4, §5.11) instead of re-declaring local duplicates — this
+    # also wires channel_a_sink/channel_b_sink/narrative_sink so Channel A/B
+    # extraction and narrative generation actually execute (rather than
+    # skipping as success-shaped no-ops) whenever `openai_client` above is
+    # available, matching `_bootstrap_command`'s wiring.
+    repos = PipelineRepos(
+        document_sink=CosmosDocumentSink(cosmos),
+        price_sink=CosmosPriceSink(cosmos),
+        fx_sink=CosmosFxSink(cosmos),
+        fundamental_sink=CosmosFundamentalSink(cosmos),
+        blob_sink=blob,
+        watermarks=CosmosWatermarkStore(cosmos),
+        channel_a_sink=CosmosChannelAExtractionSink(cosmos),
+        channel_b_sink=CosmosChannelBDigestSink(cosmos),
+        narrative_sink=CosmosNarrativeSink(cosmos),
+        score_repo=CosmosRepository(cosmos, "scores", ScoreSnapshot),
+        leg_change_repo=CosmosRepository(cosmos, "leg_changes", LegChange),
+        recommendation_repo=CosmosRepository(cosmos, "recommendations", Recommendation),
+        run_repo=CosmosRepository(cosmos, "runs", RunManifest),
+        portfolio_projection_repo=CosmosRepository(cosmos, "portfolio_projection", PortfolioProjection),
+        user_settings_repo=CosmosRepository(
+            cosmos,
+            "user_settings",
+            UserSettings,
+        ),
+        config_version_repo=config_version_repo,
+    )
+
+    ctx = PipelineContext(
+        universe=universe, config=config, as_of_date=as_of_date, user_id=user_id, repos=repos, providers=providers
+    )
+    ctx.__dict__["_config_version_id"] = config_version.id
+
+    try:
+        manifest = await run_pipeline_wrapper(ctx)
+    finally:
+        # Release all per-run SDK clients and credentials.
+        await _aclose_unique(
+            default_providers.price_and_fx,
+            default_providers.news,
+            default_providers.edgar,
+            openai_client,
+            secret_resolver,
+            blob,
+            source_ledger,
+            cosmos,
+        )
+
+    logger.info("pipeline run finished: status=%s", manifest.status.value)
+    return 0 if manifest.status.value in ("SUCCESS", "DEGRADED") else 1
+
+
+async def run_pipeline_wrapper(ctx):
+    from auspex.pipeline.runner import run_nightly_pipeline
+
+    return await run_nightly_pipeline(ctx)
+
+
+async def _performance_command(as_of_date: date) -> int:
+    """arc42 §5.8 weekly self-measurement job (``job-auspex-performance``,
+    Sunday 03:00 UTC per ``infra/modules/containerapps.bicep``) — recomputes
+    composite/leg IC performance metrics over every date already present in
+    the ``scores`` container, reusing
+    :meth:`auspex.cli.bootstrap.BootstrapRunner.compute_performance_metrics`
+    (arc42 §6.3 step 10) rather than duplicating the cross-sectional IC
+    computation here.
+
+    Unlike ``_run_pipeline_command``/``_bootstrap_command``, this job binds
+    to no owner-owned portfolio ledger: the ``performance`` container (arc42
+    §5.8) is partitioned by ``/metric_type``, not by ``user_id``, and
+    ``compute_performance_metrics`` never reads ``ctx.user_id``. The
+    ``user_id`` on the throwaway :class:`~auspex.pipeline.context.PipelineContext`
+    built below is therefore inert — a fixed service literal, not an
+    operator argument or a resolved portfolio owner.
+    """
+
+    from auspex.cli.bootstrap import BootstrapRunner
+    from auspex.config import load_universe
+    from auspex.models.performance import PerformanceMetric
+    from auspex.models.policy import Recommendation
+    from auspex.models.scoring import ScoreSnapshot
+    from auspex.persistence.blob_client import get_blob_context
+    from auspex.persistence.cosmos_client import (
+        get_cosmos_context,
+        get_source_ledger_context,
+    )
+    from auspex.persistence.repositories import (
+        CosmosDocumentSink,
+        CosmosFundamentalSink,
+        CosmosFxSink,
+        CosmosPriceSink,
+        CosmosWatermarkStore,
+    )
+    from auspex.pipeline.context import PipelineContext, PipelineRepos
+    from auspex.portfolio.adapter import PortfolioAdapter
+    from auspex.portfolio.event_ledger import effective_transactions
+    from auspex.portfolio.mapping import load_portfolio_mapping
+
+    logger.info("performance: weekly self-measurement job invoked for %s (arc42 §5.8)", as_of_date)
+
+    universe = load_universe()
+    cosmos = get_cosmos_context()
+    blob = get_blob_context()
+
+    # Reuse the same ready-made Cosmos sink adapters bootstrap wires (arc42
+    # §5.3, §5.4, §5.11) so `fetch_all` inside `compute_performance_metrics`
+    # actually sees data — the nightly pipeline's local `_CosmosPriceSink`
+    # (above) only exposes `upsert_price_bar`, not the `.all()`/`.query()`
+    # read protocol `fetch_all` depends on. `document_sink`/`fx_sink`/
+    # `fundamental_sink`/`blob_sink`/`watermarks` are unused by this job but
+    # required (no default) by `PipelineRepos`.
+    repos = PipelineRepos(
+        document_sink=CosmosDocumentSink(cosmos),
+        price_sink=CosmosPriceSink(cosmos),
+        fx_sink=CosmosFxSink(cosmos),
+        fundamental_sink=CosmosFundamentalSink(cosmos),
+        blob_sink=blob,
+        watermarks=CosmosWatermarkStore(cosmos, container_name="config_versions"),
+        score_repo=CosmosRepository(cosmos, "scores", ScoreSnapshot),
+        recommendation_repo=CosmosRepository(
+            cosmos,
+            "recommendations",
+            Recommendation,
+        ),
+    )
+    performance_repo = CosmosRepository(cosmos, "performance", PerformanceMetric)
+
+    ctx = PipelineContext(universe=universe, config={}, as_of_date=as_of_date, user_id="system", repos=repos)
+
+    runner = BootstrapRunner(universe=universe, context_factory=lambda _as_of: ctx)
+    portfolio_adapter = PortfolioAdapter(
+        get_source_ledger_context(),
+        load_portfolio_mapping(),
+    )
+    accepted_recommendation_ids = {
+        transaction.recommendation_id
+        for transaction in effective_transactions(
+            await portfolio_adapter.read_transactions()
+        )
+        if transaction.followed_auspex and transaction.recommendation_id
+    }
+    metrics = await runner.compute_performance_metrics(
+        ctx,
+        performance_repo=performance_repo,
+        accepted_recommendation_ids=accepted_recommendation_ids,
+    )
+
+    logger.info(
+        "performance: complete — metrics_computed=%d (arc42 §5.8, job-auspex-performance)",
+        len(metrics),
+    )
+    return 0
+
+
+async def _bootstrap_audit_command() -> int:
+    from auspex.cli.bootstrap import (
+        MIN_SCORED_SECURITIES,
+        TOTAL_RECENT_SESSIONS,
+        extraction_backfill_start,
+    )
+    from auspex.config import load_universe
+    from auspex.models.market import PriceBar
+    from auspex.models.scoring import ScoreSnapshot
+    from auspex.persistence.cosmos_client import get_cosmos_context
+
+    today = datetime.now().date()
+    repository = CosmosRepository(
+        get_cosmos_context(), "scores", ScoreSnapshot
+    )
+    counts = await repository.valid_score_counts_by_date(
+        extraction_backfill_start(today), today
+    )
+    expected_dates = [
+        item
+        for item in (
+            extraction_backfill_start(today) + timedelta(days=offset)
+            for offset in range(
+                (today - extraction_backfill_start(today)).days + 1
+            )
+        )
+        if item.weekday() < 5
+    ][-TOTAL_RECENT_SESSIONS:]
+    incomplete = [
+        (item, counts.get(item, 0))
+        for item in expected_dates
+        if counts.get(item, 0) < MIN_SCORED_SECURITIES
+    ]
+    incomplete_dates = {item for item, _ in incomplete}
+    snapshots = await repository.for_dates(incomplete_dates)
+    valid_by_date: dict[date, set[str]] = {}
+    snapshot_by_date_security = {}
+    for snapshot in snapshots:
+        snapshot_by_date_security[(snapshot.as_of_date, snapshot.security_id)] = snapshot
+        if snapshot.percentile is not None:
+            valid_by_date.setdefault(snapshot.as_of_date, set()).add(
+                snapshot.security_id
+            )
+    universe = load_universe()
+    ticker_by_id = {security.id: security.ticker for security in universe.securities}
+    missing_by_date = {
+        item.isoformat(): sorted(
+            ticker_by_id[security.id]
+            for security in universe.securities
+            if security.id not in valid_by_date.get(item, set())
+        )
+        for item in sorted(incomplete_dates)
+    }
+    market_repository = CosmosRepository(
+        get_cosmos_context(), "market_daily", PriceBar
+    )
+
+    async def earliest_price(security_id: str) -> str | None:
+        rows = await market_repository.query(
+            (
+                "SELECT TOP 1 * FROM c WHERE c.security_id=@security_id "
+                "ORDER BY c.session_date ASC"
+            ),
+            [{"name": "@security_id", "value": security_id}],
+            partition_key=security_id,
+        )
+        return rows[0].session_date.isoformat() if rows else None
+
+    missing_security_ids = {
+        security.id
+        for item in incomplete_dates
+        for security in universe.securities
+        if security.id not in valid_by_date.get(item, set())
+    }
+    earliest_prices = {
+        ticker_by_id[security_id]: earliest
+        for security_id, earliest in zip(
+            sorted(missing_security_ids),
+            await asyncio.gather(
+                *(earliest_price(security_id) for security_id in sorted(missing_security_ids))
+            ),
+            strict=True,
+        )
+    }
+    qualifying = len(expected_dates) - len(incomplete)
+    logger.info(
+        "bootstrap audit — expected_sessions=%d, qualifying_sessions=%d, "
+        "incomplete_sessions=%d, incomplete=%s",
+        len(expected_dates),
+        qualifying,
+        len(incomplete),
+        [(item.isoformat(), count) for item, count in incomplete],
+    )
+    logger.info("bootstrap audit missing securities — %s", missing_by_date)
+    logger.info("bootstrap audit earliest prices — %s", earliest_prices)
+    print(
+        "AUSPEX_BOOTSTRAP_AUDIT_SUMMARY "
+        f"expected_sessions={len(expected_dates)} "
+        f"qualifying_sessions={qualifying} "
+        f"incomplete_sessions={len(incomplete)} "
+        f"incomplete={[(item.isoformat(), count) for item, count in incomplete]}",
+        flush=True,
+    )
+    print(
+        f"AUSPEX_BOOTSTRAP_AUDIT_MISSING_SECURITIES {missing_by_date}",
+        flush=True,
+    )
+    print(
+        f"AUSPEX_BOOTSTRAP_AUDIT_EARLIEST_PRICES {earliest_prices}",
+        flush=True,
+    )
+    diagnostic_dates = {
+        item
+        for item in (
+            min(incomplete_dates) if incomplete_dates else None,
+            max(incomplete_dates) if incomplete_dates else None,
+        )
+        if item is not None
+    }
+    leg_diagnostics = {}
+    for as_of_date in sorted(diagnostic_dates):
+        rows = {}
+        for security in universe.securities:
+            if security.id in valid_by_date.get(as_of_date, set()):
+                continue
+            snapshot = snapshot_by_date_security.get((as_of_date, security.id))
+            rows[security.ticker] = (
+                {
+                    "coverage": snapshot.coverage,
+                    "excluded_stale": snapshot.excluded_stale,
+                    "computable_legs": sorted(
+                        leg.value
+                        for leg, result in snapshot.legs.items()
+                        if result.computable
+                    ),
+                    "non_computable_legs": {
+                        leg.value: {"raw": result.raw, "z": result.z}
+                        for leg, result in snapshot.legs.items()
+                        if not result.computable
+                    },
+                }
+                if snapshot is not None
+                else {"missing_snapshot": True}
+            )
+        leg_diagnostics[as_of_date.isoformat()] = rows
+    logger.info("bootstrap audit leg diagnostics — %s", leg_diagnostics)
+    for as_of_date, rows in leg_diagnostics.items():
+        print(
+            f"AUSPEX_BOOTSTRAP_AUDIT_LEGS date={as_of_date} rows={rows}",
+            flush=True,
+        )
+    return 0
+
+
+async def _seed_edgar_watermarks_command() -> int:
+    from auspex.cli.bootstrap import extraction_backfill_start, raw_backfill_start
+    from auspex.collectors.base import watermark_key
+    from auspex.collectors.filing_collector import INTERESTING_FORMS
+    from auspex.config import load_universe
+    from auspex.models.document import Document
+    from auspex.persistence.cosmos_client import get_cosmos_context
+    from auspex.persistence.repositories import CosmosRepository, CosmosWatermarkStore
+    from auspex.providers.edgar import (
+        EdgarClient,
+        latest_accession_for_forms,
+        latest_filing_date_for_forms,
+    )
+    from auspex.settings import get_settings
+
+    today = datetime.now().date()
+    universe = load_universe()
+    cosmos = get_cosmos_context()
+    watermarks = CosmosWatermarkStore(cosmos)
+    documents = await CosmosRepository(cosmos, "documents", Document).all()
+
+    persisted: dict[tuple[str, str], str] = {}
+    for document in documents:
+        if document.accession_number is None:
+            continue
+        collector = "filing" if document.form_type in INTERESTING_FORMS else None
+        if collector is None:
+            continue
+        key = (collector, document.security_id)
+        persisted[key] = max(
+            persisted.get(key, document.accession_number),
+            document.accession_number,
+        )
+
+    settings = get_settings()
+    edgar = EdgarClient(
+        base_url=settings.edgar_base_url,
+        www_base_url=settings.edgar_www_base_url,
+        user_agent=settings.edgar_user_agent,
+        rate_limit_per_second=settings.edgar_rate_limit_per_second,
+    )
+    updated = 0
+    try:
+        for security in universe.securities:
+            submissions = await edgar.get_submissions(security.cik)
+            for collector, forms, cutoff in (
+                ("filing", INTERESTING_FORMS, extraction_backfill_start(today)),
+                ("insider", frozenset({"4"}), raw_backfill_start(today)),
+            ):
+                if collector == "insider":
+                    target_date = latest_filing_date_for_forms(
+                        submissions, forms, filed_before=None
+                    )
+                    target = (
+                        target_date.isoformat() if target_date is not None else None
+                    )
+                else:
+                    target = persisted.get((collector, security.id))
+                    if target is None:
+                        target = latest_accession_for_forms(
+                            submissions, forms, filed_before=cutoff
+                        )
+                if target is None:
+                    continue
+                key = watermark_key(collector, security.id)
+                current = await watermarks.get_watermark(key)
+                current_is_date = (
+                    current is not None
+                    and len(current) == 10
+                    and current[4] == "-"
+                    and current[7] == "-"
+                )
+                if (
+                    current is None
+                    or (collector == "insider" and not current_is_date)
+                    or target > current
+                ):
+                    await watermarks.set_watermark(key, target)
+                    updated += 1
+    finally:
+        await _aclose_unique(edgar, cosmos)
+
+    print(
+        f"AUSPEX_EDGAR_WATERMARKS seeded={updated} securities={len(universe.securities)}",
+        flush=True,
+    )
+    return 0
+
+
+def _serve_command(host: str, port: int) -> int:
+    import uvicorn
+
+    uvicorn.run("auspex.api.app:app", host=host, port=port)
+    return 0
+
+
+async def _bootstrap_command(
+    *, recovery_only: bool = False, replay_all: bool = False
+) -> int:
+    """arc42 §6.3 cold-start bootstrap — orchestrates
+    :class:`auspex.cli.bootstrap.BootstrapRunner` end to end (steps 1-12):
+    CIK/filer-profile verification, bulk ``submissions.zip``/``companyfacts.zip``
+    streaming, the 36-month raw and 18-month extraction/scoring backfill
+    windows (prices/FX, filings, Form 4, Channel A/B extraction,
+    fundamentals, news), day-by-day score replay, performance metrics, and
+    the confirmation-gated, read-only portfolio binding validation.
+
+    Repository/provider wiring mirrors :func:`_run_pipeline_command` (same
+    :mod:`auspex.persistence.repositories` Cosmos sinks, same
+    :func:`auspex.providers.factory.build_default_providers` provider set) —
+    ``_run_pipeline_command`` itself is left untouched. The exit code
+    reflects ``BootstrapReport.validation_passed`` (step 12: >=85 securities
+    scored on >=370 of the last 378 sessions).
+
+    ``user_id`` is not an operator-supplied argument: it is resolved from the
+    real source-ledger owner via ``PortfolioAdapter.resolve_owner_user_sk()``
+    (arc42 §5.7) immediately after the adapter is constructed, and is
+    used for every user_id-partitioned write this run makes. Binding absence
+    or ambiguity (no ``config/portfolio_mapping.yaml``, no resolvable/unique
+    ``app_users`` document, etc) is a hard failure — there is no well-defined
+    identity to bind writes to, so bootstrapping under a placeholder like the
+    literal ``"owner"`` would silently populate data nobody could read back.
+    """
+
+    from auspex.cli.bootstrap import (
+        MIN_SESSIONS_SCORED,
+        BootstrapRunner,
+        PortfolioBindingNotConfirmedError,
+        extraction_backfill_start,
+    )
+    from auspex.config import (
+        build_config_version,
+        load_cohorts,
+        load_fees,
+        load_label_mappings,
+        load_policy,
+        load_taxonomy,
+        load_universe,
+        load_weights,
+        load_xbrl_concepts,
+    )
+    from auspex.models.common import utc_now
+    from auspex.models.config_version import ConfigVersion
+    from auspex.models.performance import PerformanceMetric
+    from auspex.models.policy import Recommendation
+    from auspex.models.portfolio import PortfolioProjection
+    from auspex.models.run import RunManifest
+    from auspex.models.scoring import LegChange, ScoreSnapshot
+    from auspex.models.user_settings import UserSettings
+    from auspex.persistence.blob_client import get_blob_context
+    from auspex.persistence.cosmos_client import get_cosmos_context, get_source_ledger_context
+    from auspex.persistence.repositories import (
+        CosmosChannelAExtractionSink,
+        CosmosChannelBDigestSink,
+        CosmosDocumentSink,
+        CosmosFundamentalSink,
+        CosmosFxSink,
+        CosmosNarrativeSink,
+        CosmosPriceSink,
+        CosmosWatermarkStore,
+    )
+    from auspex.pipeline.context import PipelineContext, PipelineProviders, PipelineRepos
+    from auspex.portfolio.adapter import PortfolioAdapter
+    from auspex.portfolio.mapping import load_portfolio_mapping
+    from auspex.providers.factory import build_default_providers
+    from auspex.providers.openai_provider import AzureOpenAIClient
+    from auspex.providers.secrets import get_secret_resolver
+    from auspex.settings import get_settings
+
+    logger.info("bootstrap invoked (arc42 §6.3)")
+
+    today = datetime.now().date()
+    settings = get_settings()
+    universe = load_universe()
+    config = {
+        "weights": load_weights(),
+        "policy": load_policy(),
+        "xbrl_concepts": load_xbrl_concepts(),
+        "label_mappings": load_label_mappings(),
+        "cohorts": load_cohorts(),
+        "taxonomy": load_taxonomy(),
+        "fees": load_fees(),
+    }
+    config_version = build_config_version(f"{today.isoformat()}-bootstrap", utc_now())
+
+    # Read-only binding to the owner-owned portfolio ledger (arc42 §5.7,
+    # resolved before any provider/repo wiring so a bad binding
+    # fails fast. `resolve_owner_user_sk` is also the single source of truth
+    # for the `user_id` this run writes under — see docstring above.
+    source_ledger = None
+    try:
+        mapping = load_portfolio_mapping()
+        source_ledger = get_source_ledger_context()
+        adapter = PortfolioAdapter(source_ledger, mapping)
+        user_id = await adapter.resolve_owner_user_sk()
+    except Exception as exc:  # noqa: BLE001 - fatal: no unambiguous owner to bind writes to
+        logger.error(
+            "bootstrap: could not resolve the portfolio owner via PortfolioAdapter — cannot proceed "
+            "without an unambiguous user_sk for user-scoped writes: %s",
+            exc,
+            exc_info=True,
+        )
+        await _aclose_unique(source_ledger)
+        return 1
+
+    logger.info("bootstrap: resolved portfolio owner user_sk=%s", user_id)
+
+    secret_resolver = get_secret_resolver(settings.key_vault_url)
+    default_providers = await build_default_providers(settings, secret_resolver)
+
+    cosmos = get_cosmos_context()
+    blob = get_blob_context()
+
+    # Persist the config version bundle actually used by this run (arc42
+    # §5.11) — every `scores` row cites `config_version_id`, so without this
+    # write no historical score replayed by this bootstrap could be
+    # reproduced under its original weights/policy/taxonomy. No pipeline
+    # step performs this write; it must happen here, once, before the run.
+    config_version_repo = CosmosRepository(cosmos, "config_versions", ConfigVersion)
+    await config_version_repo.upsert(config_version)
+
+    # Channel A/B extraction + narrative generation (arc42 §5.4, §6.3 step 7),
+    # same construction as the nightly pipeline — absent if the endpoint
+    # can't be reached, in which case extraction steps are skipped rather
+    # than aborting the multi-hour run.
+    openai_client = None
+    try:
+        openai_client = AzureOpenAIClient(
+            endpoint=settings.aoai_endpoint,
+            api_version=settings.aoai_api_version,
+            tokens_per_minute=settings.aoai_tokens_per_minute,
+            tokens_per_minute_by_deployment={
+                settings.aoai_deployment_narrative: settings.aoai_narrative_tokens_per_minute,
+                settings.aoai_deployment_answer: settings.aoai_narrative_tokens_per_minute,
+            },
+        )
+    except Exception:  # noqa: BLE001 - degrade to no LLM extraction, do not abort the run
+        logger.warning(
+            "could not construct Azure OpenAI client; Channel A/B extraction will be skipped "
+            "for this bootstrap run",
+            exc_info=True,
+        )
+
+    providers = PipelineProviders(
+        price_provider=default_providers.price_and_fx,
+        fx_provider=default_providers.price_and_fx,
+        news_provider=default_providers.news,
+        edgar_client=default_providers.edgar,
+        openai_client=openai_client,
+        portfolio_reader=adapter,
+    )
+
+    # Reuse the ready-made Cosmos sink adapters from auspex.persistence.repositories
+    # (arc42 §5.3, §5.4, §5.11) rather than re-declaring local duplicates —
+    # channel_a_sink/channel_b_sink/narrative_sink are wired here (mirrored by
+    # _run_pipeline_command) since bootstrap's whole purpose (arc42 §6.3 step 7)
+    # is to actually run extraction over the 18-month window.
+    repos = PipelineRepos(
+        document_sink=CosmosDocumentSink(cosmos),
+        price_sink=CosmosPriceSink(cosmos),
+        fx_sink=CosmosFxSink(cosmos),
+        fundamental_sink=CosmosFundamentalSink(cosmos),
+        blob_sink=blob,
+        watermarks=CosmosWatermarkStore(cosmos),
+        channel_a_sink=CosmosChannelAExtractionSink(cosmos),
+        channel_b_sink=CosmosChannelBDigestSink(cosmos),
+        narrative_sink=CosmosNarrativeSink(cosmos),
+        score_repo=CosmosRepository(cosmos, "scores", ScoreSnapshot),
+        leg_change_repo=CosmosRepository(cosmos, "leg_changes", LegChange),
+        recommendation_repo=CosmosRepository(cosmos, "recommendations", Recommendation),
+        run_repo=CosmosRepository(cosmos, "runs", RunManifest),
+        portfolio_projection_repo=CosmosRepository(cosmos, "portfolio_projection", PortfolioProjection),
+        user_settings_repo=CosmosRepository(
+            cosmos,
+            "user_settings",
+            UserSettings,
+        ),
+        config_version_repo=config_version_repo,
+    )
+
+    def context_factory(as_of: date) -> PipelineContext:
+        """Shares the same repos/providers across the whole backfill window
+        (per ``BootstrapRunner``'s contract) while giving every step/replayed
+        day its own scratch state (new-document/accession tracking, etc)."""
+
+        ctx = PipelineContext(
+            universe=universe, config=config, as_of_date=as_of, user_id=user_id, repos=repos, providers=providers
+        )
+        ctx.__dict__["_config_version_id"] = config_version.id
+        return ctx
+
+    runner = BootstrapRunner(universe=universe, context_factory=context_factory)
+
+    try:
+        if recovery_only:
+            seed_ctx = context_factory(today)
+            binding = await runner.bind_and_validate_portfolio(
+                adapter,
+                today,
+                confirmed=settings.confirm_portfolio_binding,
+            )
+            await runner.extract_and_collect_fundamentals(
+                seed_ctx,
+                include_fundamentals=True,
+            )
+            start_date = extraction_backfill_start(today)
+            (
+                sessions_scored,
+                sessions_meeting_security_threshold,
+                completed_dates,
+            ) = await runner.existing_replay_coverage(seed_ctx, start_date, today)
+            if replay_all or sessions_meeting_security_threshold < MIN_SESSIONS_SCORED:
+                await runner.replay_scoring(
+                    start_date,
+                    today,
+                    completed_dates=set() if replay_all else completed_dates,
+                )
+                (
+                    sessions_scored,
+                    sessions_meeting_security_threshold,
+                    _,
+                ) = await runner.existing_replay_coverage(seed_ctx, start_date, today)
+            metrics = await runner.compute_performance_metrics(
+                seed_ctx,
+                performance_repo=CosmosRepository(
+                    cosmos, "performance", PerformanceMetric
+                ),
+            )
+            passed = (
+                runner.validate(
+                    sessions_scored, sessions_meeting_security_threshold
+                )
+                and binding.is_valid
+                and bool(metrics)
+            )
+            logger.info(
+                "bootstrap recovery complete — sessions_scored=%d, "
+                "sessions_meeting_security_threshold=%d, performance_metrics=%d, "
+                "validation_passed=%s",
+                sessions_scored,
+                sessions_meeting_security_threshold,
+                len(metrics),
+                passed,
+            )
+            return 0 if passed else 1
+
+        company_tickers = await default_providers.edgar.get_company_tickers()
+        report = await runner.run(
+            as_of_date=today,
+            company_tickers=company_tickers,
+            edgar_client=default_providers.edgar,
+            user_agent=settings.edgar_user_agent,
+            rate_limit_per_second=settings.edgar_rate_limit_per_second,
+            portfolio_adapter=adapter,
+            confirmed=settings.confirm_portfolio_binding,
+            blob_sink=blob,
+            performance_repo=CosmosRepository(cosmos, "performance", PerformanceMetric),
+        )
+    except PortfolioBindingNotConfirmedError as exc:
+        logger.error("bootstrap: halted before proceeding — %s", exc)
+        return 1
+    finally:
+        await _aclose_unique(
+            default_providers.price_and_fx,
+            default_providers.news,
+            default_providers.edgar,
+            openai_client,
+            secret_resolver,
+            blob,
+            source_ledger,
+            cosmos,
+        )
+
+    if report.cik_mismatches:
+        logger.warning("bootstrap: %d CIK mismatch(es): %s", len(report.cik_mismatches), report.cik_mismatches)
+    if report.filer_profile_mismatches:
+        logger.warning(
+            "bootstrap: %d filer_profile mismatch(es): %s",
+            len(report.filer_profile_mismatches),
+            report.filer_profile_mismatches,
+        )
+
+    logger.info(
+        "bootstrap: complete — sessions_scored=%d, sessions_meeting_security_threshold=%d, "
+        "bytes_transferred=%d, performance_metrics=%d, validation_passed=%s",
+        report.sessions_scored,
+        report.sessions_meeting_security_threshold,
+        report.bytes_transferred,
+        len(report.performance_metrics),
+        report.validation_passed,
+    )
+    return 0 if report.validation_passed else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # Provider credentials are query parameters for some upstream APIs.
+    # httpx logs full request URLs at INFO, so production logs must never
+    # inherit that level.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("azure").setLevel(logging.WARNING)
+    logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == "nightly":
+        return asyncio.run(_run_pipeline_command(_parse_date(args.date)))
+    if args.command == "bootstrap":
+        return asyncio.run(_bootstrap_command())
+    if args.command == "bootstrap-recover":
+        return asyncio.run(
+            _bootstrap_command(
+                recovery_only=True,
+                replay_all=args.replay_all,
+            )
+        )
+    if args.command == "bootstrap-audit":
+        return asyncio.run(_bootstrap_audit_command())
+    if args.command == "seed-edgar-watermarks":
+        return asyncio.run(_seed_edgar_watermarks_command())
+    if args.command == "performance":
+        return asyncio.run(_performance_command(_parse_date(args.date)))
+    if args.command == "serve":
+        return _serve_command(args.host, args.port)
+
+    parser.print_help()  # pragma: no cover - defensive, argparse enforces required subcommand
+    return 1
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())

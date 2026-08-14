@@ -1,0 +1,57 @@
+# Theme taxonomy - arc42 5.4 Channel A `theme_claims[].theme_id`, versioned as
+# `taxonomy_version` and part of the extraction cache key (content_hash + model_version
+# + prompt_version + schema_version + taxonomy_version). Changing this file invalidates
+# the extraction cache and triggers controlled re-extraction.
+schema_version: "4.0"
+config_type: taxonomy
+taxonomy_version: themes-2026-08
+
+themes:
+  - id: ai-datacenter-infrastructure
+    label: "AI datacenter infrastructure"
+  - id: advanced-packaging
+    label: "Advanced packaging"
+  - id: optical-interconnect
+    label: "Optical interconnect / networking"
+  - id: liquid-cooling
+    label: "Liquid cooling / thermal management"
+  - id: power-delivery
+    label: "Power delivery and grid infrastructure"
+  - id: foundry-capacity
+    label: "Foundry and fab capacity expansion"
+  - id: edge-ai
+    label: "Edge AI / on-device inference"
+  - id: agentic-software
+    label: "Agentic AI software platforms"
+  - id: quantum-computing
+    label: "Quantum computing"
+  - id: robotics-automation
+    label: "Robotics and physical automation"
+  - id: analog-mixed-signal
+    label: "Analog / mixed-signal semiconductors"
+  - id: memory-storage
+    label: "Memory and storage"
+  - id: hyperscaler-capex
+    label: "Hyperscaler capital expenditure cycle"
+  - id: export-controls
+    label: "Export controls / trade policy exposure"
+  - id: custom-silicon
+    label: "Custom silicon / ASIC design wins"
+
+risk_categories:
+  - MARGIN
+  - SUPPLY
+  - REGULATORY
+  - CUSTOMER_CONCENTRATION
+  - COMPETITION
+  - LITIGATION
+  - LIQUIDITY
+  - OTHER
+
+narrative_claim_types:
+  - TAM_EXPANSION
+  - NEW_PRODUCT
+  - PARTNERSHIP
+  - DESIGN_WIN
+  - CAPACITY_EXPANSION
+  - MANAGEMENT_CHANGE

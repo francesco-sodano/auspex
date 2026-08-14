@@ -1,0 +1,47 @@
+name: auspex
+metadata:
+  template: auspex-regulated-ai-mvp@1.0
+
+infra:
+  provider: bicep
+  path: ./infra
+
+services:
+  api:
+    project: .
+    host: containerapp
+    language: python
+    docker:
+      path: ./Dockerfile
+      context: .
+      buildArgs:
+        - PIP_INDEX_URL=${AUSPEX_PYPI_INDEX_URL}
+  pipeline:
+    project: .
+    host: containerapp
+    language: python
+    docker:
+      path: ./Dockerfile
+      context: .
+      buildArgs:
+        - PIP_INDEX_URL=${AUSPEX_PYPI_INDEX_URL}
+  performance:
+    project: .
+    host: containerapp
+    language: python
+    docker:
+      path: ./Dockerfile
+      context: .
+      buildArgs:
+        - PIP_INDEX_URL=${AUSPEX_PYPI_INDEX_URL}
+
+hooks:
+  postprovision:
+    windows:
+      shell: pwsh
+      run: ./scripts/azd-postprovision.ps1
+      interactive: false
+    posix:
+      shell: sh
+      run: sh ./scripts/azd-postprovision.sh
+      interactive: false

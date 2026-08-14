@@ -1,8 +1,0 @@
-{
-  "namespace": "usertypes",
-  "id": "810000000000000001",
-  "name": "issuedBy",
-  "namespaceType": "Custom",
-  "source": {"entityTypeId": "710000000000000001"},
-  "target": {"entityTypeId": "720000000000000001"}
-}

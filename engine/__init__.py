@@ -1,1 +1,0 @@
-"""Deterministic Auspex analytics engines."""

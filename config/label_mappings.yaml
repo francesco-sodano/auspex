@@ -1,0 +1,63 @@
+# Channel A enum -> numeric mappings - arc42 4 "central commitment" / 5.4
+#
+# The LLM only ever selects one of these enum labels; the numeric value used in
+# scoring arithmetic lives here, versioned, and is never touched by model output.
+# Changing a mapping bumps schema_version and creates a new config_versions row;
+# historical scores keep referencing the config_version_id in effect when computed.
+schema_version: "4.0"
+config_type: label_mappings
+
+materiality:
+  HIGH: "1.0"
+  MEDIUM: "0.5"
+  LOW: "0.2"
+  NONE: "0.0"
+
+sentiment:
+  POSITIVE: "1.0"
+  NEUTRAL: "0.0"
+  NEGATIVE: "-1.0"
+  MIXED: "0.0"
+
+guidance_direction:
+  RAISED: "1.0"
+  MAINTAINED: "0.0"
+  LOWERED: "-1.0"
+  WITHDRAWN: "-1.0"
+  NONE: "0.0"
+
+novelty:
+  NEW_INFORMATION: "1.0"
+  RESTATEMENT: "0.2"
+  ROUTINE: "0.0"
+
+theme_strength:
+  STRONG: "1.0"
+  MODERATE: "0.6"
+  WEAK: "0.25"
+
+risk_severity:
+  HIGH: "1.0"
+  MEDIUM: "0.5"
+  LOW: "0.2"
+
+narrative_claim_strength:
+  STRONG: "1.0"
+  MODERATE: "0.6"
+  WEAK: "0.25"
+
+extraction_confidence:
+  HIGH: "1.0"
+  MEDIUM: "0.6"
+  LOW: "0.3"
+
+guidance_language_shift:
+  FIRMED: "1.0"
+  UNCHANGED: "0.0"
+  HEDGED: "-0.5"
+  WITHDRAWN: "-1.0"
+
+mda_tone_shift:
+  MORE_CONFIDENT: "1.0"
+  UNCHANGED: "0.0"
+  MORE_CAUTIOUS: "-1.0"

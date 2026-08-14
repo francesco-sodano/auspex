@@ -11,6 +11,7 @@ venv/
 .env
 *.egg-info/
 .pytest_cache/
+.ruff_cache/
 .coverage
 htmlcov/
 dist/
@@ -21,22 +22,23 @@ node_modules/
 dist/
 .next/
 
-# Azure Functions
-local.settings.json
-.python_packages/
-function-deploy.zip
-
-# Local backfill manifests
-.backfill/
-
 # Deployment-specific state and parameter overrides
-.azure/
+.azure/*
+!.azure/deployment-plan.md
 infra/params/*.local.json
-.fabric-bound/
+infra/*.local.bicepparam
+*.whatif.json
+whatif*.json
+whatif*.txt
+*what-if*.json
+*what-if*.txt
+main.json
+prod.json
+infra/main.json
+infra/template.json
 
-# Fabric / Jupyter
-.ipynb_checkpoints/
-*.ipynb_checkpoints
+# Local project history and operator notes (never publish)
+.local/
 
 # OS
 .DS_Store

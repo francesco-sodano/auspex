@@ -1,1 +1,0 @@
-"""Benchmark prices connector package."""

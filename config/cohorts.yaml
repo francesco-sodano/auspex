@@ -1,0 +1,41 @@
+# Cohort tree - arc42 5.2
+#
+# Three-level fallback ladder used by auspex.scoring.normalize.assign_cohort_scope:
+#   len(cohort)  >= 12 -> scope=cohort,  confidence=HIGH
+#   len(parent)  >= 8  -> scope=parent,  confidence=MEDIUM
+#   else               -> scope=universe, confidence=LOW
+#
+# "parent" below is the immediate super-cohort; "universe" is always the full 104.
+schema_version: "4.0"
+
+super_cohorts:
+  semiconductors:
+    - semi-compute
+    - semi-analog-mixed
+    - semi-cap-equipment
+  ai-infrastructure:
+    - optical-networking
+    - datacenter-power-cooling
+  ai-software-and-emerging:
+    - ai-software-platforms
+    - emerging-ai-compute
+  digital-platforms:
+    - large-cap-digital-platforms
+
+cohorts:
+  semi-compute:
+    parent: semiconductors
+  semi-analog-mixed:
+    parent: semiconductors
+  semi-cap-equipment:
+    parent: semiconductors
+  optical-networking:
+    parent: ai-infrastructure
+  datacenter-power-cooling:
+    parent: ai-infrastructure
+  ai-software-platforms:
+    parent: ai-software-and-emerging
+  emerging-ai-compute:
+    parent: ai-software-and-emerging
+  large-cap-digital-platforms:
+    parent: digital-platforms

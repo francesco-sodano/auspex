@@ -1,0 +1,630 @@
+# Auspex fixed universe (104 securities) - arc42 5.2
+# Generated deterministically from SEC EDGAR company_tickers.json and the configured cohort policy.
+# filer_profile is a bootstrap HYPOTHESIS; auspex bootstrap step 2 verifies it against EDGAR formType
+# history and fails loudly on mismatch (arc42 5.2 'Filer profiles').
+schema_version: "4.0"
+securities:
+  - ticker: NVDA
+    cik: "0001045810"
+    name: "NVIDIA CORP"
+    cohort: semi-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: AMD
+    cik: "0000002488"
+    name: "ADVANCED MICRO DEVICES INC"
+    cohort: semi-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: INTC
+    cik: "0000050863"
+    name: "INTEL CORP"
+    cohort: semi-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: AVGO
+    cik: "0001730168"
+    name: "Broadcom Inc."
+    cohort: semi-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: MRVL
+    cik: "0001835632"
+    name: "Marvell Technology, Inc."
+    cohort: semi-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: QCOM
+    cik: "0000804328"
+    name: "QUALCOMM INC/DE"
+    cohort: semi-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: ARM
+    cik: "0001973239"
+    name: "ARM HOLDINGS PLC /UK"
+    cohort: semi-compute
+    filer_profile: FPI
+    investable: true
+  - ticker: MU
+    cik: "0000723125"
+    name: "MICRON TECHNOLOGY INC"
+    cohort: semi-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: SMCI
+    cik: "0001375365"
+    name: "Super Micro Computer, Inc."
+    cohort: semi-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: ALAB
+    cik: "0001736297"
+    name: "Astera Labs, Inc."
+    cohort: semi-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: CRDO
+    cik: "0001807794"
+    name: "Credo Technology Group Holding Ltd"
+    cohort: semi-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: LSCC
+    cik: "0000855658"
+    name: "LATTICE SEMICONDUCTOR CORP"
+    cohort: semi-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: MPWR
+    cik: "0001280452"
+    name: "MONOLITHIC POWER SYSTEMS, INC."
+    cohort: semi-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: AMBA
+    cik: "0001280263"
+    name: "AMBARELLA INC"
+    cohort: semi-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: RMBS
+    cik: "0000917273"
+    name: "RAMBUS INC"
+    cohort: semi-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: TXN
+    cik: "0000097476"
+    name: "TEXAS INSTRUMENTS INC"
+    cohort: semi-analog-mixed
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: ADI
+    cik: "0000006281"
+    name: "ANALOG DEVICES INC"
+    cohort: semi-analog-mixed
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: MCHP
+    cik: "0000827054"
+    name: "MICROCHIP TECHNOLOGY INC"
+    cohort: semi-analog-mixed
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: NXPI
+    cik: "0001413447"
+    name: "NXP Semiconductors N.V."
+    cohort: semi-analog-mixed
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: "ON"
+    cik: "0001097864"
+    name: "ON SEMICONDUCTOR CORP"
+    cohort: semi-analog-mixed
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: SWKS
+    cik: "0000004127"
+    name: "SKYWORKS SOLUTIONS, INC."
+    cohort: semi-analog-mixed
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: QRVO
+    cik: "0001604778"
+    name: "Qorvo, Inc."
+    cohort: semi-analog-mixed
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: POWI
+    cik: "0000833640"
+    name: "POWER INTEGRATIONS INC"
+    cohort: semi-analog-mixed
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: DIOD
+    cik: "0000029002"
+    name: "DIODES INC /DEL/"
+    cohort: semi-analog-mixed
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: ALGM
+    cik: "0000866291"
+    name: "ALLEGRO MICROSYSTEMS, INC."
+    cohort: semi-analog-mixed
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: SLAB
+    cik: "0001038074"
+    name: "SILICON LABORATORIES INC."
+    cohort: semi-analog-mixed
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: SITM
+    cik: "0001451809"
+    name: "SITIME Corp"
+    cohort: semi-analog-mixed
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: CAMT
+    cik: "0001109138"
+    name: "CAMTEK LTD"
+    cohort: semi-cap-equipment
+    filer_profile: FPI
+    investable: true
+  - ticker: AMAT
+    cik: "0000006951"
+    name: "APPLIED MATERIALS INC /DE"
+    cohort: semi-cap-equipment
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: LRCX
+    cik: "0000707549"
+    name: "LAM RESEARCH CORP"
+    cohort: semi-cap-equipment
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: KLAC
+    cik: "0000319201"
+    name: "KLA CORP"
+    cohort: semi-cap-equipment
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: ONTO
+    cik: "0000704532"
+    name: "ONTO INNOVATION INC."
+    cohort: semi-cap-equipment
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: ACLS
+    cik: "0001113232"
+    name: "AXCELIS TECHNOLOGIES INC"
+    cohort: semi-cap-equipment
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: UCTT
+    cik: "0001275014"
+    name: "Ultra Clean Holdings, Inc."
+    cohort: semi-cap-equipment
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: ICHR
+    cik: "0001652535"
+    name: "ICHOR HOLDINGS, LTD."
+    cohort: semi-cap-equipment
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: FORM
+    cik: "0001039399"
+    name: "FORMFACTOR INC"
+    cohort: semi-cap-equipment
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: AEIS
+    cik: "0000927003"
+    name: "ADVANCED ENERGY INDUSTRIES INC"
+    cohort: semi-cap-equipment
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: VECO
+    cik: "0000103145"
+    name: "VEECO INSTRUMENTS INC"
+    cohort: semi-cap-equipment
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: KLIC
+    cik: "0000056978"
+    name: "KULICKE & SOFFA INDUSTRIES INC"
+    cohort: semi-cap-equipment
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: COHU
+    cik: "0000021535"
+    name: "COHU INC"
+    cohort: semi-cap-equipment
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: ASML
+    cik: "0000937966"
+    name: "ASML HOLDING NV"
+    cohort: semi-cap-equipment
+    filer_profile: FPI
+    investable: true
+  - ticker: NVMI
+    cik: "0001109345"
+    name: "NOVA LTD."
+    cohort: semi-cap-equipment
+    filer_profile: FPI
+    investable: true
+  - ticker: COHR
+    cik: "0000820318"
+    name: "COHERENT CORP."
+    cohort: optical-networking
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: LITE
+    cik: "0001633978"
+    name: "Lumentum Holdings Inc."
+    cohort: optical-networking
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: FN
+    cik: "0001408710"
+    name: "Fabrinet"
+    cohort: optical-networking
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: AAOI
+    cik: "0001158114"
+    name: "APPLIED OPTOELECTRONICS, INC."
+    cohort: optical-networking
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: POET
+    cik: "0001437424"
+    name: "POET TECHNOLOGIES INC."
+    cohort: optical-networking
+    filer_profile: FPI
+    investable: true
+  - ticker: CIEN
+    cik: "0000936395"
+    name: "CIENA CORP"
+    cohort: optical-networking
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: ANET
+    cik: "0001596532"
+    name: "Arista Networks, Inc."
+    cohort: optical-networking
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: ADTN
+    cik: "0000926282"
+    name: "ADTRAN Holdings, Inc."
+    cohort: optical-networking
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: HLIT
+    cik: "0000851310"
+    name: "HARMONIC INC."
+    cohort: optical-networking
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: DZSI
+    cik: "0001101680"
+    name: "DZS INC."
+    cohort: optical-networking
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: CALX
+    cik: "0001406666"
+    name: "CALIX, INC"
+    cohort: optical-networking
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: EXTR
+    cik: "0001078271"
+    name: "EXTREME NETWORKS INC"
+    cohort: optical-networking
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: VRT
+    cik: "0001674101"
+    name: "Vertiv Holdings Co"
+    cohort: datacenter-power-cooling
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: MOD
+    cik: "0000067347"
+    name: "MODINE MANUFACTURING CO"
+    cohort: datacenter-power-cooling
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: NVT
+    cik: "0001720635"
+    name: "nVent Electric plc"
+    cohort: datacenter-power-cooling
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: ETN
+    cik: "0001551182"
+    name: "Eaton Corp plc"
+    cohort: datacenter-power-cooling
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: PWR
+    cik: "0001050915"
+    name: "QUANTA SERVICES, INC."
+    cohort: datacenter-power-cooling
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: HUBB
+    cik: "0000048898"
+    name: "HUBBELL INC"
+    cohort: datacenter-power-cooling
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: AAON
+    cik: "0000824142"
+    name: "AAON, INC."
+    cohort: datacenter-power-cooling
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: JCI
+    cik: "0000833444"
+    name: "Johnson Controls International plc"
+    cohort: datacenter-power-cooling
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: TT
+    cik: "0001466258"
+    name: "Trane Technologies plc"
+    cohort: datacenter-power-cooling
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: LII
+    cik: "0001069202"
+    name: "LENNOX INTERNATIONAL INC"
+    cohort: datacenter-power-cooling
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: CARR
+    cik: "0001783180"
+    name: "CARRIER GLOBAL Corp"
+    cohort: datacenter-power-cooling
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: GNRC
+    cik: "0001474735"
+    name: "GENERAC HOLDINGS INC."
+    cohort: datacenter-power-cooling
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: BE
+    cik: "0001664703"
+    name: "Bloom Energy Corp"
+    cohort: datacenter-power-cooling
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: PLTR
+    cik: "0001321655"
+    name: "Palantir Technologies Inc."
+    cohort: ai-software-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: SNOW
+    cik: "0001640147"
+    name: "Snowflake Inc."
+    cohort: ai-software-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: DDOG
+    cik: "0001561550"
+    name: "Datadog, Inc."
+    cohort: ai-software-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: MDB
+    cik: "0001441816"
+    name: "MongoDB, Inc."
+    cohort: ai-software-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: NOW
+    cik: "0001373715"
+    name: "ServiceNow, Inc."
+    cohort: ai-software-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: CRM
+    cik: "0001108524"
+    name: "Salesforce, Inc."
+    cohort: ai-software-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: AI
+    cik: "0001577526"
+    name: "C3.ai, Inc."
+    cohort: ai-software-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: PATH
+    cik: "0001734722"
+    name: "UiPath, Inc."
+    cohort: ai-software-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: TEM
+    cik: "0001717115"
+    name: "Tempus AI, Inc."
+    cohort: ai-software-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: APP
+    cik: "0001751008"
+    name: "AppLovin Corp"
+    cohort: ai-software-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: ESTC
+    cik: "0001707753"
+    name: "Elastic N.V."
+    cohort: ai-software-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: CFLT
+    cik: "0001699838"
+    name: "Confluent, Inc."
+    cohort: ai-software-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: GTLB
+    cik: "0001653482"
+    name: "Gitlab Inc."
+    cohort: ai-software-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: RGTI
+    cik: "0001838359"
+    name: "Rigetti Computing, Inc."
+    cohort: emerging-ai-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: IONQ
+    cik: "0001824920"
+    name: "IonQ, Inc."
+    cohort: emerging-ai-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: QBTS
+    cik: "0001907982"
+    name: "D-Wave Quantum Inc."
+    cohort: emerging-ai-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: QUBT
+    cik: "0001758009"
+    name: "Quantum Computing Inc."
+    cohort: emerging-ai-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: ARQQ
+    cik: "0001859690"
+    name: "Arqit Quantum Inc."
+    cohort: emerging-ai-compute
+    filer_profile: FPI
+    investable: true
+  - ticker: LAES
+    cik: "0001951222"
+    name: "SEALSQ Corp"
+    cohort: emerging-ai-compute
+    filer_profile: FPI
+    investable: true
+  - ticker: BBAI
+    cik: "0001836981"
+    name: "BigBear.ai Holdings, Inc."
+    cohort: emerging-ai-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: SOUN
+    cik: "0001840856"
+    name: "SOUNDHOUND AI, INC."
+    cohort: emerging-ai-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: INOD
+    cik: "0000903651"
+    name: "INNODATA INC"
+    cohort: emerging-ai-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: SERV
+    cik: "0001832483"
+    name: "Serve Robotics Inc. /DE/"
+    cohort: emerging-ai-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: KSCP
+    cik: "0001600983"
+    name: "Knightscope, Inc."
+    cohort: emerging-ai-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: NNDM
+    cik: "0001643303"
+    name: "Nano Dimension Ltd."
+    cohort: emerging-ai-compute
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: MSFT
+    cik: "0000789019"
+    name: "MICROSOFT CORP"
+    cohort: large-cap-digital-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: AMZN
+    cik: "0001018724"
+    name: "AMAZON COM INC"
+    cohort: large-cap-digital-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: GOOGL
+    cik: "0001652044"
+    name: "Alphabet Inc."
+    cohort: large-cap-digital-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: META
+    cik: "0001326801"
+    name: "Meta Platforms, Inc."
+    cohort: large-cap-digital-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: AAPL
+    cik: "0000320193"
+    name: "Apple Inc."
+    cohort: large-cap-digital-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: ORCL
+    cik: "0001341439"
+    name: "ORACLE CORP"
+    cohort: large-cap-digital-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: ADBE
+    cik: "0000796343"
+    name: "ADOBE INC."
+    cohort: large-cap-digital-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: IBM
+    cik: "0000051143"
+    name: "INTERNATIONAL BUSINESS MACHINES CORP"
+    cohort: large-cap-digital-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: SAP
+    cik: "0001000184"
+    name: "SAP SE"
+    cohort: large-cap-digital-platforms
+    filer_profile: FPI
+    investable: true
+  - ticker: NFLX
+    cik: "0001065280"
+    name: "NETFLIX INC"
+    cohort: large-cap-digital-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: INTU
+    cik: "0000896878"
+    name: "INTUIT INC."
+    cohort: large-cap-digital-platforms
+    filer_profile: DOMESTIC
+    investable: true
+  - ticker: CSCO
+    cik: "0000858877"
+    name: "CISCO SYSTEMS, INC."
+    cohort: large-cap-digital-platforms
+    filer_profile: DOMESTIC
+    investable: true

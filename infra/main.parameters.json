@@ -1,0 +1,60 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {
+      "value": "${AZURE_ENV_NAME}"
+    },
+    "location": {
+      "value": "${AZURE_LOCATION}"
+    },
+    "openAiLocation": {
+      "value": "${AZURE_OPENAI_LOCATION}"
+    },
+    "authTenantId": {
+      "value": "${AUSPEX_AUTH_TENANT_ID}"
+    },
+    "authClientId": {
+      "value": "${AUSPEX_AUTH_CLIENT_ID}"
+    },
+    "ownerProviderUserId": {
+      "value": "${AUSPEX_OWNER_OBJECT_ID}"
+    },
+    "secEdgarUserAgent": {
+      "value": "${AUSPEX_EDGAR_USER_AGENT}"
+    },
+    "alertEmailAddress": {
+      "value": "${AUSPEX_ALERT_EMAIL}"
+    },
+    "priceApiKey": {
+      "value": "${AUSPEX_PRICE_API_KEY}"
+    },
+    "newsApiKey": {
+      "value": "${AUSPEX_NEWS_API_KEY}"
+    },
+    "existingKeyVaultName": {
+      "value": "${AUSPEX_EXISTING_KEY_VAULT_NAME}"
+    },
+    "existingKeyVaultResourceGroup": {
+      "value": "${AUSPEX_EXISTING_KEY_VAULT_RESOURCE_GROUP}"
+    },
+    "existingLedgerAccountName": {
+      "value": "${AUSPEX_EXISTING_LEDGER_ACCOUNT_NAME}"
+    },
+    "existingLedgerResourceGroup": {
+      "value": "${AUSPEX_EXISTING_LEDGER_RESOURCE_GROUP}"
+    },
+    "ledgerDatabaseName": {
+      "value": "${AUSPEX_LEDGER_DATABASE_NAME}"
+    },
+    "monthlyBudgetAmount": {
+      "value": "${AUSPEX_MONTHLY_BUDGET}"
+    },
+    "extractionModelCapacity": {
+      "value": "${AUSPEX_EXTRACTION_MODEL_CAPACITY}"
+    },
+    "narrativeModelCapacity": {
+      "value": "${AUSPEX_NARRATIVE_MODEL_CAPACITY}"
+    }
+  }
+}

@@ -1,0 +1,109 @@
+# Policy gate thresholds - arc42 5.6
+schema_version: "4.0"
+config_type: policy
+
+coverage:
+  minimum_for_buy: "0.80"
+  minimum_for_scoring_confidence: "0.80"
+
+staleness:
+  max_stale_sessions: 2
+
+direction:
+  strengthening_delta7d: "0.15"
+  weakening_delta7d: "-0.15"
+
+buy:
+  min_percentile: 75
+  min_coverage: "0.80"
+  min_cohort_confidence: MEDIUM
+  min_valuation_brake_z: "-1.0"
+  max_resulting_weight_pct: "15"
+  min_cash_after_trade_chf: "3000"
+  max_cost_pct_of_trade: "0.01"
+  min_trade_chf: "2000"
+
+add:
+  min_percentile: 70
+  min_weight_gap_pct: "3"
+
+trim:
+  max_weight_pct: "15"
+  max_percentile_weakening: 40
+
+sell:
+  max_percentile: 25
+  min_consecutive_weakening_sessions: 10
+  max_thesis_linkage_z: "-1.0"
+
+target_weight:
+  max_pct: "15"
+  floor_pct: "4"
+
+risk_profiles:
+  CONSERVATIVE:
+    buy_min_percentile: 85
+    buy_min_coverage: "0.90"
+    buy_min_cohort_confidence: HIGH
+    buy_min_valuation_brake_z: "-0.5"
+    max_resulting_weight_pct: "10"
+    default_cash_reserve_chf: "5000"
+    max_cost_pct_of_trade: "0.0075"
+    min_trade_chf: "2000"
+    add_min_percentile: 80
+    add_min_weight_gap_pct: "4"
+    trim_max_weight_pct: "10"
+    trim_max_percentile_weakening: 50
+    sell_max_percentile: 30
+    sell_min_consecutive_weakening_sessions: 8
+    sell_max_thesis_linkage_z: "-0.75"
+    target_weight_max_pct: "10"
+    target_weight_floor_pct: "3"
+  MODERATE:
+    buy_min_percentile: 75
+    buy_min_coverage: "0.80"
+    buy_min_cohort_confidence: MEDIUM
+    buy_min_valuation_brake_z: "-1.0"
+    max_resulting_weight_pct: "15"
+    default_cash_reserve_chf: "3000"
+    max_cost_pct_of_trade: "0.01"
+    min_trade_chf: "2000"
+    add_min_percentile: 70
+    add_min_weight_gap_pct: "3"
+    trim_max_weight_pct: "15"
+    trim_max_percentile_weakening: 40
+    sell_max_percentile: 25
+    sell_min_consecutive_weakening_sessions: 10
+    sell_max_thesis_linkage_z: "-1.0"
+    target_weight_max_pct: "15"
+    target_weight_floor_pct: "4"
+  AGGRESSIVE:
+    buy_min_percentile: 65
+    buy_min_coverage: "0.70"
+    buy_min_cohort_confidence: MEDIUM
+    buy_min_valuation_brake_z: "-1.5"
+    max_resulting_weight_pct: "20"
+    default_cash_reserve_chf: "1000"
+    max_cost_pct_of_trade: "0.015"
+    min_trade_chf: "1000"
+    add_min_percentile: 60
+    add_min_weight_gap_pct: "2"
+    trim_max_weight_pct: "20"
+    trim_max_percentile_weakening: 30
+    sell_max_percentile: 20
+    sell_min_consecutive_weakening_sessions: 15
+    sell_max_thesis_linkage_z: "-1.25"
+    target_weight_max_pct: "20"
+    target_weight_floor_pct: "5"
+
+assertions:
+  min_scored_securities: 85
+  max_hold_insufficient_data_fraction: "0.30"
+  # if 0 BUY actions fire, at least one eligible-but-no-cash case must be recorded,
+  # otherwise the run is flagged DEGRADED (arc42 5.6 post-run assertions).
+
+pipeline:
+  cron_nightly_utc: "0 2 * * *"
+  cron_performance_utc: "0 3 * * 0"
+  target_minutes: 25
+  hard_timeout_minutes: 45

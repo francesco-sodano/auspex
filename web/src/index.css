@@ -1,19 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 :root {
   color-scheme: dark;
-  --bg: #0c0d10;
-  --surface: #14161b;
-  --surface-2: #191c22;
-  --line: #292d35;
-  --line-2: #3a3f49;
-  --text: #e8eaed;
-  --muted: #9a9fa9;
-  --faint: #696f7b;
-  --gold: #c2a86b;
-  --gold-soft: rgba(194, 168, 107, .11);
-  --success: #87aa8a;
-  --danger: #b97b78;
-  --warning: #d3b36b;
-  --serif: 'Fraunces', Georgia, serif;
+  --bg: #0d0d0f;
+  --surface: #141519;
+  --surface-raised: #191b20;
+  --line: #292c33;
+  --line-strong: #3d414b;
+  --text: #ebe9e4;
+  --muted: #9b9da5;
+  --faint: #676a73;
+  --gold: #c9a227;
+  --gold-soft: rgba(201, 162, 39, .12);
+  --success: #79a982;
+  --danger: #c47d79;
+  --warning: #d0a958;
+  --serif: 'Spectral', Georgia, serif;
   --sans: 'Inter', 'Segoe UI', sans-serif;
   --mono: 'JetBrains Mono', Consolas, monospace;
   font-family: var(--sans);
@@ -25,8 +29,10 @@
 }
 
 * { box-sizing: border-box; }
+html { background: var(--bg); scroll-behavior: smooth; }
 html, body, #root { min-height: 100%; margin: 0; }
 body { min-width: 320px; background: var(--bg); }
-button, input { font: inherit; }
+button, input, textarea, select { font: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }
 a { color: inherit; }
+::selection { background: var(--gold); color: var(--bg); }

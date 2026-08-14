@@ -1,410 +1,358 @@
-// main.bicep — Auspex platform infrastructure
-// Scope: subscription (declares all resource groups and composes modules)
-//
-// Usage:
-//   az deployment sub create \
-//     --location switzerlandnorth \
-//     --template-file infra/main.bicep \
-//     --parameters @infra/params/dev.json
-//
-// Deployment order enforced by explicit dependsOn / output references:
-//   1.  Resource groups (all five, in parallel)
-//   1b. Network-VNet — VNet + subnets deployed immediately after RGs so subnet IDs
-//       exist before Function Apps configure VNet integration.
-//   2.  Monitor (Log Analytics + App Insights) — outputs App Insights connection string
-//   3.  Ingestion Function App + Static Web App (in parallel, after monitor + network-vnet)
-//   3b. Web API Function App (after Static Web App so its hostname is in CORS)
-//   4.  Key Vault — uses principal IDs for RBAC; stores App Insights connection string as secret
-//   5.  Cosmos DB — uses principal IDs for data-plane RBAC
-//   6.  Fabric Capacity — Bicep-managed; uses ingest func principal ID for Contributor RBAC
-//   7.  AI Search — uses web API func principal ID for Search Index Data Reader RBAC
-//   8.  Azure OpenAI — no cross-dependencies
-//  10.  Network — private DNS zones + private endpoints; deployed last because private
-//       endpoints require resource IDs from modules above. VNet ID flows from step 1b.
-//
-// Circular-dependency avoidance:
-//   Cosmos endpoint / KV name / Fabric capacity name: computed as deterministic local
-//   variables so Function Apps don't need to wait for those module outputs.
-
 targetScope = 'subscription'
 
-@description('Environment name')
-@allowed(['dev', 'prod'])
-param env string
+@description('Short AZD environment name used in resource names and tags.')
+@minLength(2)
+@maxLength(16)
+param environmentName string
 
-@description('Primary region for all resources that support Switzerland North')
-param location string = 'switzerlandnorth'
+@description('Primary Azure region.')
+param location string
 
-@description('UPN of the Fabric capacity administrator')
-param fabricAdminUpn string
+@description('Azure OpenAI region where the required GPT-4.1 models are available.')
+param openAiLocation string
 
-@description('Log Analytics retention in days (30 for dev, 90 for prod)')
-param logRetentionDays int = 30
+@description('Microsoft Entra tenant ID for the single-tenant SPA/API registration.')
+param authTenantId string
 
-@description('Email address for operational alerts')
+@description('Microsoft Entra application (client) ID used by browser PKCE and API token validation.')
+param authClientId string
+
+@description('Microsoft Entra object ID of the single portfolio owner.')
+@minLength(1)
+param ownerProviderUserId string
+
+@description('Descriptive SEC EDGAR user agent with a monitored contact address.')
+@minLength(8)
+param secEdgarUserAgent string
+
+@description('Email address for Azure Monitor alerts and budget notifications.')
 @minLength(3)
 param alertEmailAddress string
 
 @secure()
-@description('SEC EDGAR user agent with an operator-monitored contact address')
-@minLength(3)
-param edgarUserAgent string
+@description('Alpha Vantage API key stored in Key Vault during provisioning.')
+param priceApiKey string = ''
 
 @secure()
-@description('Alpha Vantage API key for enabled price, fundamental, FX, news, and ETF sources')
-@minLength(1)
-param alphaVantageApiKey string
+@description('Finnhub API key stored in Key Vault during provisioning.')
+param newsApiKey string = ''
 
-@secure()
-@description('Finnhub API key for the enabled company-news source')
-@minLength(1)
-param finnhubApiKey string
+@description('Existing Key Vault name. Leave empty to create a tenant-local vault.')
+param existingKeyVaultName string = ''
 
-@description('Fabric workspace GUID for OneLake bronze writes')
-@minLength(36)
-param onelakeWorkspaceId string
+@description('Resource group of the existing Key Vault. Required only when existingKeyVaultName is set.')
+param existingKeyVaultResourceGroup string = ''
 
-@description('Fabric Lakehouse name or item GUID for OneLake bronze writes')
-@minLength(1)
-param onelakeLakehouseName string
+@description('Existing Cosmos account containing app_users and portfolio_transactions. Leave empty to create one.')
+param existingLedgerAccountName string = ''
 
-@description('Fabric Warehouse SQL endpoint used by daily promotion')
-@minLength(1)
-param fabricWarehouseServer string
+@description('Resource group of the existing ledger Cosmos account.')
+param existingLedgerResourceGroup string = ''
 
-@description('Fabric Warehouse database used by daily promotion')
-param fabricWarehouseDatabase string = 'auspex_gold'
+@description('Database containing app_users and portfolio_transactions.')
+param ledgerDatabaseName string = 'auspex'
 
-@description('Calibrated maximum diluted-share growth; empty keeps score-driven increases fail-closed')
-param financingMaxDilutedShareGrowth string = ''
+@description('Monthly Azure budget amount in the subscription billing currency.')
+param monthlyBudgetAmount string = '165'
 
-@description('Calibrated minimum cash runway in years; empty keeps score-driven increases fail-closed')
-param financingMinCashRunwayYears string = ''
+@description('GPT-4.1-mini Global Standard capacity in thousands of tokens per minute.')
+param extractionModelCapacity string = '200'
 
-@description('Calibrated maximum shelf filing age in days; empty keeps score-driven increases fail-closed')
-param financingMaxShelfAgeDays string = ''
+@description('GPT-4.1 Global Standard capacity in thousands of tokens per minute.')
+param narrativeModelCapacity string = '30'
 
-@description('Application client ID for the Microsoft personal-account SWA auth registration')
-@minLength(1)
-param microsoftAuthClientId string
+@description('Placeholder image. azd replaces it on deployment.')
+param containerImage string = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
 
-@description('Git repository URL used by Static Web Apps')
-@minLength(1)
-param repositoryUrl string
+var resourceGroupName = 'rg-auspex-${environmentName}'
+var suffix = uniqueString(subscription().id, environmentName)
+var createsKeyVault = empty(existingKeyVaultName)
+var keyVaultName = createsKeyVault ? 'kv-auspex-${suffix}' : existingKeyVaultName
+var keyVaultResourceGroupName = createsKeyVault ? resourceGroupName : existingKeyVaultResourceGroup
+var createsLedger = empty(existingLedgerAccountName)
+var ledgerAccountName = createsLedger ? 'cosmos-auspex-ledger-${suffix}' : existingLedgerAccountName
+var ledgerResourceGroupName = createsLedger ? resourceGroupName : existingLedgerResourceGroup
+var loginEndpoint = environment().authentication.loginEndpoint
+var authAuthority = '${loginEndpoint}${authTenantId}'
+var authIssuer = '${loginEndpoint}${authTenantId}/v2.0'
+var authJwksUrl = '${loginEndpoint}${authTenantId}/discovery/v2.0/keys'
 
-@description('Git branch used by Static Web Apps')
-@minLength(1)
-param repositoryBranch string = 'main'
-
-@secure()
-@description('Client secret for the Microsoft personal-account SWA auth registration')
-@minLength(1)
-param microsoftAuthClientSecret string
-
-// ---------------------------------------------------------------------------
-// Deterministic resource names (no module output needed)
-// ---------------------------------------------------------------------------
-
-var cosmosAccountName = 'auspex-${env}-cosmos'
-// Cosmos DB endpoint follows the predictable pattern:
-var cosmosEndpoint = 'https://${cosmosAccountName}.documents.azure.com:443/'
-
-// Fabric capacity name — alphanumeric only, no hyphens
-var fabricCapacityName = 'auspex${env}fab'
-
-var kvName = 'auspex-${env}-kv'
-var aiSearchEndpoint = 'https://auspex-${env}-search.search.windows.net'
-var azureOpenAiEndpoint = 'https://auspex-${env}-openai.openai.azure.com/'
-
-// ---------------------------------------------------------------------------
-// Resource groups
-// ---------------------------------------------------------------------------
-
-resource rgShared 'Microsoft.Resources/resourceGroups@2024-03-01' = {
-  name: 'auspex-${env}-shared'
+resource resourceGroup 'Microsoft.Resources/resourceGroups@2024-03-01' = {
+  name: resourceGroupName
   location: location
-}
-
-resource rgIngest 'Microsoft.Resources/resourceGroups@2024-03-01' = {
-  name: 'auspex-${env}-ingest'
-  location: location
-}
-
-resource rgData 'Microsoft.Resources/resourceGroups@2024-03-01' = {
-  name: 'auspex-${env}-data'
-  location: location
-}
-
-resource rgAi 'Microsoft.Resources/resourceGroups@2024-03-01' = {
-  name: 'auspex-${env}-ai'
-  location: location
-}
-
-resource rgWeb 'Microsoft.Resources/resourceGroups@2024-03-01' = {
-  name: 'auspex-${env}-web'
-  location: location
-}
-
-// ---------------------------------------------------------------------------
-// Step 1b: VNet + subnets (shared RG) — must exist before Function Apps
-// ---------------------------------------------------------------------------
-
-module networkVnet 'modules/network-vnet.bicep' = {
-  name: 'networkVnet'
-  scope: rgShared
-  params: {
-    env: env
-    location: location
+  tags: {
+    application: 'auspex'
+    environment: environmentName
+    architecture: 'arc42'
+    'azd-env-name': environmentName
   }
 }
 
-// ---------------------------------------------------------------------------
-// Step 2: Observability (shared RG)
-// ---------------------------------------------------------------------------
-
-module monitor 'modules/monitor.bicep' = {
-  name: 'monitor'
-  scope: rgShared
-  params: {
-    env: env
-    location: location
-    retentionDays: logRetentionDays
-    alertEmailAddress: alertEmailAddress
-  }
+resource externalKeyVaultGroup 'Microsoft.Resources/resourceGroups@2024-03-01' existing = if (!createsKeyVault) {
+  name: keyVaultResourceGroupName
 }
 
-// ---------------------------------------------------------------------------
-// Step 3a: Ingestion Function App (ingest RG)
-// Deployed before Key Vault and Cosmos so their RBAC assignments can reference
-// this app's system-assigned managed identity principal ID.
-// ---------------------------------------------------------------------------
-
-module ingestFunc 'modules/functionapp.bicep' = {
-  name: 'ingestFunc'
-  scope: rgIngest
-  params: {
-    appName: 'auspex-${env}-func'
-    location: location
-    keyVaultName: kvName
-    isIngestion: true
-    cosmosEndpoint: cosmosEndpoint
-    fabricCapacityName: fabricCapacityName
-    fabricCapacityResourceGroup: rgData.name
-    fabricSubscriptionId: subscription().subscriptionId
-    onelakeWorkspaceId: onelakeWorkspaceId
-    onelakeLakehouseName: onelakeLakehouseName
-    fabricWarehouseServer: fabricWarehouseServer
-    fabricWarehouseDatabase: fabricWarehouseDatabase
-    aiSearchEndpoint: aiSearchEndpoint
-    azureOpenAiEndpoint: azureOpenAiEndpoint
-    vnetIntegrationSubnetId: networkVnet.outputs.ingestSubnetId
-    logAnalyticsWorkspaceId: monitor.outputs.workspaceId
-  }
+resource externalLedgerGroup 'Microsoft.Resources/resourceGroups@2024-03-01' existing = if (!createsLedger) {
+  name: ledgerResourceGroupName
 }
-
-// ---------------------------------------------------------------------------
-// Step 3b: Web API Function App (web RG)
-// ---------------------------------------------------------------------------
-
-module webApiFunc 'modules/functionapp.bicep' = {
-  name: 'webApiFunc'
-  scope: rgWeb
-  params: {
-    appName: 'auspex-${env}-wapi'
-    location: location
-    keyVaultName: kvName
-    isIngestion: false
-    cosmosEndpoint: cosmosEndpoint
-    aiSearchEndpoint: aiSearchEndpoint
-    azureOpenAiEndpoint: azureOpenAiEndpoint
-    financingMaxDilutedShareGrowth: financingMaxDilutedShareGrowth
-    financingMinCashRunwayYears: financingMinCashRunwayYears
-    financingMaxShelfAgeDays: financingMaxShelfAgeDays
-    vnetIntegrationSubnetId: networkVnet.outputs.wapiSubnetId
-    logAnalyticsWorkspaceId: monitor.outputs.workspaceId
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Step 3: Key Vault (shared RG)
-// Needs both Function App principal IDs for RBAC assignments.
-// Stores the App Insights connection string as a secret.
-// ---------------------------------------------------------------------------
-
-module keyVault 'modules/keyvault.bicep' = {
-  name: 'keyVault'
-  scope: rgShared
-  params: {
-    env: env
-    location: location
-    ingestFuncPrincipalId: ingestFunc.outputs.principalId
-    webApiFuncPrincipalId: webApiFunc.outputs.principalId
-    appInsightsConnectionString: monitor.outputs.appInsightsConnectionString
-    logAnalyticsWorkspaceId: monitor.outputs.workspaceId
-    edgarUserAgent: edgarUserAgent
-    alphaVantageApiKey: alphaVantageApiKey
-    finnhubApiKey: finnhubApiKey
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Step 4: Cosmos DB (shared RG)
-// Needs both Function App principal IDs for data-plane RBAC.
-// ---------------------------------------------------------------------------
-
-module cosmos 'modules/cosmos.bicep' = {
-  name: 'cosmos'
-  scope: rgShared
-  params: {
-    env: env
-    location: location
-    ingestFuncPrincipalId: ingestFunc.outputs.principalId
-    webApiFuncPrincipalId: webApiFunc.outputs.principalId
-    logAnalyticsWorkspaceId: monitor.outputs.workspaceId
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Step 5: Fabric Capacity (data RG)
-// Bicep owns the Azure Fabric capacity. Fabric workspace/lakehouse/items remain
-// portal/Fabric Git managed because they are not ARM/Bicep resources.
-// ---------------------------------------------------------------------------
-
-module fabric 'modules/fabric.bicep' = {
-  name: 'fabric'
-  scope: rgData
-  params: {
-    env: env
-    location: location
-    fabricAdminUpn: fabricAdminUpn
-    ingestFuncPrincipalId: ingestFunc.outputs.principalId
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Step 6: AI Search (ai RG)
-// Needs web API func principal ID for Search Index Data Reader RBAC.
-// ---------------------------------------------------------------------------
-
-module aiSearch 'modules/aisearch.bicep' = {
-  name: 'aiSearch'
-  scope: rgAi
-  params: {
-    env: env
-    location: location
-    webApiFuncPrincipalId: webApiFunc.outputs.principalId
-    ingestFuncPrincipalId: ingestFunc.outputs.principalId
-    logAnalyticsWorkspaceId: monitor.outputs.workspaceId
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Step 7: Azure OpenAI (ai RG)
-// No cross-dependencies on other module outputs.
-// ---------------------------------------------------------------------------
-
-module openAi 'modules/openai.bicep' = {
-  name: 'openAi'
-  scope: rgAi
-  params: {
-    env: env
-    location: location
-    logAnalyticsWorkspaceId: monitor.outputs.workspaceId
-    ingestFuncPrincipalId: ingestFunc.outputs.principalId
-    webApiFuncPrincipalId: webApiFunc.outputs.principalId
-    searchPrincipalId: aiSearch.outputs.principalId
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Step 3a: Static Web App (web RG)
-// Location: westeurope — Switzerland North not supported for SWA.
-// ---------------------------------------------------------------------------
-
-module staticWebApp 'modules/staticwebapp.bicep' = {
-  name: 'staticWebApp'
-  scope: rgWeb
-  params: {
-    env: env
-    swaLocation: 'westeurope'
-    microsoftAuthClientId: microsoftAuthClientId
-    microsoftAuthClientSecret: microsoftAuthClientSecret
-    repositoryUrl: repositoryUrl
-    branch: repositoryBranch
-    webApiResourceId: webApiFunc.outputs.functionAppId
-    webApiName: webApiFunc.outputs.functionAppName
-    webApiLocation: location
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Step 10: Network — private DNS zones + private endpoints (shared RG)
-// Deployed last: requires resource IDs from Cosmos DB, Key Vault, and both
-// Function App storage accounts. VNet ID comes from step 1b.
-// ---------------------------------------------------------------------------
 
 module network 'modules/network.bicep' = {
-  name: 'network'
-  scope: rgShared
+  name: 'auspex-network'
+  scope: resourceGroup
   params: {
-    env: env
     location: location
-    vnetId: networkVnet.outputs.vnetId
-    cosmosAccountId: cosmos.outputs.accountId
-    kvId: keyVault.outputs.keyVaultId
-    storageFuncId: ingestFunc.outputs.storageAccountId
-    storageWapiId: webApiFunc.outputs.storageAccountId
   }
 }
 
-// ---------------------------------------------------------------------------
-// Resource locks — CanNotDelete on all RGs in prod
-// Must use modules: subscription-scope Bicep cannot deploy RG-scoped resources inline (BCP139).
-// ---------------------------------------------------------------------------
-
-module rgSharedLock 'modules/lock.bicep' = if (env == 'prod') {
-  name: 'rgSharedLock'
-  scope: rgShared
-  params: { rgName: rgShared.name }
+module observability 'modules/observability.bicep' = {
+  name: 'auspex-observability'
+  scope: resourceGroup
+  params: {
+    location: location
+    environmentName: environmentName
+    alertEmailAddress: alertEmailAddress
+    monthlyBudgetAmount: int(monthlyBudgetAmount)
+  }
 }
 
-module rgIngestLock 'modules/lock.bicep' = if (env == 'prod') {
-  name: 'rgIngestLock'
-  scope: rgIngest
-  params: { rgName: rgIngest.name }
+module registry 'modules/registry.bicep' = {
+  name: 'auspex-registry'
+  scope: resourceGroup
+  params: {
+    location: location
+    registryName: 'crauspex${suffix}'
+    environmentName: environmentName
+  }
 }
 
-module rgDataLock 'modules/lock.bicep' = if (env == 'prod') {
-  name: 'rgDataLock'
-  scope: rgData
-  params: { rgName: rgData.name }
+module data 'modules/data.bicep' = {
+  name: 'auspex-data'
+  scope: resourceGroup
+  params: {
+    location: location
+    cosmosAccountName: 'cosmos-auspex-${suffix}'
+    storageAccountName: 'stauspex${suffix}'
+    logAnalyticsWorkspaceId: observability.outputs.workspaceId
+  }
 }
 
-module rgAiLock 'modules/lock.bicep' = if (env == 'prod') {
-  name: 'rgAiLock'
-  scope: rgAi
-  params: { rgName: rgAi.name }
+module openAi 'modules/openai.bicep' = {
+  name: 'auspex-openai'
+  scope: resourceGroup
+  params: {
+    location: openAiLocation
+    accountName: 'aoai-auspex-${suffix}'
+    logAnalyticsWorkspaceId: observability.outputs.workspaceId
+    environmentName: environmentName
+    extractionCapacity: int(extractionModelCapacity)
+    narrativeCapacity: int(narrativeModelCapacity)
+  }
 }
 
-module rgWebLock 'modules/lock.bicep' = if (env == 'prod') {
-  name: 'rgWebLock'
-  scope: rgWeb
-  params: { rgName: rgWeb.name }
+module keyVaultCreate 'modules/keyvault.bicep' = if (createsKeyVault) {
+  name: 'auspex-keyvault'
+  scope: resourceGroup
+  params: {
+    location: location
+    keyVaultName: keyVaultName
+    environmentName: environmentName
+  }
 }
 
-// ---------------------------------------------------------------------------
-// Outputs — useful for CI/CD and post-deploy verification
-// ---------------------------------------------------------------------------
+module keyVaultSecretsLocal 'modules/keyvault-secrets.bicep' = if (createsKeyVault) {
+  name: 'auspex-keyvault-secrets'
+  scope: resourceGroup
+  params: {
+    keyVaultName: keyVaultName
+    priceApiKey: priceApiKey
+    newsApiKey: newsApiKey
+  }
+  dependsOn: [
+    keyVaultCreate
+  ]
+}
 
-output keyVaultName string = keyVault.outputs.keyVaultName
-output keyVaultUri string = keyVault.outputs.keyVaultUri
-output cosmosEndpoint string = cosmos.outputs.endpoint
-output appInsightsConnectionString string = monitor.outputs.appInsightsConnectionString
-output ingestFuncName string = ingestFunc.outputs.functionAppName
-output webApiFuncName string = webApiFunc.outputs.functionAppName
-output fabricCapacityName string = fabric.outputs.capacityName
-output searchEndpoint string = aiSearch.outputs.searchEndpoint
-output openAiEndpoint string = openAi.outputs.openAiEndpoint
-output swaHostname string = staticWebApp.outputs.defaultHostname
+module keyVaultSecretsExternal 'modules/keyvault-secrets.bicep' = if (!createsKeyVault) {
+  name: 'auspex-keyvault-secrets-existing'
+  scope: externalKeyVaultGroup
+  params: {
+    keyVaultName: keyVaultName
+    priceApiKey: priceApiKey
+    newsApiKey: newsApiKey
+  }
+}
 
- 
+module ledgerCreate 'modules/ledger.bicep' = if (createsLedger) {
+  name: 'auspex-ledger'
+  scope: resourceGroup
+  params: {
+    location: location
+    cosmosAccountName: ledgerAccountName
+    databaseName: ledgerDatabaseName
+    environmentName: environmentName
+  }
+}
+
+module compute 'modules/containerapps.bicep' = {
+  name: 'auspex-compute'
+  scope: resourceGroup
+  params: {
+    location: location
+    environmentName: environmentName
+    infrastructureSubnetId: network.outputs.containerAppsSubnetId
+    logAnalyticsCustomerId: observability.outputs.logAnalyticsCustomerId
+    logAnalyticsSharedKey: observability.outputs.logAnalyticsSharedKey
+    containerImage: containerImage
+    registryServer: registry.outputs.loginServer
+    cosmosEndpoint: data.outputs.cosmosEndpoint
+    storageAccountUrl: data.outputs.storageAccountUrl
+    keyVaultUri: 'https://${keyVaultName}${environment().suffixes.keyvaultDns}/'
+    sourceLedgerCosmosEndpoint: 'https://${ledgerAccountName}.documents.azure.com:443/'
+    sourceLedgerDatabaseName: ledgerDatabaseName
+    openAiEndpoint: openAi.outputs.endpoint
+    authClientId: authClientId
+    authTenantId: authTenantId
+    authAuthority: authAuthority
+    authIssuer: authIssuer
+    authJwksUrl: authJwksUrl
+    ownerProviderUserId: ownerProviderUserId
+    secEdgarUserAgent: secEdgarUserAgent
+  }
+  dependsOn: [
+    keyVaultSecretsLocal
+    keyVaultSecretsExternal
+    ledgerCreate
+  ]
+}
+
+module privateEndpoints 'modules/private-endpoints.bicep' = {
+  name: 'auspex-private-endpoints'
+  scope: resourceGroup
+  params: {
+    location: location
+    vnetName: network.outputs.vnetName
+    privateEndpointSubnetId: network.outputs.privateEndpointSubnetId
+    cosmosAccountId: data.outputs.cosmosAccountId
+    cosmosAccountName: data.outputs.cosmosAccountName
+    storageAccountId: data.outputs.storageAccountId
+    storageAccountName: data.outputs.storageAccountName
+    openAiAccountId: openAi.outputs.accountId
+    openAiAccountName: openAi.outputs.accountName
+    keyVaultId: resourceId(
+      subscription().subscriptionId,
+      keyVaultResourceGroupName,
+      'Microsoft.KeyVault/vaults',
+      keyVaultName
+    )
+    keyVaultName: keyVaultName
+    sourceLedgerAccountId: resourceId(
+      subscription().subscriptionId,
+      ledgerResourceGroupName,
+      'Microsoft.DocumentDB/databaseAccounts',
+      ledgerAccountName
+    )
+    sourceLedgerAccountName: ledgerAccountName
+  }
+  dependsOn: [
+    keyVaultCreate
+    ledgerCreate
+  ]
+}
+
+module resourceRbac 'modules/rbac.bicep' = {
+  name: 'auspex-resource-rbac'
+  scope: resourceGroup
+  params: {
+    cosmosAccountName: data.outputs.cosmosAccountName
+    storageAccountName: data.outputs.storageAccountName
+    openAiAccountName: openAi.outputs.accountName
+    registryName: registry.outputs.registryName
+    apiPrincipalId: compute.outputs.apiPrincipalId
+    pipelinePrincipalId: compute.outputs.pipelinePrincipalId
+    performancePrincipalId: compute.outputs.performancePrincipalId
+  }
+}
+
+module keyVaultRbacLocal 'modules/keyvault-rbac.bicep' = if (createsKeyVault) {
+  name: 'auspex-keyvault-rbac'
+  scope: resourceGroup
+  params: {
+    keyVaultName: keyVaultName
+    logAnalyticsWorkspaceId: observability.outputs.workspaceId
+    pipelinePrincipalId: compute.outputs.pipelinePrincipalId
+  }
+  dependsOn: [
+    keyVaultCreate
+  ]
+}
+
+module keyVaultRbacExternal 'modules/keyvault-rbac.bicep' = if (!createsKeyVault) {
+  name: 'auspex-keyvault-rbac-existing'
+  scope: externalKeyVaultGroup
+  params: {
+    keyVaultName: keyVaultName
+    logAnalyticsWorkspaceId: observability.outputs.workspaceId
+    pipelinePrincipalId: compute.outputs.pipelinePrincipalId
+  }
+}
+
+module sourceLedgerRbacLocal 'modules/source-ledger-rbac.bicep' = if (createsLedger) {
+  name: 'auspex-source-ledger-rbac'
+  scope: resourceGroup
+  params: {
+    cosmosAccountName: ledgerAccountName
+    databaseName: ledgerDatabaseName
+    containerNames: [
+      'app_users'
+      'portfolio_transactions'
+    ]
+    logAnalyticsWorkspaceId: observability.outputs.workspaceId
+    readerPrincipalId: compute.outputs.pipelinePrincipalId
+    performanceReaderPrincipalId: compute.outputs.performancePrincipalId
+    writerPrincipalId: compute.outputs.apiPrincipalId
+  }
+  dependsOn: [
+    ledgerCreate
+  ]
+}
+
+module sourceLedgerRbacExternal 'modules/source-ledger-rbac.bicep' = if (!createsLedger) {
+  name: 'auspex-source-ledger-rbac-existing'
+  scope: externalLedgerGroup
+  params: {
+    cosmosAccountName: ledgerAccountName
+    databaseName: ledgerDatabaseName
+    containerNames: [
+      'app_users'
+      'portfolio_transactions'
+    ]
+    logAnalyticsWorkspaceId: observability.outputs.workspaceId
+    readerPrincipalId: compute.outputs.pipelinePrincipalId
+    performanceReaderPrincipalId: compute.outputs.performancePrincipalId
+    writerPrincipalId: compute.outputs.apiPrincipalId
+  }
+}
+
+output AZURE_LOCATION string = location
+output AZURE_RESOURCE_GROUP string = resourceGroup.name
+output AZURE_CONTAINER_REGISTRY_ENDPOINT string = registry.outputs.loginServer
+output SERVICE_API_NAME string = compute.outputs.apiName
+output SERVICE_API_URI string = 'https://${compute.outputs.apiFqdn}'
+output SERVICE_API_RESOURCE_GROUP_NAME string = resourceGroup.name
+output SERVICE_PIPELINE_NAME string = compute.outputs.pipelineJobName
+output SERVICE_PIPELINE_RESOURCE_GROUP_NAME string = resourceGroup.name
+output SERVICE_PERFORMANCE_NAME string = compute.outputs.performanceJobName
+output SERVICE_PERFORMANCE_RESOURCE_GROUP_NAME string = resourceGroup.name
+
+output resourceGroupName string = resourceGroup.name
+output registryName string = registry.outputs.registryName
+output registryServer string = registry.outputs.loginServer
+output apiName string = compute.outputs.apiName
+output apiFqdn string = compute.outputs.apiFqdn
+output pipelineJobName string = compute.outputs.pipelineJobName
+output performanceJobName string = compute.outputs.performanceJobName
+output cosmosAccountName string = data.outputs.cosmosAccountName
+output ledgerAccountName string = ledgerAccountName
+output storageAccountName string = data.outputs.storageAccountName
+output openAiAccountName string = openAi.outputs.accountName
+output keyVaultName string = keyVaultName

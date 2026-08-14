@@ -1,0 +1,22 @@
+# Example configurable broker fee schedule.
+#
+# Formulas are small Decimal-only expressions evaluated by auspex.currency.ast.evaluate().
+# Supported: + - * / ( ) min(a,b) max(a,b), quoted decimal-literal strings, integer
+# literals, and the named variables supplied at evaluation time. Numeric literals MUST
+# be quoted strings (e.g. "0.0010") — an unquoted float literal (0.0010) is rejected by
+# the evaluator so no binary float ever enters monetary arithmetic (arc42 TC-06).
+schema_version: "4.0"
+config_type: fees
+currency: USD
+
+commission:
+  # US equities: 0.10% of notional, minimum USD 10, capped at USD 100.
+  formula: 'min(max(notional_usd * "0.0010", "10"), "100")'
+
+fx_conversion_spread:
+  # Applied only when converting USD proceeds/settlement to CHF cash, not on the
+  # US-denominated trade itself (arc42 8.2: FX never enters the scoring engine).
+  formula: 'notional_usd * "0.0015"'
+
+custody_fee_annual_bps:
+  formula: 'portfolio_value_usd * "0.0015"'

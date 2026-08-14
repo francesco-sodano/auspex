@@ -1,0 +1,23 @@
+# Portfolio field mapping (arc42 §5.7 "Mapping configuration").
+#
+# A default deployment keeps the event-sourced ledger in the tenant-local
+# Auspex Cosmos account. Imported deployments may point the application at an
+# external account without changing this schema mapping.
+schema_version: "4.0"
+config_type: portfolio_mapping
+
+transactions:
+  container: "portfolio_transactions"
+  partition_key_field: "owner_user_sk"
+  # sentinel document the write-side ledger uses for optimistic-concurrency
+  # bookkeeping (api/auspex_api/portfolio.py::_LEDGER_REVISION_ID) — excluded from reads.
+  revision_document_id: "_ledger_revision"
+
+owner_user_sk: null
+
+# `AUSPEX_OWNER_PROVIDER_USER_ID` (the owner's Entra object ID) is the default
+# source for the stable owner partition. Existing ledgers can leave it unset and
+# resolve exactly one active owner through `app_users`.
+identity_mapping:
+  container: "app_users"
+  identity_key: null

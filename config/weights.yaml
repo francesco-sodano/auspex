@@ -1,0 +1,56 @@
+# Leg weights - arc42 5.5 / 5.2 (FPI redistribution)
+#
+# `config_version_id` is derived from a hash of this file plus policy.yaml at load time
+# (auspex.config.loader.build_config_version) and is written onto every scores row so
+# historical scores remain reproducible even if weights change later (arc42 5.11).
+schema_version: "4.0"
+config_type: weights
+
+domestic:
+  thesis_linkage: "0.20"
+  attention_acceleration: "0.15"
+  narrative_premium: "0.10"
+  smart_money: "0.20"
+  fundamental_health: "0.20"
+  valuation_brake: "0.15"
+
+# FPI files no Form 4 (§5.2): smart_money's 20% is redistributed proportionally
+# across the other five legs. Precomputed to 4dp for determinism; auspex.config.loader
+# validates this matches a proportional redistribution of `domestic` at import time.
+fpi:
+  thesis_linkage: "0.25"
+  attention_acceleration: "0.1875"
+  narrative_premium: "0.125"
+  fundamental_health: "0.25"
+  valuation_brake: "0.1875"
+
+# Recency decay half-life (days) shared by thesis_linkage and narrative_premium.
+recency_half_life_days: 90
+
+# document_authority by filing/document type - thesis_linkage & attention_acceleration
+document_authority:
+  "10-K": "1.0"
+  "20-F": "1.0"
+  "10-Q": "0.9"
+  "S-1": "0.8"
+  "8-K": "0.7"
+  "6-K": "0.7"
+  news: "0.4"
+
+# theme_strength -> numeric (Channel A enum mapping; versioned, LLM never touches this)
+theme_strength:
+  STRONG: "1.0"
+  MODERATE: "0.6"
+  WEAK: "0.25"
+
+# materiality -> numeric weight for attention_acceleration
+materiality_weight:
+  HIGH: "1.0"
+  MEDIUM: "0.5"
+  LOW: "0.2"
+  NONE: "0.0"
+
+# Effective tax rate used by ROIC (fundamental_health sub-metric)
+roic_tax_rate: "0.21"
+
+winsorize_sigma: "2.5"

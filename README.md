@@ -1,214 +1,339 @@
 # Auspex
 
-Auspex is an Azure-native personal financial research assistant. It ingests public market, regulatory, macroeconomic, fund, and contract data on a daily batch cadence; builds point-in-time features in Microsoft Fabric; ranks stocks and ETFs; maintains an owner-isolated portfolio ledger; and explains advisory buy, hold, and sell suggestions with evidence.
+> **AI reads. Deterministic code scores and applies policy. AI explains. A human decides.**
 
-Auspex never places trades, connects to a bank, or moves money. Its outputs are research aids, not financial advice.
+Auspex is a Microsoft technology MVP that demonstrates how generative AI can
+support financial research in a highly regulated environment without giving the
+model control of scoring, portfolio policy, or trade execution.
 
-This repository is a deployable MVP, not a production-approved financial service. The current engineering and legal-control assessment is in [doc/compliance-mvp.md](doc/compliance-mvp.md). It identifies controls present in the code, obligations owned by each deploying organization, and production gates. It is not a certification or legal opinion.
+It is a reference implementation, not a Microsoft product, broker, investment
+service, or guarantee of performance. It produces directional research for a
+single authenticated owner. It never connects to a broker and never executes a
+trade.
+
+## Why this MVP matters
+
+Banks and regulated firms need more than a capable model. They need evidence,
+repeatability, access control, auditability, policy enforcement and clear human
+accountability. Auspex separates those responsibilities:
+
+1. **AI reads** filings and news into constrained, versioned evidence.
+2. **Code scores** six deterministic research legs using point-in-time data.
+3. **Policy gates** decide whether a research signal is actionable for the
+   current portfolio and investor profile.
+4. **AI explains** stored facts, scores and policy traces with citations.
+5. **The user acts** outside Auspex.
+
+This design makes the model useful without making it the system of record or
+the decision authority.
+
+## What Auspex does
+
+- Maintains a configured research universe of 104 securities and peer cohorts.
+- Ingests prices, SEC filings, XBRL/IFRS facts, Form 4 transactions and news.
+- Stores 36 months of raw history and extracts/scores an 18-month window.
+- Computes a peer-relative Auspex Score from six deterministic legs.
+- Applies investor, portfolio, coverage, valuation, cost and cash-reserve gates.
+- Produces portfolio-aware BUY, ADD, TRIM and SELL suggestions when every
+  required gate passes.
+- Keeps an append-only, event-sourced portfolio ledger with correction and void
+  events.
+- Provides grounded company analysis, evidence, filings, news and conversation.
+- Measures score and recommendation performance over time.
+
+## Research logic
+
+### Six scoring legs
+
+| Leg | What it measures |
+| --- | --- |
+| Thesis Linkage | Whether current evidence supports configured investment themes |
+| Attention Acceleration | Whether material company evidence is increasing |
+| Narrative Premium | Whether the narrative is improving faster than fundamentals |
+| Smart Money | Qualifying insider buying and selling for domestic filers |
+| Fundamental Health | Growth, margin, cash generation, balance sheet and ROIC |
+| Valuation Brake | Relative EV/Sales, EV/EBITDA and FCF yield pressure |
+
+The **Auspex Score (0–100)** is a percentile rank inside the active peer scope.
+It is not a probability and it is not an absolute valuation.
+
+### Score versus action
+
+A high score creates a research candidate. An action appears only after
+deterministic gates check:
+
+- data coverage and freshness;
+- peer-group confidence;
+- valuation and score direction;
+- investor risk profile;
+- current position and target weight;
+- CHF cash reserve;
+- minimum executable trade and estimated costs.
+
+`HOLD_NO_ACTION` is not presented as a trade recommendation.
 
 ## Architecture
 
-```text
-Azure Functions connectors -> OneLake bronze NDJSON
-                          -> Fabric silver Delta tables
-                          -> Fabric gold tables and Warehouse views
-                          -> Azure AI Search + Azure OpenAI evidence
-                          -> Python Functions API -> React Static Web App
+```mermaid
+flowchart LR
+    Browser[React SPA + MSAL] -->|Entra token| API[FastAPI Container App]
+    API --> Cosmos[(Cosmos DB research data)]
+    API --> Ledger[(Cosmos DB event ledger)]
+    API --> Blob[(Blob evidence)]
+    API --> AOAI[Azure OpenAI]
 
-Cosmos DB -> source registry, watermarks, run logs, caches, and owner-scoped ledger
-Durable Functions -> daily connector/Fabric/AI/Warehouse orchestration and capacity guard
+    Pipeline[Nightly Container Apps Job] --> SEC[SEC EDGAR]
+    Pipeline --> Market[Market and news providers]
+    Pipeline --> AOAI
+    Pipeline --> Cosmos
+    Pipeline --> Ledger
+    Pipeline --> Blob
+
+    Performance[Weekly performance job] --> Cosmos
+    Performance --> Ledger
+
+    KV[Key Vault] --> Pipeline
 ```
 
-All Azure resources are deployed in Switzerland North where supported. Azure Static Web Apps is deployed in West Europe because Switzerland North is not available for that service. See [doc/arc42-auspex.md](doc/arc42-auspex.md) for the full architecture, exact six-leg Opportunity Score method, classification provenance, recommendation policy, audit controls, and known model limitations.
-
-## Repository
-
-| Path | Purpose |
+| Concern | Implementation |
 | --- | --- |
-| `infra/` | Subscription-scope Bicep and reusable modules |
-| `connectors/` | Python Azure Functions ingestion and daily Durable orchestration |
-| `fabric/` | Fabric Git items, PySpark notebooks, pipelines, and Warehouse SQL |
-| `api/` | Owner-isolated Python Functions web API |
-| `web/` | React and TypeScript application |
-| `search/`, `agent/`, `engine/` | Evidence indexing, grounded explanations, and deterministic scoring |
-| `scripts/` | Repeatable Fabric, Warehouse, RBAC, and recovery tools |
-| `tests/` | Unit, contract, PIT, idempotency, isolation, and deployment tests |
+| Web/API | React, TypeScript and FastAPI in one immutable container |
+| Scheduled compute | Azure Container Apps Jobs |
+| Operational state | Azure Cosmos DB for NoSQL |
+| Portfolio source of truth | Separate event-ledger Cosmos account by default |
+| Raw evidence | Azure Blob Storage |
+| AI | Azure OpenAI GPT-4.1-mini and GPT-4.1 deployments |
+| Identity | Microsoft Entra single-tenant SPA/API registration |
+| Workload access | System-assigned managed identities and data-plane RBAC |
+| Network | Private endpoints for data, Key Vault and Azure OpenAI |
+| Observability | Log Analytics, Application Insights, alerts and budget |
+| Infrastructure | Bicep orchestrated by Azure Developer CLI |
 
-The incremental company-opportunity foundation lives in `engine/company_package.py`,
-`engine/company_windows.py`, `engine/company_narrative.py`, and
-`engine/research_universe.py`. It defines content-addressed per-company package
-revisions, compact active-data windows, six-leg evidence lineage, a cited AI
-narrative contract, and a research universe independent of portfolio holdings.
-Cosmos `dirty_company_events` and `company_packages` provide replay-safe change
-tracking and immutable/current package storage. The existing daily Fabric build
-remains active until connector change emission and the incremental package worker
-are implemented and validated; these contracts do not yet change production
-scheduling.
+The detailed current-state design is in
+[doc/auspex-arc42.md](doc/auspex-arc42.md).
+
+## Repository layout
+
+```text
+config/             Universe, cohorts, scoring, policy, fees and ledger mapping
+doc/                Current Arc42 architecture and bank-readiness guidance
+infra/              Tenant-neutral Bicep modules and AZD parameter mapping
+prompts/            Versioned extraction, narrative, planning and answer prompts
+scripts/            AZD setup and post-provision Entra configuration
+src/auspex/         Python domain, pipeline, persistence and API
+tests/              Unit, integration, property and golden tests
+web/                React/TypeScript/Vite frontend
+azure.yaml          Azure Developer CLI project definition
+Dockerfile          Reproducible API/job image
+```
 
 ## Prerequisites
 
-- Azure subscription with permission to deploy subscription-scope Bicep and role assignments
-- Microsoft Fabric tenant with an F2-capable region and permission to create a workspace
-- Microsoft Entra app registration supporting personal Microsoft accounts for Static Web Apps authentication
-- Azure CLI with Bicep, Azure Functions Core Tools, Python 3.12, Node.js 22, and PowerShell 7
-- GitHub environment using workload identity federation when deploying through Actions
-- Alpha Vantage and Finnhub API keys, plus an SEC user agent containing an operator-monitored contact address
+- Python 3.12
+- Node.js 22
+- Docker
+- Azure CLI
+- Azure Developer CLI (`azd`)
+- An Azure subscription where you can create role assignments, private
+  endpoints, Cosmos DB, Container Apps, Key Vault and Azure OpenAI deployments
+- Microsoft Graph permission to create/update your own app registration
+- Alpha Vantage and Finnhub API keys
+- GPT-4.1-mini and GPT-4.1 model availability/quota in the selected region
 
-FMP is disabled and its key is optional. Yahoo price fallback is unofficial and disabled.
+## Deploy to your Azure tenant
 
-## New Subscription Installation
-
-The installation has two phases because Fabric capacity is an Azure resource while Fabric workspace items are tenant resources.
-
-### 1. Bootstrap Fabric capacity
-
-Sign in to the target subscription, register the Fabric resource provider if required, and create the data resource group and F2 capacity:
+### 1. Sign in
 
 ```powershell
 az login
-az account set --subscription <subscription-id>
-az provider register --namespace Microsoft.Fabric --wait
-az deployment sub create `
-  --name auspex-dev-fabric-bootstrap `
-  --location switzerlandnorth `
-  --template-file infra/bootstrap-fabric.bicep `
-  --parameters env=dev fabricAdminUpn=admin@example.com
+azd auth login
 ```
 
-The bootstrap is idempotent. The full deployment later adopts the same deterministic resource names and grants the ingestion identity capacity RBAC.
+### 2. Configure an AZD environment
 
-### 2. Create Fabric tenant items
+PowerShell:
 
-1. Create a Fabric workspace and record its workspace ID.
-2. Assign the workspace to `auspexdevfab` or `auspexprodfab`.
-3. Create a Lakehouse named `auspex_bronze` and record its item ID.
-4. Create a Warehouse named `auspex_gold` and record its SQL endpoint and database name.
-5. Make the GitHub deployment identity Member or Admin in the workspace.
+```powershell
+.\scripts\configure-azd.ps1 -EnvironmentName dev
+```
 
-The checked-in Fabric definitions use public placeholder bindings. `scripts/deploy_fabric_items.py` injects workspace, Lakehouse, and SEC contact values during deployment.
+macOS/Linux:
 
-### 3. Create application identity
+```bash
+sh ./scripts/configure-azd.sh dev
+```
 
-Create a Microsoft identity platform app registration that accepts personal Microsoft accounts. Create a client secret and configure the Static Web Apps authentication redirect URI for the deployed hostname. The client ID and secret are deployment inputs; no identity binding is tracked in Git.
+The setup script:
 
-### 4. Configure GitHub environments
+- creates or reuses a single-tenant Entra app registration;
+- records the signed-in user's object ID as the portfolio owner;
+- stores deployment values in the ignored AZD environment;
+- prompts securely for provider API keys;
+- configures safe capacity and budget defaults.
 
-Create `dev` and/or `prod` GitHub environments. Configure workload identity federation for the repository and environment. The deployment principal needs subscription-scope resource deployment and role-assignment permission, and Fabric workspace access.
+Public PyPI is the default package source. Microsoft-managed devices can use the
+approved Central Feed Services proxy without changing repository defaults:
 
-Environment variables:
+```powershell
+.\scripts\configure-azd.ps1 `
+  -EnvironmentName dev `
+  -PypiIndexUrl https://packagefeedproxy.microsoft.io/pypi/simple
+```
 
-`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `FABRIC_ADMIN_UPN`, `FABRIC_WORKSPACE_ID`, `FABRIC_LAKEHOUSE_ID`, `FABRIC_WAREHOUSE_SERVER`, `FABRIC_WAREHOUSE_DATABASE`, `ALERT_EMAIL_ADDRESS`, `EDGAR_USER_AGENT`, and `MICROSOFT_AUTH_CLIENT_ID`.
+The value is passed to Docker as `PIP_INDEX_URL`. It affects only that AZD
+environment; other users continue to use `https://pypi.org/simple`.
 
-Environment secrets:
+Review the values before provisioning:
 
-`MICROSOFT_AUTH_CLIENT_SECRET`, `ALPHAVANTAGE_API_KEY`, and `FINNHUB_API_KEY`.
+```powershell
+azd env get-values
+```
 
-The deployment writes enabled-source credentials into the private Key Vault through secure Bicep parameters. Source registry rows are idempotently initialized from `connectors/shared/sources_seed.json` on first connector execution.
+### 3. Provision and deploy
 
-### 5. Deploy
+```powershell
+azd up
+```
 
-Run the manual `Deploy` workflow and choose the target environment. It performs the supported installation sequence:
+`azd up` provisions the Bicep architecture, builds the Docker image, deploys the
+API and jobs, and adds the deployed HTTPS URL to the Entra SPA redirect URIs.
 
-1. infrastructure and managed identities;
-2. Function packaging and deployment;
-3. Fabric workspace access, notebook/ontology deployment, graph activation, and pipeline deployment;
-4. complete Warehouse schema deployment;
-5. Cosmos data-plane RBAC narrowing;
-6. frontend lint, build, and Static Web Apps deployment;
-7. Function and web endpoint verification;
-8. Fabric capacity suspension, including failure paths.
+### 4. Run the one-time bootstrap
 
-Release-era E7/E14/E20/E21/E22 deployers are not part of the installation contract. The supported deployers are `deploy_fabric_items.py`, `deploy_fabric_pipeline.py`, `deploy_warehouse_schema.py`, and the GitHub workflow.
+The safety gate is deliberately two-phase. Start once without confirmation; it
+logs the mapped sample and binding summary, then exits before ingestion:
 
-## Local Configuration
+```powershell
+$resourceGroup = azd env get-value AZURE_RESOURCE_GROUP
+$job = azd env get-value SERVICE_PIPELINE_NAME
 
-For local CLI deployment, create the ignored file `infra/params/dev.local.json` or `infra/params/prod.local.json`. Supply at least:
+az containerapp job start `
+  --resource-group $resourceGroup `
+  --name $job `
+  --args bootstrap
+```
 
-```json
-{
-  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
-  "contentVersion": "1.0.0.0",
-  "parameters": {
-    "fabricAdminUpn": { "value": "admin@example.com" },
-    "alertEmailAddress": { "value": "operations@example.com" },
-    "edgarUserAgent": { "value": "Auspex/1.0 operations@example.com" },
-    "alphaVantageApiKey": { "value": "<alpha-vantage-key>" },
-    "finnhubApiKey": { "value": "<finnhub-key>" },
-    "onelakeWorkspaceId": { "value": "<workspace-guid>" },
-    "onelakeLakehouseName": { "value": "<lakehouse-item-guid>" },
-    "fabricWarehouseServer": { "value": "<warehouse-sql-endpoint>" },
-    "fabricWarehouseDatabase": { "value": "auspex_gold" },
-    "microsoftAuthClientId": { "value": "<entra-client-id>" },
-    "microsoftAuthClientSecret": { "value": "<entra-client-secret>" },
-    "repositoryUrl": { "value": "https://github.com/<owner>/<repository>" }
-  }
+Review that failed execution's logs. Confirm only when owner, holdings, cash and
+unmapped-ticker results are correct:
+
+```powershell
+az containerapp job update `
+  --resource-group $resourceGroup `
+  --name $job `
+  --set-env-vars AUSPEX_CONFIRM_PORTFOLIO_BINDING=true
+
+try {
+  az containerapp job start `
+    --resource-group $resourceGroup `
+    --name $job `
+    --args bootstrap
+}
+finally {
+  az containerapp job update `
+    --resource-group $resourceGroup `
+    --name $job `
+    --remove-env-vars AUSPEX_CONFIRM_PORTFOLIO_BINDING
 }
 ```
 
-Local Function examples are in `connectors/local.settings.example.json` and `api/local.settings.example.json`. Never commit local settings, parameter overrides, deployment state, tokens, or Fabric IDs.
+The bootstrap is idempotent and resumable. At a 200K TPM extraction quota it
+normally takes several hours.
 
-For a direct full infrastructure deployment after the Fabric tenant items exist:
+### Reusing existing resources
+
+The default creates a new Key Vault and event-ledger Cosmos account. Advanced
+deployments can set these AZD values before `azd up`:
 
 ```powershell
-az deployment sub create `
-  --location switzerlandnorth `
-  --template-file infra/main.bicep `
-  --parameters @infra/params/dev.json `
-  --parameters @infra/params/dev.local.json
+azd env set AUSPEX_EXISTING_KEY_VAULT_NAME <vault-name>
+azd env set AUSPEX_EXISTING_KEY_VAULT_RESOURCE_GROUP <resource-group>
+azd env set AUSPEX_EXISTING_LEDGER_ACCOUNT_NAME <cosmos-account>
+azd env set AUSPEX_EXISTING_LEDGER_RESOURCE_GROUP <resource-group>
+azd env set AUSPEX_LEDGER_DATABASE_NAME <database>
 ```
 
-The GitHub workflow remains the supported end-to-end path because it also packages code, deploys Fabric and Warehouse artifacts, narrows Cosmos roles, and publishes the web application.
+An existing Key Vault must have `enableRbacAuthorization=true`. Access-policy
+vaults are rejected by the post-provision check because workload access is
+defined exclusively through least-privilege Azure RBAC.
 
-## Daily Build
+The external ledger must contain:
 
-The ingestion Function starts at 01:00 UTC and retries a failed UTC-dated instance at 04:00 and 07:00. The Durable workflow:
+- `portfolio_transactions`, partitioned by `/owner_user_sk`;
+- optionally `app_users`, partitioned by `/id`, for imported identity mappings.
 
-1. Resumes Fabric capacity.
-2. Runs only sources due for the date; required connector failure stops publication while the optional SEC/LLM classifier reports degraded coverage.
-3. Runs the ordered core notebooks through Fabric's managed-identity Job Scheduler API.
-4. Scores and publishes immutable E21 narrative features in bounded pages.
-5. Runs the ordered narrative-premium, metric, and serving notebooks through the Job Scheduler API.
-6. Promotes E21, E22, Gold, and portfolio snapshots to Warehouse.
-7. Synchronizes Cosmos serving projections and Azure AI Search evidence.
-8. Emits completion or failure telemetry and explicitly suspends capacity on both paths.
+For non-interactive GitHub deployments, the workflow authenticates both Azure
+CLI and Azure Developer CLI. The federated deployment identity must
+be allowed to update the configured Entra application (for example through app
+ownership or an approved Microsoft Graph application-management permission).
+This is required so the post-provision hook can register the deployed HTTPS
+redirect URI. Set `AUSPEX_MANAGE_ENTRA_REDIRECT_URI=false` only when the URI is
+managed by a separate identity-governance process. Historical bootstrap is
+intentionally a separate, reviewed operation; the deployment workflow never
+sets the portfolio-binding confirmation automatically.
 
-Application Insights alerts cover build failure, missing completion by 05:00 UTC, and capacity running longer than four hours.
+## Local development
 
-Each timer attempt receives a unique UTC run namespace so the 04:00 and 07:00
-recovery windows cannot collide with earlier Cosmos run-log entries. Bronze batch
-IDs remain deterministic, allowing later attempts to skip already-landed pages
-without rewriting data. Date-driven connectors terminate covered windows before
-pagination or provider calls, SEC Company Facts `404` responses are retained as
-explicit sparse coverage, and completed activity results are replayed from the run
-log if Durable redelivers an activity.
-
-## Validate
+### Backend
 
 ```powershell
-python -m unittest discover -s tests -q
-az bicep build --file infra/main.bicep --stdout *> $null
-az bicep build --file infra/bootstrap-fabric.bicep --stdout *> $null
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -e ".[dev]"
+python -m pytest
+python -m auspex serve --host 127.0.0.1 --port 8080
+```
+
+### Frontend
+
+```powershell
 npm ci --prefix web
 npm run lint --prefix web
 npm run build --prefix web
-npm audit --prefix web --omit=dev
+npm run dev --prefix web
 ```
 
-The CI workflow runs the same contracts on pull requests and pushes.
+For isolated UI work only:
 
-After the first deployment, invoke or wait for one daily build and verify a completed run, zero required-source failures, completed E21/E22 manifests, reconciled Warehouse promotion, synchronized serving projections, and current portfolio/theme coverage before admitting pilot users.
+```powershell
+$env:VITE_DEV_BYPASS_AUTH = "true"
+npm run dev --prefix web
+```
 
-## Correctness And Security
+The backend development bypass must never be enabled in a deployed environment.
 
-- Every analytical fact carries `event_date` and `knowledge_date`; queries enforce `knowledge_date <= as_of`.
-- Bronze identity includes source, deterministic window, and schema version; Delta and Warehouse replays converge.
-- Watermarks advance only after successful bronze writes.
-- Every portfolio row carries `owner_user_sk`; API repositories require owner scope for every read and mutation.
-- Ledger schema v5 stores a parent event and linked categorized cost rows atomically in one Cosmos partition.
-- Secrets are Key Vault references and Azure access uses managed identity or federated workload identity.
-- Recommendations are deterministic policy outputs; model-generated text may explain evidence but cannot create trades or alter policy decisions.
-- Generated explanations and discussion turns are visibly disclosed and machine-readable in the DOM; the deterministic recommendation itself is not mislabeled as generated content.
-- Personalized suggestions are an MVP feature, not a completed MiFID II or FinSA suitability journey. A regulated or commercial deployment must satisfy the gates in the compliance assessment.
+## Validation
+
+```powershell
+python -m pytest
+python -m ruff check src tests
+npm run lint --prefix web
+npm run build --prefix web
+az bicep build --file infra\main.bicep
+az bicep lint --file infra\main.bicep
+docker build -t auspex:local .
+```
+
+## Security and data handling
+
+- Only `/healthz` and `/auth-config.json` are unauthenticated.
+- Every `/api/*` route validates issuer, audience and signature.
+- Azure services use managed identity; local authentication is disabled.
+- Provider keys are Key Vault secrets and never application settings.
+- Data and AI services use private endpoints.
+- The portfolio ledger is append-only; edits and deletes are correction/void
+  events.
+- LLM output cannot directly set numeric scores, policy thresholds or trades.
+- Prompts, taxonomies, weights and model deployments are versioned.
+- Conversation history expires after 15 days.
+
+## Regulatory boundary
+
+Auspex is an MVP for directional research and human decision support. A bank
+must complete its own legal classification, model risk, suitability, privacy,
+outsourcing, resilience and supervisory controls before production use. The
+high-level production gap is documented in the final section of
+[doc/auspex-arc42.md](doc/auspex-arc42.md).
 
 ## License
 
