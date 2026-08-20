@@ -205,6 +205,53 @@ class TestCoverage:
 
         assert MIN_COVERAGE_FOR_BUY == Decimal("0.80")
 
+    def test_structural_exclusion_leaves_the_denominator(self):
+        """A leg nobody could compute must not count against the issuer."""
+
+        legs = applicable_legs(
+            FilerProfile.DOMESTIC,
+            frozenset({LegName.VALUATION_BRAKE}),
+        )
+        assert LegName.VALUATION_BRAKE not in legs
+        assert len(legs) == 5
+
+    def test_unavailable_fx_does_not_disadvantage_a_non_usd_reporter(self):
+        """arc42 §5.5: a non-USD filer without authoritative FX keeps parity.
+
+        Both issuers evidence every leg they could. The USD peer computes the
+        valuation brake; the non-USD reporter cannot, because no point-in-time
+        rate exists to place its fundamentals on a comparable footing. Treating
+        that as a *missing* leg would quietly mark the issuer down for a
+        limitation of our data, so it is excluded structurally instead and the
+        two securities report identical coverage.
+        """
+
+        usd_peer = set(applicable_legs(FilerProfile.FPI))
+        non_usd = usd_peer - {LegName.VALUATION_BRAKE}
+
+        assert coverage(usd_peer, FilerProfile.FPI) == Decimal(1)
+        assert (
+            coverage(
+                non_usd,
+                FilerProfile.FPI,
+                frozenset({LegName.VALUATION_BRAKE}),
+            )
+            == Decimal(1)
+        )
+        # Without the structural exclusion the same security would be punished.
+        assert coverage(non_usd, FilerProfile.FPI) == Decimal(4) / Decimal(5)
+
+    def test_structural_exclusion_still_reports_genuinely_missing_legs(self):
+        """Exclusion narrows the denominator; it does not paper over gaps."""
+
+        computable = {LegName.THESIS_LINKAGE, LegName.ATTENTION_ACCELERATION}
+        result = coverage(
+            computable,
+            FilerProfile.FPI,
+            frozenset({LegName.VALUATION_BRAKE}),
+        )
+        assert result == Decimal(2) / Decimal(4)
+
 
 class TestStaleness:
     def test_within_two_sessions_not_stale(self):

@@ -18,6 +18,7 @@ from auspex.models.enums import (
 from auspex.models.extraction import ChannelAExtraction, ThemeClaim
 from auspex.models.fundamentals import FundamentalSnapshot, XbrlFact
 from auspex.pipeline.feature_builder import (
+    VALUATION_REASON_FX_UNAVAILABLE,
     WeightsConfig,
     build_attention_events,
     build_fundamental_health_inputs,
@@ -91,18 +92,72 @@ def _extraction(document: Document) -> ChannelAExtraction:
     )
 
 
-def test_attention_includes_filing_count_and_materiality() -> None:
+def test_attention_emits_one_event_per_source_document() -> None:
+    """A filing and its extraction describe the *same* piece of news.
+
+    Previously the filing produced one event and each extraction produced
+    another, so a single 10-K counted twice in attention acceleration. Now the
+    document is the unit of attention and the extraction only enriches it.
+    """
+
     document = _document("past", AS_OF - timedelta(days=5))
 
     events = build_attention_events(
         [_extraction(document)], {document.id: document}, WEIGHTS, AS_OF
     )
 
-    assert len(events) == 2
-    assert [event.materiality_weight for event in events] == [
-        Decimal(1),
-        Decimal(1),
+    assert len(events) == 1
+    assert events[0].materiality_weight == Decimal(1)
+    assert events[0].document_authority == Decimal(1)
+    assert events[0].days_ago == 5
+
+
+def test_attention_does_not_multiply_events_across_extractions() -> None:
+    """Several extractions from one document still yield a single event."""
+
+    document = _document("past", AS_OF - timedelta(days=5))
+    extractions = [
+        _extraction(document).model_copy(update={"id": f"extraction-{index}"})
+        for index in range(4)
     ]
+
+    events = build_attention_events(
+        extractions, {document.id: document}, WEIGHTS, AS_OF
+    )
+
+    assert len(events) == 1
+
+
+def test_extraction_materiality_enriches_rather_than_duplicates() -> None:
+    """Materiality raises the document's weight; it never adds another event.
+
+    A news item has a low baseline weight. A HIGH materiality extraction lifts
+    that single event above a LOW one rather than appending a second event, and a
+    NONE materiality extraction cannot drag a filing below its structural
+    baseline.
+    """
+
+    news = _document("news-1", AS_OF - timedelta(days=2)).model_copy(
+        update={"document_type": DocumentType.NEWS, "form_type": "news"}
+    )
+    high = _extraction(news)
+    low = high.model_copy(update={"materiality": Materiality.LOW})
+
+    enriched = build_attention_events([high], {news.id: news}, WEIGHTS, AS_OF)
+    modest = build_attention_events([low], {news.id: news}, WEIGHTS, AS_OF)
+    unextracted = build_attention_events([], {news.id: news}, WEIGHTS, AS_OF)
+
+    assert len(enriched) == len(modest) == 1
+    assert enriched[0].materiality_weight > modest[0].materiality_weight
+    # News has a zero structural baseline, so an unextracted item stays silent.
+    assert unextracted == []
+
+    filing = _document("filing-1", AS_OF - timedelta(days=2))
+    immaterial = _extraction(filing).model_copy(update={"materiality": Materiality.NONE})
+    events = build_attention_events([immaterial], {filing.id: filing}, WEIGHTS, AS_OF)
+
+    assert len(events) == 1
+    assert events[0].materiality_weight == Decimal(1)
 
 
 def test_feature_events_exclude_future_knowledge() -> None:
@@ -282,6 +337,131 @@ def test_ifrs_health_uses_native_currency_without_cross_currency_valuation() -> 
 
     assert health.revenue_growth_yoy == Decimal("0.5")
     assert health.gross_margin_trend_slope is not None
-    assert valuation.ev_sales is None
-    assert valuation.ev_ebitda is None
-    assert valuation.fcf_yield is None
+    # The reporter files in EUR while the market cap is quoted in USD. Without an
+    # authoritative point-in-time rate the ratio is not computable, and saying so
+    # explicitly is the only honest answer.
+    assert valuation.reporting_currency == "EUR"
+    assert valuation.fx_unavailable is True
+    assert valuation.reason == VALUATION_REASON_FX_UNAVAILABLE
+    assert valuation.metrics.ev_sales is None
+    assert valuation.metrics.ev_ebitda is None
+    assert valuation.metrics.fcf_yield is None
+
+
+def test_non_usd_reporter_is_valued_when_authoritative_fx_is_supplied() -> None:
+    """With a point-in-time rate the same reporter is valued normally."""
+
+    facts: list[XbrlFact] = []
+    for year, revenue in ((2024, "100"), (2025, "150")):
+        facts.append(
+            XbrlFact(
+                taxonomy="ifrs-full",
+                concept="Revenue",
+                unit="EUR",
+                value=revenue,
+                accn=str(year),
+                fy=year,
+                fp="FY",
+                form="20-F",
+                end=date(year, 12, 31),
+                filed=date(year + 1, 2, 26),
+            )
+        )
+    snapshot = FundamentalSnapshot(
+        id="security:2025",
+        security_id="security",
+        accn="2025",
+        form="20-F",
+        fy=2025,
+        fp="FY",
+        filed=date(2026, 2, 26),
+        facts=facts,
+    )
+    concepts = {
+        "concepts": {
+            "revenues": ["Revenue"],
+            "gross_profit": [],
+            "net_cash_from_operations": [],
+            "capex": [],
+            "cash_and_equivalents": [],
+            "short_term_investments": [],
+            "total_debt": [],
+            "total_assets": [],
+            "operating_income": [],
+            "stockholders_equity": [],
+            "ebitda_operating_income": [],
+            "depreciation_amortization": [],
+        }
+    }
+
+    class _DoubleRate:
+        """Deterministic stand-in for an authoritative point-in-time FX source."""
+
+        def rate_to_usd(self, currency: str, on_date: date) -> Decimal | None:
+            assert currency == "EUR"
+            assert on_date == date(2025, 12, 31)
+            return Decimal(2)
+
+    valuation = build_valuation_metrics(
+        Decimal("1000"),
+        [snapshot],
+        concepts,
+        AS_OF,
+        fx_converter=_DoubleRate(),
+    )
+
+    assert valuation.fx_unavailable is False
+    assert valuation.reason is None
+    # 150 EUR of revenue converts to 300 USD against a 1000 USD market cap.
+    assert valuation.metrics.ev_sales == Decimal(1000) / Decimal(300)
+
+
+def test_usd_reporter_needs_no_fx_converter() -> None:
+    """A USD filer is unaffected by the FX gate."""
+
+    facts = [
+        XbrlFact(
+            taxonomy="us-gaap",
+            concept="Revenues",
+            unit="USD",
+            value="200",
+            accn="2025",
+            fy=2025,
+            fp="FY",
+            form="10-K",
+            end=date(2025, 12, 31),
+            filed=date(2026, 2, 26),
+        )
+    ]
+    snapshot = FundamentalSnapshot(
+        id="security:2025",
+        security_id="security",
+        accn="2025",
+        form="10-K",
+        fy=2025,
+        fp="FY",
+        filed=date(2026, 2, 26),
+        facts=facts,
+    )
+    concepts = {
+        "concepts": {
+            "revenues": ["Revenues"],
+            "gross_profit": [],
+            "net_cash_from_operations": [],
+            "capex": [],
+            "cash_and_equivalents": [],
+            "short_term_investments": [],
+            "total_debt": [],
+            "total_assets": [],
+            "operating_income": [],
+            "stockholders_equity": [],
+            "ebitda_operating_income": [],
+            "depreciation_amortization": [],
+        }
+    }
+
+    valuation = build_valuation_metrics(Decimal("1000"), [snapshot], concepts, AS_OF)
+
+    assert valuation.reporting_currency == "USD"
+    assert valuation.fx_unavailable is False
+    assert valuation.metrics.ev_sales == Decimal(1000) / Decimal(200)
