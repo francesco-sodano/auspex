@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from auspex.api.auth import AuthenticatedUser, get_current_user
 from auspex.api.deps import get_user_settings_repo
@@ -16,6 +16,7 @@ from auspex.models.user_settings import (
     InvestmentObjective,
     RiskProfile,
     UserSettings,
+    migrate_investment_horizon,
 )
 from auspex.persistence.repositories import CosmosRepository
 
@@ -32,6 +33,13 @@ class UserSettingsRequest(BaseModel):
     not_financial_advice_acknowledged: bool
     market_loss_acknowledged: bool
     independent_decision_acknowledged: bool
+
+    @field_validator("investment_horizon", mode="before")
+    @classmethod
+    def _accept_legacy_horizon(cls, value: object) -> object:
+        """Keep older clients working across the five-band horizon split."""
+
+        return migrate_investment_horizon(value)
 
 
 def default_user_settings(user_id: str, now: datetime | None = None) -> UserSettings:

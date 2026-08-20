@@ -749,6 +749,8 @@ class BootstrapRunner:
         scored_dates: list[date] | None = None,
         performance_repo=None,
         accepted_recommendation_ids: set[str] | None = None,
+        attribution_user_id: str | None = None,
+        include_recommendation_metrics: bool = True,
     ) -> list[PerformanceMetric]:
         """Step 10: compute performance metrics over the just-replayed
         history (arc42 §5.8, §6.3 step 10) — one composite/leg IC per
@@ -762,6 +764,17 @@ class BootstrapRunner:
         already present in ``ctx.repos.score_repo`` is used instead, so the
         job recomputes metrics over the full history the nightly pipeline
         and/or bootstrap have accumulated so far.
+
+        Score-derived metrics (composite/leg IC, leg correlation, cohort
+        quality) are population-level measurements of the research itself and
+        are shared by every user. Recommendation-derived metrics (suggestion
+        hit rate, disposition outcome) are *attribution*, and attribution is
+        private: with more than one user, blending everyone's recommendations
+        into the shared ``performance`` container would both double-count the
+        same underlying decision and expose one user's behaviour to another.
+        ``attribution_user_id`` therefore scopes those metrics to a single
+        user's own recommendations; when it is omitted the behaviour is
+        unchanged (single-owner deployments and bootstrap replay).
         """
 
         all_bars = await fetch_all(ctx.repos.price_sink)
@@ -852,8 +865,24 @@ class BootstrapRunner:
                     for leg in LegName
                 },
             )
-        if ctx.repos.recommendation_repo is not None:
-            recommendations = await fetch_all(ctx.repos.recommendation_repo)
+        if include_recommendation_metrics and ctx.repos.recommendation_repo is not None:
+            if attribution_user_id is not None:
+                if hasattr(ctx.repos.recommendation_repo, "raw_query"):
+                    recommendations = await ctx.repos.recommendation_repo.query(
+                        query="SELECT * FROM c WHERE c.user_id=@user_id",
+                        parameters=[{"name": "@user_id", "value": attribution_user_id}],
+                        partition_key=attribution_user_id,
+                    )
+                else:
+                    recommendations = [
+                        recommendation
+                        for recommendation in await fetch_all(
+                            ctx.repos.recommendation_repo
+                        )
+                        if recommendation.user_id == attribution_user_id
+                    ]
+            else:
+                recommendations = await fetch_all(ctx.repos.recommendation_repo)
             snapshot_by_key = {
                 (snapshot.as_of_date, snapshot.security_id): snapshot
                 for snapshot in all_snapshots

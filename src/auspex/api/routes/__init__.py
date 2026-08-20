@@ -1,25 +1,35 @@
 from __future__ import annotations
 
 from auspex.api.routes import (
+    account,
+    account_deletion,
+    admin,
     briefing,
     conversation,
     documents,
     health,
     healthz,
+    onboarding,
     performance,
     portfolio,
+    public,
     recommendations,
     runs,
     scores,
     securities,
+    session,
 )
 
 __all__ = [
+    "account",
+    "account_deletion",
+    "admin",
     "briefing",
     "conversation",
     "documents",
     "health",
     "healthz",
+    "onboarding",
     "performance",
     "portfolio",
     "public",
@@ -27,4 +37,5 @@ __all__ = [
     "runs",
     "scores",
     "securities",
+    "session",
 ]

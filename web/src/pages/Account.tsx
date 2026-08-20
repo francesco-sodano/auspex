@@ -1,9 +1,11 @@
-import { CheckCircle2, ShieldCheck } from 'lucide-react'
+import { CheckCircle2, ShieldCheck, Trash2 } from 'lucide-react'
 import { type FormEvent, useEffect, useState } from 'react'
 import { ErrorBlock, Loading, PageHeading, formatMoney } from '../components/common'
 import { useApi } from '../lib/api'
 import type {
   AccountConfiguration,
+  InvestmentHorizon,
+  AccountDeletionStatus,
   RiskProfile,
   UserSettings,
   UserSettingsInput,
@@ -14,6 +16,12 @@ const PROFILE_DEFAULTS: Record<RiskProfile, string> = {
   MODERATE: '3000',
   AGGRESSIVE: '1000',
 }
+
+const normalizeHorizon = (value: string): InvestmentHorizon => ({
+  SHORT_TERM: 'ONE_TO_THREE_YEARS',
+  MEDIUM_TERM: 'THREE_TO_SEVEN_YEARS',
+  LONG_TERM: 'OVER_SEVEN_YEARS',
+}[value] as InvestmentHorizon | undefined) ?? value as InvestmentHorizon
 
 const PROFILES: Array<{ id: RiskProfile; title: string; description: string; thresholds: string }> = [
   {
@@ -49,9 +57,13 @@ export function Account() {
   const [settings, setSettings] = useState<UserSettings | null>(null)
   const [configuration, setConfiguration] = useState<AccountConfiguration | null>(null)
   const [draft, setDraft] = useState<UserSettingsInput | null>(null)
-  const [error, setError] = useState<unknown>(null)
+  const [loadError, setLoadError] = useState<unknown>(null)
+  const [actionError, setActionError] = useState<unknown>(null)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [deletionOpen, setDeletionOpen] = useState(false)
+  const [deletionConfirmation, setDeletionConfirmation] = useState('')
+  const [deletionStatus, setDeletionStatus] = useState<AccountDeletionStatus | null>(null)
 
   useEffect(() => {
     void Promise.all([
@@ -63,7 +75,7 @@ export function Account() {
       setDraft({
         risk_profile: value.risk_profile,
         cash_reserve_chf: value.cash_reserve_chf,
-        investment_horizon: value.investment_horizon,
+        investment_horizon: normalizeHorizon(value.investment_horizon),
         investment_objective: value.investment_objective,
         directional_only_acknowledged: value.directional_only_acknowledged,
         no_guarantee_acknowledged: value.no_guarantee_acknowledged,
@@ -71,10 +83,21 @@ export function Account() {
         market_loss_acknowledged: value.market_loss_acknowledged,
         independent_decision_acknowledged: value.independent_decision_acknowledged,
       })
-    }).catch(setError)
+    }).catch(setLoadError)
   }, [api])
 
-  if (error) return <ErrorBlock error={error} />
+  useEffect(() => {
+    if (!deletionStatus || !['PENDING', 'RUNNING'].includes(deletionStatus.status)) return
+    const timer = window.setInterval(() => {
+      void api.getDeletionStatus().then((status) => {
+        setDeletionStatus(status)
+        if (status.status === 'COMPLETED') window.location.reload()
+      }).catch(setActionError)
+    }, 2000)
+    return () => window.clearInterval(timer)
+  }, [api, deletionStatus])
+
+  if (loadError) return <ErrorBlock error={loadError} />
   if (!settings || !draft || !configuration) return <Loading label="Loading account settings" />
 
   const setProfile = (profile: RiskProfile) => {
@@ -91,13 +114,27 @@ export function Account() {
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     setSaving(true)
-    setError(null)
+    setActionError(null)
     try {
       const updated = await api.updateUserSettings(draft)
       setSettings(updated)
       setSaved(true)
     } catch (cause) {
-      setError(cause)
+      setActionError(cause)
+    } finally {
+      setSaving(false)
+    }
+  }
+  const requestDeletion = async () => {
+    if (deletionConfirmation.trim() !== 'DELETE MY ACCOUNT') return
+    setSaving(true)
+    setActionError(null)
+    try {
+      const status = await api.deleteAccount(deletionConfirmation)
+      setDeletionStatus(status)
+      if (status.status === 'COMPLETED') window.location.reload()
+    } catch (cause) {
+      setActionError(cause)
     } finally {
       setSaving(false)
     }
@@ -105,7 +142,8 @@ export function Account() {
 
   return (
     <>
-      <PageHeading eyebrow="Owner controls" title="Account" description="Choose how cautiously Auspex converts evidence into portfolio actions and record the required decision-support acknowledgements." />
+      <PageHeading eyebrow="Personal controls" title="Account" description="Choose how cautiously Auspex converts evidence into portfolio actions and record the required decision-support acknowledgements." />
+      {actionError && <div className="notice danger"><ErrorBlock error={actionError} /></div>}
       <form className="account-settings" onSubmit={submit}>
         <section>
           <header><h2>Risk profile</h2><p>This changes policy gates used by the next nightly recommendation run; it never changes the six-leg score itself.</p></header>
@@ -125,9 +163,11 @@ export function Account() {
             <label className="field">
               <span>Investment horizon</span>
               <select value={draft.investment_horizon} onChange={(event) => setDraft({ ...draft, investment_horizon: event.target.value as UserSettingsInput['investment_horizon'] })}>
-                <option value="SHORT_TERM">Short term · up to 3 years</option>
-                <option value="MEDIUM_TERM">Medium term · 3–7 years</option>
-                <option value="LONG_TERM">Long term · more than 7 years</option>
+                <option value="SIX_MONTHS">6 months</option>
+                <option value="ONE_YEAR">1 year</option>
+                <option value="ONE_TO_THREE_YEARS">1–3 years</option>
+                <option value="THREE_TO_SEVEN_YEARS">3–7 years</option>
+                <option value="OVER_SEVEN_YEARS">More than 7 years</option>
               </select>
             </label>
             <label className="field">
@@ -171,6 +211,24 @@ export function Account() {
           <button className="button primary" disabled={!acknowledged || saving}>{saving ? 'Saving…' : 'Save account settings'}</button>
         </footer>
       </form>
+      <section className="danger-zone">
+        <header><h2>Delete Auspex account</h2><p>Permanently removes your portfolio events, settings, recommendations, dispositions, projections, private attribution, onboarding state, and conversations. Shared market research and your Microsoft identity are not deleted.</p></header>
+        {!deletionOpen ? (
+          <button className="button danger" type="button" onClick={() => setDeletionOpen(true)}><Trash2 size={14} /> Delete my account and data</button>
+        ) : (
+          <div className="deletion-confirmation">
+            <label className="field">
+              <span>Type DELETE MY ACCOUNT to confirm</span>
+              <input value={deletionConfirmation} onChange={(event) => setDeletionConfirmation(event.target.value)} />
+            </label>
+            <div>
+              <button className="button" type="button" onClick={() => { setDeletionOpen(false); setDeletionConfirmation('') }}>Cancel</button>
+              <button className="button danger" type="button" disabled={saving || deletionConfirmation.trim() !== 'DELETE MY ACCOUNT'} onClick={() => void requestDeletion()}><Trash2 size={14} /> Permanently delete</button>
+            </div>
+          </div>
+        )}
+        {deletionStatus && <div className="notice warning">Deletion {deletionStatus.status.toLowerCase()} · {deletionStatus.deleted_items} items removed · {deletionStatus.remaining_items} remaining</div>}
+      </section>
     </>
   )
 }

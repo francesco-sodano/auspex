@@ -3,6 +3,15 @@
 from __future__ import annotations
 
 from auspex.pipeline.context import PipelineContext, PipelineProviders, PipelineRepos
+from auspex.pipeline.fanout import (
+    PER_USER_STEPS,
+    SHARED_STEPS,
+    MultiUserRunResult,
+    UserStageResult,
+    run_multi_user_pipeline,
+    run_shared_stage,
+    run_user_stage,
+)
 from auspex.pipeline.manifest import (
     complete_step,
     fail_step,
@@ -18,6 +27,13 @@ __all__ = [
     "PipelineContext",
     "PipelineProviders",
     "PipelineRepos",
+    "PER_USER_STEPS",
+    "SHARED_STEPS",
+    "MultiUserRunResult",
+    "UserStageResult",
+    "run_multi_user_pipeline",
+    "run_shared_stage",
+    "run_user_stage",
     "complete_step",
     "fail_step",
     "finalize",

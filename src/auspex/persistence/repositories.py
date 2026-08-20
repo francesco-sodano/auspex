@@ -27,7 +27,8 @@ import asyncio
 from datetime import date
 from typing import Generic, TypeVar
 
-from azure.cosmos.exceptions import CosmosResourceNotFoundError
+from azure.core import MatchConditions
+from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
 from pydantic import BaseModel
 
 from auspex.extraction.cache import channel_a_cache_key
@@ -54,6 +55,61 @@ class CosmosRepository(Generic[T]):
         container = await self._context.container(self._container_name)
         await container.upsert_item(item.model_dump(mode="json"))
 
+    async def delete(self, id_: str, partition_key: str) -> bool:
+        """Hard-delete one document. Returns ``False`` if it was already gone.
+
+        Deleting an absent document is not an error: account deletion is
+        retried until every partition verifies empty, so "already gone" is the
+        success case on a replay.
+        """
+
+        container = await self._context.container(self._container_name)
+        try:
+            await container.delete_item(item=id_, partition_key=partition_key)
+        except CosmosResourceNotFoundError:
+            return False
+        return True
+
+    async def partition_ids(self, partition_key: str) -> list[str]:
+        """Every document id inside one logical partition.
+
+        Deliberately partition-scoped: this is the only enumeration account
+        deletion needs, and it never becomes a cross-partition scan.
+        """
+
+        container = await self._context.container(self._container_name)
+        items = container.query_items(
+            query="SELECT VALUE c.id FROM c",
+            parameters=[],
+            partition_key=partition_key,
+        )
+        return [str(raw) async for raw in items]
+
+    async def count_partition(self, partition_key: str) -> int:
+        """Number of documents left in one logical partition."""
+
+        container = await self._context.container(self._container_name)
+        items = container.query_items(
+            query="SELECT VALUE COUNT(1) FROM c",
+            parameters=[],
+            partition_key=partition_key,
+        )
+        rows = [raw async for raw in items]
+        return int(rows[0]) if rows else 0
+
+    async def purge_partition(self, partition_key: str) -> int:
+        """Delete every document in one logical partition. Idempotent.
+
+        Returns the number of documents actually removed by this call; a
+        replay over an already-empty partition returns ``0`` and succeeds.
+        """
+
+        deleted = 0
+        for document_id in await self.partition_ids(partition_key):
+            if await self.delete(document_id, partition_key):
+                deleted += 1
+        return deleted
+
     async def get(self, id_: str, partition_key: str) -> T | None:
         container = await self._context.container(self._container_name)
         try:
@@ -61,6 +117,33 @@ class CosmosRepository(Generic[T]):
         except CosmosResourceNotFoundError:
             return None
         return self._model_cls.model_validate(_domain_document(raw))
+
+    async def get_with_etag(self, id_: str, partition_key: str) -> tuple[T, str] | None:
+        """Point-read a document together with its Cosmos concurrency token."""
+
+        container = await self._context.container(self._container_name)
+        try:
+            raw = await container.read_item(item=id_, partition_key=partition_key)
+        except CosmosResourceNotFoundError:
+            return None
+        return self._model_cls.model_validate(_domain_document(raw)), str(raw["_etag"])
+
+    async def replace_if_match(self, item: T, etag: str) -> bool:
+        """Replace only when no other process changed the document."""
+
+        container = await self._context.container(self._container_name)
+        try:
+            await container.replace_item(
+                item=item.id,
+                body=item.model_dump(mode="json"),
+                etag=etag,
+                match_condition=MatchConditions.IfNotModified,
+            )
+        except CosmosHttpResponseError as exc:
+            if exc.status_code == 412:
+                return False
+            raise
+        return True
 
     async def query(
         self, query: str, parameters: list[dict] | None = None, partition_key: str | None = None

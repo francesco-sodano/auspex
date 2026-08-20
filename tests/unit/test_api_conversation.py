@@ -5,13 +5,19 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from auspex.api.auth import AuthenticatedUser, get_current_user
-from auspex.api.deps import get_universe
+from auspex.api.deps import get_app_user_service, get_universe
 from auspex.api.repos import get_conversation_repo
 from auspex.api.routes import conversation
 from auspex.assistant.retrieval import RetrievalResult, RetrievedItem
 from auspex.config.loader import load_universe
+from auspex.models.app_user import UserStatus
 from auspex.models.conversation import ConversationTurn, RetrievalPlan
-from tests.unit.conftest import FakeCosmosRepository, make_router_app
+from tests.unit.conftest import (
+    FakeCosmosRepository,
+    build_app_user_service,
+    make_app_user,
+    make_router_app,
+)
 
 
 def _turn(user_id: str, conversation_id: str, turn_index: int, question: str) -> ConversationTurn:
@@ -29,6 +35,9 @@ def _make_client(repo=None, authed: bool = True, extra_overrides=None):
     overrides = {
         get_conversation_repo: lambda: repo or FakeCosmosRepository(),
         get_universe: load_universe,
+        get_app_user_service: lambda: build_app_user_service(
+            [make_app_user("owner-1")]
+        ),
         **(extra_overrides or {}),
     }
     if authed:
@@ -156,6 +165,37 @@ class TestChatMountPoint:
         assert response.status_code == 200
         assert "could not produce an answer that passed Auspex grounding checks" in response.text
         assert "ranked 99" not in response.text
+
+    def test_answer_is_not_persisted_after_account_access_changes(self):
+        class Planner:
+            async def plan(self, question, state, universe_tickers):
+                return RetrievalPlan(data_classes=["score_snapshot"])
+
+        class Fetcher:
+            async def fetch(self, plan, user_id):
+                return RetrievalResult(items=[])
+
+        class Answerer:
+            async def stream_answer(self, question, retrieval, conversation_state):
+                yield "This answer finished after deletion started."
+
+        repo = FakeCosmosRepository()
+        suspended = make_app_user("owner-1", status=UserStatus.SUSPENDED)
+        client = _make_client(
+            repo=repo,
+            extra_overrides={
+                conversation.get_planner: Planner,
+                conversation.get_fetcher: Fetcher,
+                conversation.get_answerer: Answerer,
+                get_app_user_service: lambda: build_app_user_service([suspended]),
+            },
+        )
+
+        response = client.post("/api/chat", json={"question": "what changed?"})
+
+        assert response.status_code == 200
+        assert "Account access changed" in response.text
+        assert repo.upserted == []
 
     def test_stock_opinion_forces_complete_company_briefing(self):
         class Planner:

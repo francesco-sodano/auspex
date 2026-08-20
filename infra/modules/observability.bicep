@@ -1,11 +1,12 @@
 param location string
 param environmentName string
+param preserveLegacyResourceNames bool = false
 param alertEmailAddress string
 param monthlyBudgetAmount int = 165
 param budgetStartDate string = utcNow('yyyy-MM-01')
 
 resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
-  name: 'law-auspex-${environmentName}'
+  name: preserveLegacyResourceNames ? 'law-auspex' : 'law-auspex-${environmentName}'
   location: location
   properties: {
     retentionInDays: 30
@@ -18,7 +19,7 @@ resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
 }
 
 resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = {
-  name: 'appi-auspex-${environmentName}'
+  name: preserveLegacyResourceNames ? 'appi-auspex' : 'appi-auspex-${environmentName}'
   location: location
   kind: 'web'
   properties: {
@@ -30,7 +31,7 @@ resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = {
 }
 
 resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
-  name: 'ag-auspex-${environmentName}'
+  name: preserveLegacyResourceNames ? 'ag-auspex' : 'ag-auspex-${environmentName}'
   location: 'global'
   properties: {
     groupShortName: 'auspex'
@@ -124,7 +125,7 @@ resource scheduledAlerts 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = [
 ]
 
 resource budget 'Microsoft.Consumption/budgets@2023-11-01' = {
-  name: 'budget-auspex-${environmentName}-monthly'
+  name: preserveLegacyResourceNames ? 'budget-auspex-monthly' : 'budget-auspex-${environmentName}-monthly'
   properties: {
     category: 'Cost'
     amount: monthlyBudgetAmount

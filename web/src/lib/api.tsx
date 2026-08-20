@@ -12,6 +12,13 @@ import type {
   UserSettings,
   UserSettingsInput,
   AccountConfiguration,
+  AccountDeletionStatus,
+  AdminUser,
+  InitialPortfolioInput,
+  RegistrationInput,
+  UserRole,
+  UserSession,
+  UserLifecycleStatus,
 } from './types'
 
 type Api = {
@@ -31,6 +38,19 @@ type Api = {
   updateUserSettings: (input: UserSettingsInput) => Promise<UserSettings>
   getAccountConfiguration: () => Promise<AccountConfiguration>
   getChatHistory: (conversationId?: string) => Promise<ConversationTurn[]>
+  getSession: () => Promise<UserSession>
+  register: (input: RegistrationInput) => Promise<UserSession>
+  getRegistrationStatus: () => Promise<UserSession>
+  initializePortfolio: (input: InitialPortfolioInput) => Promise<UserSession>
+  completeOnboarding: () => Promise<UserSession>
+  listAdminUsers: (status?: UserLifecycleStatus) => Promise<AdminUser[]>
+  approveUser: (id: string) => Promise<AdminUser>
+  rejectUser: (id: string) => Promise<AdminUser>
+  suspendUser: (id: string) => Promise<AdminUser>
+  reinstateUser: (id: string) => Promise<AdminUser>
+  updateUserRole: (id: string, role: UserRole) => Promise<AdminUser>
+  deleteAccount: (confirmation: string) => Promise<AccountDeletionStatus>
+  getDeletionStatus: () => Promise<AccountDeletionStatus>
 }
 
 const ApiContext = createContext<Api | null>(null)
@@ -51,8 +71,17 @@ export function ApiProvider({ getToken, children }: PropsWithChildren<{ getToken
     if (!(init?.body instanceof FormData)) headers.set('Content-Type', 'application/json')
     const response = await fetch(`${baseUrl}${path}`, { ...init, headers })
     if (!response.ok) {
-      const detail = await response.text()
-      throw new Error(detail || `${response.status} ${response.statusText}`)
+      const contentType = response.headers.get('content-type') ?? ''
+      let detail = `${response.status} ${response.statusText}`
+      if (contentType.includes('application/json')) {
+        const payload = await response.json() as {
+          detail?: string | Array<{ msg?: string }> | { message?: string; reason?: string }
+        }
+        if (typeof payload.detail === 'string') detail = payload.detail
+        else if (Array.isArray(payload.detail)) detail = payload.detail.map((item) => item.msg).filter(Boolean).join(' · ') || detail
+        else if (payload.detail?.message) detail = payload.detail.message
+      }
+      throw new Error(detail)
     }
     if (response.status === 204) return undefined as T
     return await response.json() as T
@@ -78,15 +107,7 @@ export function ApiProvider({ getToken, children }: PropsWithChildren<{ getToken
     }
   }, [])
 
-  useEffect(() => {
-    void Promise.allSettled([
-      cachedRequest('/api/briefing'),
-      cachedRequest('/api/securities'),
-      cachedRequest('/api/portfolio'),
-      cachedRequest('/api/portfolio/transactions'),
-      cachedRequest('/api/performance'),
-    ])
-  }, [cachedRequest])
+  useEffect(() => () => cache.current.clear(), [])
 
   const api = useMemo<Api>(() => ({
     getBriefing: (date) => cachedRequest(`/api/briefing${date ? `?date=${encodeURIComponent(date)}` : ''}`),
@@ -148,6 +169,31 @@ export function ApiProvider({ getToken, children }: PropsWithChildren<{ getToken
         }
       }
     },
+    getSession: () => request('/api/session'),
+    register: (input) => request('/api/registration', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+    getRegistrationStatus: () => request('/api/registration/status'),
+    initializePortfolio: (input) => request('/api/onboarding/portfolio', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+    completeOnboarding: () => request('/api/onboarding/complete', { method: 'POST' }),
+    listAdminUsers: (status) => request(`/api/admin/users${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+    approveUser: (id) => request(`/api/admin/users/${encodeURIComponent(id)}/approve`, { method: 'POST' }),
+    rejectUser: (id) => request(`/api/admin/users/${encodeURIComponent(id)}/reject`, { method: 'POST' }),
+    suspendUser: (id) => request(`/api/admin/users/${encodeURIComponent(id)}/suspend`, { method: 'POST' }),
+    reinstateUser: (id) => request(`/api/admin/users/${encodeURIComponent(id)}/reinstate`, { method: 'POST' }),
+    updateUserRole: (id, role) => request(`/api/admin/users/${encodeURIComponent(id)}/role`, {
+      method: 'PUT',
+      body: JSON.stringify({ role }),
+    }),
+    deleteAccount: (confirmation) => request('/api/account/deletion-request', {
+      method: 'POST',
+      body: JSON.stringify({ confirmation }),
+    }),
+    getDeletionStatus: () => request('/api/account/deletion-status'),
     streamChat: async (question, conversationId, onChunk) => {
       const token = await getToken()
       const response = await fetch(`${baseUrl}/api/chat`, {

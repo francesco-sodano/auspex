@@ -33,6 +33,7 @@ from auspex.api.deps import (
     get_performance_repo,
     get_portfolio_ledger_service,
     get_recommendation_repo,
+    get_user_performance_repo,
 )
 from auspex.api.schemas import (
     AttributionStatus,
@@ -90,6 +91,7 @@ def _latest_by_horizon(metrics: list[PerformanceMetric]) -> dict[int | None, Per
 async def get_performance(
     user: AuthenticatedUser = Depends(get_current_user),
     repo: CosmosRepository = Depends(get_performance_repo),
+    user_performance_repo: CosmosRepository = Depends(get_user_performance_repo),
     recommendation_repo: CosmosRepository[Recommendation] = Depends(
         get_recommendation_repo
     ),
@@ -98,8 +100,28 @@ async def get_performance(
     composite_ic_rows = await _metrics_of_type(repo, "composite_ic")
     leg_ic_rows = await _metrics_of_type(repo, "leg_ic")
     leg_correlation_rows = await _metrics_of_type(repo, "leg_correlation")
-    hit_rate_rows = await _metrics_of_type(repo, "suggestion_hit_rate")
-    disposition_rows = await _metrics_of_type(repo, "disposition_outcome")
+    hit_rate_rows = await user_performance_repo.query(
+        query=(
+            "SELECT * FROM c WHERE c.user_id=@user_id "
+            "AND c.metric_type=@metric_type"
+        ),
+        parameters=[
+            {"name": "@user_id", "value": user.user_id},
+            {"name": "@metric_type", "value": "suggestion_hit_rate"},
+        ],
+        partition_key=user.user_id,
+    )
+    disposition_rows = await user_performance_repo.query(
+        query=(
+            "SELECT * FROM c WHERE c.user_id=@user_id "
+            "AND c.metric_type=@metric_type"
+        ),
+        parameters=[
+            {"name": "@user_id", "value": user.user_id},
+            {"name": "@metric_type", "value": "disposition_outcome"},
+        ],
+        partition_key=user.user_id,
+    )
     cohort_rows = await _metrics_of_type(repo, "cohort_quality")
 
     all_rows = [

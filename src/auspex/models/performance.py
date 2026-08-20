@@ -23,6 +23,10 @@ class PerformanceMetric(AuspexModel):
     value: str = Field(description="Decimal-as-string metric value")
     sample_size: int
     detail: dict[str, str] = Field(default_factory=dict)
+    user_id: str | None = Field(
+        default=None,
+        description="set only for private recommendation/outcome metrics",
+    )
 
     @property
     def partition_key(self) -> str:

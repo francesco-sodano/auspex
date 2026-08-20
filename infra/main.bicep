@@ -5,21 +5,67 @@ targetScope = 'subscription'
 @maxLength(16)
 param environmentName string
 
+@description('Reuse the pre-4.1 production resource names during an in-place upgrade. Leave false for all fresh deployments.')
+param preserveLegacyResourceNames bool = false
+
 @description('Primary Azure region.')
 param location string
 
 @description('Azure OpenAI region where the required GPT-4.1 models are available.')
 param openAiLocation string
 
-@description('Microsoft Entra tenant ID for the single-tenant SPA/API registration.')
+@description('Microsoft Entra tenant ID for the SPA/API registration.')
 param authTenantId string
 
 @description('Microsoft Entra application (client) ID used by browser PKCE and API token validation.')
 param authClientId string
 
-@description('Microsoft Entra object ID of the single portfolio owner.')
-@minLength(1)
-param ownerProviderUserId string
+@description('Tenant configuration: "workforce" for an organisational tenant (login.microsoftonline.com), or "external" for a Microsoft Entra External ID tenant (<subdomain>.ciamlogin.com), which is what allows sign-up with personal Gmail/Outlook addresses through a sign-up/sign-in user flow.')
+@allowed([
+  'workforce'
+  'external'
+])
+param authTenantType string = 'workforce'
+
+@description('External tenant subdomain, i.e. the "contoso" in contoso.ciamlogin.com. Required when authTenantType is "external"; ignored otherwise.')
+param authTenantSubdomain string = ''
+
+@description('Explicit authority URL. Leave empty to derive it from the tenant type, id and subdomain.')
+param authAuthorityOverride string = ''
+
+@description('Explicit token issuer (the "iss" claim). Leave empty to derive it. An external tenant may legitimately issue either the tenant-id or the .onmicrosoft.com authority form, so set this if token validation reports an untrusted issuer.')
+param authIssuerOverride string = ''
+
+@description('Explicit JWKS URL. Leave empty to derive it.')
+param authJwksUrlOverride string = ''
+
+@description('OpenID Connect metadata URL. When set, the API reads the authoritative issuer and jwks_uri from the tenant itself, which removes any possibility of misconfiguring them. Leave empty to derive it from the authority.')
+param authOpenIdConfigurationUrlOverride string = ''
+
+@description('Optional API scope the SPA requests, e.g. api://<client-id>/Auspex.Access. Empty uses the default scope.')
+param authApiScope string = ''
+
+@description('Issuer of the tenant being migrated away from. Set together with authLegacyJwksUrl during a tenant cutover so existing users are not locked out; clear both once everyone has re-authenticated.')
+param authLegacyIssuer string = ''
+
+@description('JWKS URL of the tenant being migrated away from. See authLegacyIssuer.')
+param authLegacyJwksUrl string = ''
+
+@description('Application audience/client ID used by tokens from the legacy issuer. Required with authLegacyIssuer and authLegacyJwksUrl.')
+param authLegacyAudience string = ''
+
+@description('Microsoft Entra object ID of the pre-existing portfolio owner, whose ledger partition is preserved across the multi-user migration.')
+param ownerProviderUserId string = ''
+
+@description('Object ID carried by the pre-existing owner token in the legacy tenant. During a cutover, only this principal aliases to ownerProviderUserId.')
+param ownerLegacyProviderUserId string = ''
+
+@description('Optional pre-existing owner_user_sk ledger partition to preserve during the multi-user migration.')
+param ownerLedgerPartitionKey string = ''
+
+@description('Email address of the first administrator. Consulted only until an administrator exists; authority then binds to that principal\'s immutable Entra object ID.')
+@minLength(3)
+param initialAdminEmail string
 
 @description('Descriptive SEC EDGAR user agent with a monitored contact address.')
 @minLength(8)
@@ -52,6 +98,18 @@ param existingLedgerResourceGroup string = ''
 @description('Database containing app_users and portfolio_transactions.')
 param ledgerDatabaseName string = 'auspex'
 
+@description('Existing primary Auspex Cosmos account name for an in-place upgrade. Leave empty to create/use the environment-derived name.')
+param primaryCosmosAccountNameOverride string = ''
+
+@description('Existing Auspex blob storage account name for an in-place upgrade. Leave empty to create/use the environment-derived name.')
+param storageAccountNameOverride string = ''
+
+@description('Existing Auspex container registry name for an in-place upgrade. Leave empty to create/use the environment-derived name.')
+param registryNameOverride string = ''
+
+@description('Existing Auspex Azure OpenAI account name for an in-place upgrade. Leave empty to create/use the environment-derived name.')
+param openAiAccountNameOverride string = ''
+
 @description('Monthly Azure budget amount in the subscription billing currency.')
 param monthlyBudgetAmount string = '165'
 
@@ -72,10 +130,40 @@ var keyVaultResourceGroupName = createsKeyVault ? resourceGroupName : existingKe
 var createsLedger = empty(existingLedgerAccountName)
 var ledgerAccountName = createsLedger ? 'cosmos-auspex-ledger-${suffix}' : existingLedgerAccountName
 var ledgerResourceGroupName = createsLedger ? resourceGroupName : existingLedgerResourceGroup
+var primaryCosmosAccountName = empty(primaryCosmosAccountNameOverride)
+  ? 'cosmos-auspex-${suffix}'
+  : primaryCosmosAccountNameOverride
+var storageAccountName = empty(storageAccountNameOverride) ? 'stauspex${suffix}' : storageAccountNameOverride
+var registryName = empty(registryNameOverride) ? 'crauspex${suffix}' : registryNameOverride
+var openAiAccountName = empty(openAiAccountNameOverride) ? 'aoai-auspex-${suffix}' : openAiAccountNameOverride
+// Authority/issuer/JWKS derivation.
+//
+// A *workforce* tenant is served by the cloud's standard login endpoint. An
+// *external* tenant (Microsoft Entra External ID) is served by its own
+// `<subdomain>.ciamlogin.com` host, and MSAL will refuse that host unless the
+// SPA declares it in `knownAuthorities` — hence `authKnownAuthority`.
+//
+// Every derived value can be overridden, because the two tenant types disagree
+// about the exact issuer string and an external tenant may issue either the
+// tenant-id or the .onmicrosoft.com authority form. The API additionally reads
+// the authoritative issuer/jwks_uri from the OpenID metadata document at
+// runtime, so the derivation below only has to be close enough to locate that
+// document.
 var loginEndpoint = environment().authentication.loginEndpoint
-var authAuthority = '${loginEndpoint}${authTenantId}'
-var authIssuer = '${loginEndpoint}${authTenantId}/v2.0'
-var authJwksUrl = '${loginEndpoint}${authTenantId}/discovery/v2.0/keys'
+var isExternalTenant = authTenantType == 'external'
+var ciamHost = '${authTenantSubdomain}.ciamlogin.com'
+var derivedAuthority = isExternalTenant
+  ? 'https://${ciamHost}/${authTenantId}'
+  : '${loginEndpoint}${authTenantId}'
+var authAuthority = empty(authAuthorityOverride) ? derivedAuthority : authAuthorityOverride
+var authIssuer = empty(authIssuerOverride) ? '${authAuthority}/v2.0' : authIssuerOverride
+var authJwksUrl = empty(authJwksUrlOverride)
+  ? '${authAuthority}/discovery/v2.0/keys'
+  : authJwksUrlOverride
+var authOpenIdConfigurationUrl = empty(authOpenIdConfigurationUrlOverride)
+  ? '${authAuthority}/v2.0/.well-known/openid-configuration'
+  : authOpenIdConfigurationUrlOverride
+var authKnownAuthority = isExternalTenant ? ciamHost : ''
 
 resource resourceGroup 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: resourceGroupName
@@ -110,6 +198,7 @@ module observability 'modules/observability.bicep' = {
   params: {
     location: location
     environmentName: environmentName
+    preserveLegacyResourceNames: preserveLegacyResourceNames
     alertEmailAddress: alertEmailAddress
     monthlyBudgetAmount: int(monthlyBudgetAmount)
   }
@@ -120,7 +209,7 @@ module registry 'modules/registry.bicep' = {
   scope: resourceGroup
   params: {
     location: location
-    registryName: 'crauspex${suffix}'
+    registryName: registryName
     environmentName: environmentName
   }
 }
@@ -130,8 +219,8 @@ module data 'modules/data.bicep' = {
   scope: resourceGroup
   params: {
     location: location
-    cosmosAccountName: 'cosmos-auspex-${suffix}'
-    storageAccountName: 'stauspex${suffix}'
+    cosmosAccountName: primaryCosmosAccountName
+    storageAccountName: storageAccountName
     logAnalyticsWorkspaceId: observability.outputs.workspaceId
   }
 }
@@ -141,7 +230,7 @@ module openAi 'modules/openai.bicep' = {
   scope: resourceGroup
   params: {
     location: openAiLocation
-    accountName: 'aoai-auspex-${suffix}'
+    accountName: openAiAccountName
     logAnalyticsWorkspaceId: observability.outputs.workspaceId
     environmentName: environmentName
     extractionCapacity: int(extractionModelCapacity)
@@ -199,6 +288,7 @@ module compute 'modules/containerapps.bicep' = {
   params: {
     location: location
     environmentName: environmentName
+    preserveLegacyResourceNames: preserveLegacyResourceNames
     infrastructureSubnetId: network.outputs.containerAppsSubnetId
     logAnalyticsCustomerId: observability.outputs.logAnalyticsCustomerId
     logAnalyticsSharedKey: observability.outputs.logAnalyticsSharedKey
@@ -215,7 +305,16 @@ module compute 'modules/containerapps.bicep' = {
     authAuthority: authAuthority
     authIssuer: authIssuer
     authJwksUrl: authJwksUrl
+    authOpenIdConfigurationUrl: authOpenIdConfigurationUrl
+    authKnownAuthority: authKnownAuthority
+    authApiScope: authApiScope
+    authLegacyIssuer: authLegacyIssuer
+    authLegacyJwksUrl: authLegacyJwksUrl
+    authLegacyAudience: authLegacyAudience
     ownerProviderUserId: ownerProviderUserId
+    ownerLegacyProviderUserId: ownerLegacyProviderUserId
+    ownerLedgerPartitionKey: ownerLedgerPartitionKey
+    initialAdminEmail: initialAdminEmail
     secEdgarUserAgent: secEdgarUserAgent
   }
   dependsOn: [

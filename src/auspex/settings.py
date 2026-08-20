@@ -85,18 +85,101 @@ class Settings(BaseSettings):
     aoai_narrative_tokens_per_minute: float = 30_000.0
 
     # --- Entra External ID (federated auth, arc42 F-16) --------------------------------
+    #
+    # Auspex authenticates against a Microsoft Entra tenant, which may be either:
+    #
+    # * a **workforce** tenant (`login.microsoftonline.com`), where every principal is
+    #   an organisational member or B2B guest; or
+    # * an **external** tenant (Microsoft Entra External ID / CIAM,
+    #   `<subdomain>.ciamlogin.com`), which is what lets people sign up with a personal
+    #   Gmail/Outlook address or a local email + password through a sign-up/sign-in
+    #   user flow. Consumer identities are the whole point of an external tenant.
+    #
+    # Nothing here is derived from a naming convention, because the two tenant types
+    # disagree on the exact issuer string and an external tenant may legitimately issue
+    # either `https://<sub>.ciamlogin.com/<tenant-id>/v2.0` or
+    # `https://<sub>.ciamlogin.com/<sub>.onmicrosoft.com/v2.0` depending on the
+    # authority the app was registered with. Guessing wrong rejects every token, so the
+    # values below are supplied explicitly by infrastructure and/or discovered from the
+    # tenant's own OpenID Connect metadata (`entra_openid_configuration_url`), which is
+    # authoritative.
     entra_tenant_id: str = ""
     entra_audience: str = ""
     entra_authority: str = ""
     entra_issuer: str = ""
     entra_jwks_url: str = ""
 
+    # OpenID Connect metadata document. When set, `issuer` and `jwks_uri` are read from
+    # it at runtime and take precedence over the static values above — the tenant itself
+    # is the only source that cannot be misconfigured.
+    entra_openid_configuration_url: str = ""
+
+    # Host that MSAL must be told to trust (`knownAuthorities`). Required for external
+    # tenants: MSAL only trusts `login.microsoftonline.com` implicitly, so a
+    # `*.ciamlogin.com` authority is rejected unless it is declared. Served to the SPA
+    # by `/auth-config.json`.
+    entra_known_authority: str = ""
+
+    # Optional scope the SPA must request for the API audience, e.g.
+    # `api://<client-id>/Auspex.Access`. Served to the SPA so the token request is not
+    # hard-coded in the frontend.
+    entra_api_scope: str = ""
+
+    # Migration window. While a deployment moves from one tenant to another (typically
+    # workforce -> external), tokens from the previous tenant stay acceptable so the
+    # existing owner is not locked out mid-cutover. Both must be set to take effect;
+    # clear them once every user has re-authenticated against the new tenant.
+    entra_legacy_issuer: str = ""
+    entra_legacy_jwks_url: str = ""
+    entra_legacy_audience: str = ""
+
     # The owner's fixed Entra `oid` claim (arc42 §5.7, §11 "user_id derives from
     # the token"). Configuring this lets
     # nightly/bootstrap (which have no live bearer token to read a claim from) derive
     # the same user_id/owner_user_sk an authenticated API request resolves. Existing
     # deployments may instead resolve the owner from `app_users`.
+    #
+    # With multi-user enabled this no longer *restricts* who may authenticate: it
+    # only pins the pre-existing production owner's ledger partition so that
+    # owner's historical events stay readable under their own account.
     owner_provider_user_id: str = ""
+
+    # During an issuer cutover, the pre-existing owner's old token carries a
+    # different immutable object ID. When all three legacy token settings are
+    # enabled, map only this old principal to `owner_provider_user_id`; no other
+    # identity receives an alias.
+    owner_legacy_provider_user_id: str = ""
+
+    # Multi-user migration safety valve. A deployment whose pre-existing ledger
+    # was addressed by a partition value that is *not* the derived user_id (for
+    # example one resolved dynamically through the source account's `app_users`
+    # container) can pin that exact value here. It is applied only to the
+    # principal named by `owner_provider_user_id`, and only at registration, so
+    # that owner's historical events stay readable under their own account
+    # while every other user is partitioned by their own user_id.
+    owner_ledger_partition_key: str = ""
+
+    # --- Multi-user administration (arc42 §5.7 "App user lifecycle") ------------------
+    # Names the first administrator by email so a brand-new deployment has someone
+    # who can approve everybody else. Consulted *only* while no administrator exists
+    # yet; the moment the first admin registers, authority binds permanently to that
+    # principal's immutable Entra object ID (`AdminAuthorityBinding`) and changing
+    # this value grants nothing.
+    initial_admin_email: str = ""
+
+    # Maximum number of ACTIVE users whose per-user nightly stage (portfolio
+    # projection, policy, recommendations) runs concurrently. Bounded so a large
+    # roster cannot exhaust Cosmos RU or the source ledger's connection budget.
+    nightly_user_concurrency: int = 4
+
+    # A DEFERRED recommendation disposition suppresses the same decision signature
+    # for this many days, after which the recommendation reappears unchanged.
+    deferred_disposition_days: int = 7
+
+    # Maximum age of the token's `auth_time` claim for irreversible account
+    # operations (account deletion). Tokens without the claim fall back to the
+    # explicit typed-confirmation contract.
+    fresh_auth_max_age_seconds: int = 600
 
     # --- Provider endpoints (API keys resolved from Key Vault at call time) ----------
     # Alpha Vantage is the default price/FX provider. Tiingo remains available

@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from auspex.api.auth import AuthenticatedUser, get_current_user
 from auspex.api.chat_grounding import get_chat_fetcher
-from auspex.api.deps import get_universe
+from auspex.api.deps import get_app_user_service, get_universe
 from auspex.api.repos import get_conversation_repo
 from auspex.assistant.answer import AnswerGenerator
 from auspex.assistant.grounding import (
@@ -31,12 +31,14 @@ from auspex.assistant.grounding import (
 from auspex.assistant.planner import RetrievalPlanner
 from auspex.assistant.retrieval import RetrievalFetcher
 from auspex.config.loader import Universe
+from auspex.models.app_user import UserStatus
 from auspex.models.common import utc_now
 from auspex.models.conversation import Citation, ConversationState, ConversationTurn
 from auspex.persistence.repositories import CosmosRepository
 from auspex.pipeline.prompts import load_prompt
 from auspex.providers.openai_provider import AzureOpenAIClient
 from auspex.settings import get_settings
+from auspex.users.service import AppUserService
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -101,6 +103,7 @@ async def _stream_answer(
     answerer: AnswerGenerator,
     universe: Universe,
     conversation_repo: CosmosRepository[ConversationTurn],
+    users: AppUserService,
 ) -> AsyncIterator[str]:
     yield _sse_event("Reading current scores, evidence, and portfolio suggestions…\n\n")
     conversation_id = request.conversation_id or str(uuid4())
@@ -198,6 +201,11 @@ async def _stream_answer(
         if item.document_id is not None
     ]
     turn_index = prior_turn.turn_index + 1 if prior_turn is not None else 0
+    latest_user = await users.get_user(user.user_id)
+    if latest_user is None or latest_user.status is not UserStatus.ACTIVE:
+        yield "event: error\ndata: {\"message\":\"Account access changed while the answer was prepared.\"}\n\n"
+        yield "event: done\ndata: {}\n\n"
+        return
     await conversation_repo.upsert(
         ConversationTurn(
             id=f"{conversation_id}:{turn_index}",
@@ -267,6 +275,7 @@ async def converse(
     answerer: AnswerGenerator = Depends(get_answerer),
     universe: Universe = Depends(get_universe),
     conversation_repo: CosmosRepository = Depends(get_conversation_repo),
+    users: AppUserService = Depends(get_app_user_service),
 ) -> StreamingResponse:
     return StreamingResponse(
         _stream_answer(
@@ -277,6 +286,7 @@ async def converse(
             answerer,
             universe,
             conversation_repo,
+            users,
         ),
         media_type="text/event-stream",
     )

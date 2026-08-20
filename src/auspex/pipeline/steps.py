@@ -24,8 +24,10 @@ from auspex.extraction.cache import channel_a_cache_key, channel_b_cache_key
 from auspex.extraction.channel_a import ChannelAExtractor
 from auspex.extraction.channel_b import ChannelBExtractor
 from auspex.extraction.sections import WHOLE_DOCUMENT_FORMS, target_sections
+from auspex.models.common import utc_now
 from auspex.models.document import Document
 from auspex.models.enums import Action, CohortConfidence, Direction, FilerProfile, LegName
+from auspex.models.policy import RecommendationDisposition
 from auspex.models.run import RunManifest
 from auspex.models.scoring import LegChange, LegResult, ScoreSnapshot
 from auspex.narrative.generator import NarrativeGenerator
@@ -775,6 +777,38 @@ def _consecutive_weakening_sessions(
     return streak
 
 
+async def _active_dispositions(ctx: PipelineContext) -> dict[str, RecommendationDisposition]:
+    """This user's durable dispositions, keyed by ``security_id``.
+
+    A single partition-local read per user. Absent repository (tests, local
+    fixtures) simply means no suppression, which is the safe default: the
+    user sees every recommendation rather than silently losing one.
+    """
+
+    repo = ctx.repos.recommendation_disposition_repo
+    if repo is None:
+        return {}
+    query = getattr(repo, "query", None)
+    if query is None:
+        return {}
+    try:
+        rows = await query(
+            "SELECT * FROM c WHERE c.user_id = @user_id",
+            [{"name": "@user_id", "value": ctx.user_id}],
+            ctx.user_id,
+        )
+    except TypeError:
+        rows = await query(
+            "SELECT * FROM c WHERE c.user_id = @user_id",
+            [{"name": "@user_id", "value": ctx.user_id}],
+        )
+    return {
+        row.security_id: row
+        for row in rows
+        if getattr(row, "security_id", None) and getattr(row, "user_id", None) == ctx.user_id
+    }
+
+
 async def step_run_policy(ctx: PipelineContext, manifest: RunManifest) -> None:
     """Deterministic gate cascade over the portfolio (arc42 §5.6, §5.7).
 
@@ -786,6 +820,7 @@ async def step_run_policy(ctx: PipelineContext, manifest: RunManifest) -> None:
 
     from auspex.policy.cost import estimate_total_cost_usd
     from auspex.policy.gates import PolicyContext as GatePolicyContext
+    from auspex.policy.signature import compute_decision_signature, evidence_fingerprint
     from auspex.policy.target_weight import target_weight_pct
 
     start_step(manifest, "RUN_POLICY")
@@ -846,6 +881,9 @@ async def step_run_policy(ctx: PipelineContext, manifest: RunManifest) -> None:
     actions: list[Action] = []
     eligible_but_no_cash_count = 0
     recommendations = []
+    suppressed_count = 0
+    dispositions = await _active_dispositions(ctx)
+    evaluated_at = utc_now()
 
     for sec in ctx.universe.securities:
         res = results.get(sec.id)
@@ -993,13 +1031,45 @@ async def step_run_policy(ctx: PipelineContext, manifest: RunManifest) -> None:
             cost_overlay=cost_overlay,
             config_version_id=ctx.__dict__.get("_config_version_id", "unversioned"),
         )
+        rec.decision_signature = compute_decision_signature(
+            action=action,
+            security_id=sec.id,
+            suggested_quantity=suggested_quantity,
+            suggested_trade_chf=suggested_trade_chf,
+            target_weight_pct=target_pct,
+            gate_trace=trace,
+            evidence=evidence_fingerprint(
+                percentile=res.percentile,
+                cohort_confidence=gate_ctx.cohort_confidence,
+                direction=current_direction,
+                coverage=res.coverage,
+            ),
+        )
+        # A REJECTED or unexpired DEFERRED disposition on this exact decision
+        # means the user has already answered this question. The row is still
+        # written (the run stays auditable and the suppression explainable),
+        # but the API withholds it until the signature materially changes.
+        disposition = dispositions.get(sec.id)
+        if disposition is not None and disposition.suppresses(
+            rec.decision_signature, now=evaluated_at
+        ):
+            rec.suppressed = True
+            rec.disposition = disposition.disposition
+            rec.suppression_reason = (
+                f"{disposition.disposition.value} on an identical decision signature"
+            )
+            suppressed_count += 1
         recommendations.append(rec)
         if ctx.repos.recommendation_repo is not None:
             await ctx.repos.recommendation_repo.upsert(rec)
 
     ctx.__dict__["_actions"] = actions
     ctx.__dict__["_eligible_but_no_cash_count"] = eligible_but_no_cash_count
-    complete_step(manifest, "RUN_POLICY", detail=f"recommendations={len(recommendations)}")
+    complete_step(
+        manifest,
+        "RUN_POLICY",
+        detail=f"recommendations={len(recommendations)} suppressed={suppressed_count}",
+    )
 
 
 async def step_assert(ctx: PipelineContext, manifest: RunManifest) -> None:
@@ -1166,8 +1236,13 @@ async def step_validate(ctx: PipelineContext, manifest: RunManifest) -> None:
         issues.append(f"{len(missing_fingerprint)} snapshot(s) missing package_fingerprint")
 
     if snapshots and ctx.repos.recommendation_repo is not None:
+        # Scoped to this run's representative user: with several users the
+        # same day legitimately holds N x snapshots recommendations, so an
+        # unscoped count would report a phantom mismatch every night.
         recommendations_today = [
-            r for r in await fetch_all(ctx.repos.recommendation_repo) if r.as_of_date == ctx.as_of_date
+            r
+            for r in await fetch_all(ctx.repos.recommendation_repo)
+            if r.as_of_date == ctx.as_of_date and r.user_id == ctx.user_id
         ]
         if len(recommendations_today) != len(snapshots):
             issues.append(

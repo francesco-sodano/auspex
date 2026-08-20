@@ -460,6 +460,26 @@ class TestEscalatedRisks:
 
 
 class TestRecommendations:
+    def test_suppressed_recommendation_is_not_returned(self):
+        recommendation = _recommendation("sec-a").model_copy(
+            update={
+                "decision_signature": "sig-v1:test",
+                "suppressed": True,
+                "suppression_reason": "REJECTED",
+            }
+        )
+        client = _make_client(
+            {
+                get_recommendation_repo: lambda: FakeCosmosRepository([recommendation]),
+                get_score_repo: lambda: FakeCosmosRepository([_score("sec-a")]),
+            }
+        )
+
+        response = client.get("/api/briefing", params={"date": "2026-08-08"})
+
+        assert response.status_code == 200
+        assert response.json()["recommendations"] == []
+
     def test_matches_the_recommendation_contract_and_is_scoped_to_the_authenticated_user(self):
         recommendation = _recommendation("sec-a")
         recommendation_repo = FakeCosmosRepository([recommendation])

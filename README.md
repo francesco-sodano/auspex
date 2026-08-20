@@ -7,9 +7,9 @@ support financial research in a highly regulated environment without giving the
 model control of scoring, portfolio policy, or trade execution.
 
 It is a reference implementation, not a Microsoft product, broker, investment
-service, or guarantee of performance. It produces directional research for a
-single authenticated owner. It never connects to a broker and never executes a
-trade.
+service, or guarantee of performance. It produces directional research for
+approved, individually partitioned users. It never connects to a broker and
+never executes a trade.
 
 ## Why this MVP matters
 
@@ -103,7 +103,7 @@ flowchart LR
 | Portfolio source of truth | Separate event-ledger Cosmos account by default |
 | Raw evidence | Azure Blob Storage |
 | AI | Azure OpenAI GPT-4.1-mini and GPT-4.1 deployments |
-| Identity | Microsoft Entra single-tenant SPA/API registration |
+| Identity | Microsoft Entra workforce or External ID SPA/API registration |
 | Workload access | System-assigned managed identities and data-plane RBAC |
 | Network | Private endpoints for data, Key Vault and Azure OpenAI |
 | Observability | Log Analytics, Application Insights, alerts and budget |
@@ -111,6 +111,17 @@ flowchart LR
 
 The detailed current-state design is in
 [doc/auspex-arc42.md](doc/auspex-arc42.md).
+
+Private API requests, onboarding/registration writes, administrator lifecycle
+mutations, per-user nightly work and private weekly attribution hold an
+ETag-protected lease on the authoritative user record. Account deletion
+acquires that same lease before switching the user to `DELETION_PENDING`, so
+no in-flight request or job can recreate data after the verified purge.
+Long-running work renews the lease with ETag compare-and-swap and is cancelled
+fail-closed if ownership or renewal is lost.
+Administrator-removal operations are independently serialized through the
+singleton authority record, preserving the last-admin invariant across
+multiple API replicas.
 
 ## Repository layout
 
@@ -166,10 +177,145 @@ sh ./scripts/configure-azd.sh dev
 The setup script:
 
 - creates or reuses a single-tenant Entra app registration;
-- records the signed-in user's object ID as the portfolio owner;
+- records the signed-in user's object ID as the pre-existing portfolio owner,
+  which pins that owner's historical ledger partition;
 - stores deployment values in the ignored AZD environment;
 - prompts securely for provider API keys;
 - configures safe capacity and budget defaults.
+
+### Identity: who can sign in
+
+Auspex authenticates against a Microsoft Entra tenant. **Which kind of tenant
+you point it at decides who can ever have an account.**
+
+| | Workforce tenant (default) | External tenant (Microsoft Entra External ID) |
+| --- | --- | --- |
+| Who can sign in | Members and B2B guests of your organisation | Anyone, via self-service sign-up |
+| Personal Gmail / Outlook | Only by inviting each person as a guest | Yes — that is the point |
+| Authority host | `login.microsoftonline.com` | `<subdomain>.ciamlogin.com` |
+| Created by | Your existing Azure AD tenant | A separate directory you create once |
+
+If friends are going to sign up with personal addresses, **use an external
+tenant**. A workforce tenant technically works via B2B guest invitations, but
+every person must be invited individually and appears as a guest object in
+your organisation's directory.
+
+#### External tenant setup (one-time, outside this repo)
+
+An external tenant is a *directory*, not an ARM resource, so it cannot be
+created by Bicep or `azd` — Bicep here only consumes the resulting IDs. Do
+this once in the Microsoft Entra admin center:
+
+1. **Create the external tenant.** Entra admin center → *Identity* → *Overview*
+   → *Manage tenants* → *Create* → choose **External**. Note its **tenant ID**
+   and **subdomain** (the `contoso` in `contoso.ciamlogin.com`).
+2. **Register the app** *in that tenant*: *App registrations* → *New
+   registration* → single-page application, redirect URI
+   `http://localhost:5173`. Note the **application (client) ID**. Add the
+   deployed API URL as a second SPA redirect URI after the first `azd up`.
+3. **Create a sign-up/sign-in user flow**: *External Identities* → *User
+   flows* → *New user flow*. Add **Email with password** and/or **Email
+   one-time passcode**, then **associate the application** with the flow.
+   Without this association, sign-up silently fails.
+4. **Enable the identity providers you want**: email one-time passcode covers
+   any address including Gmail; add **Google** federation if you want the
+   Google button. (Google federation requires a Google client ID/secret
+   configured in the tenant.)
+5. **Return the email claim**: in the user flow's *User attributes*, ensure
+   **Email Address** is collected. For the configured trusted CIAM issuer,
+   Auspex accepts that sign-up identity as the first-admin email proof; a
+   workforce tenant instead bootstraps by immutable owner object ID.
+
+Then point the environment at it:
+
+```powershell
+.\scripts\configure-azd.ps1 -EnvironmentName dev -AuthTenantType external
+# prompts for tenant ID, subdomain and client ID
+```
+
+or set them directly:
+
+```powershell
+azd env set AUSPEX_AUTH_TENANT_TYPE external
+azd env set AUSPEX_AUTH_TENANT_ID <external-tenant-id>
+azd env set AUSPEX_AUTH_TENANT_SUBDOMAIN <subdomain>
+azd env set AUSPEX_AUTH_CLIENT_ID <client-id-registered-in-that-tenant>
+```
+
+The API derives the authority, issuer, JWKS and OpenID metadata URL from
+those three values, and at runtime reads the **authoritative** issuer and
+signing keys from the tenant's own OpenID configuration document — so a
+tenant that issues the `.onmicrosoft.com` authority form instead of the
+tenant-id form still works without any change. Every derived value can also
+be overridden if needed:
+
+| Variable | Purpose |
+| --- | --- |
+| `AUSPEX_AUTH_AUTHORITY` | Explicit authority URL |
+| `AUSPEX_AUTH_ISSUER` | Explicit `iss` value to trust |
+| `AUSPEX_AUTH_JWKS_URL` | Explicit signing-key endpoint |
+| `AUSPEX_AUTH_OPENID_CONFIGURATION_URL` | Explicit metadata document |
+| `AUSPEX_AUTH_API_SCOPE` | Scope the SPA requests, e.g. `api://<client-id>/Auspex.Access` |
+
+The SPA needs no rebuild: `/auth-config.json` serves the client ID, authority,
+`known_authorities` (required for MSAL to accept a `ciamlogin.com` host) and
+the API scope at runtime.
+
+#### Migrating an existing deployment to an external tenant
+
+Moving tenants changes the token issuer *and* gives each person a new object
+ID in the new directory. Two settings make that survivable:
+
+```powershell
+# Keep the previous owner's tokens valid during the cutover. Every issuer is
+# bound to its own signing keys and audience. Clear all legacy values when the
+# move is done.
+azd env set AUSPEX_AUTH_LEGACY_ISSUER https://login.microsoftonline.com/<old-tenant-id>/v2.0
+azd env set AUSPEX_AUTH_LEGACY_JWKS_URL https://login.microsoftonline.com/<old-tenant-id>/discovery/v2.0/keys
+azd env set AUSPEX_AUTH_LEGACY_AUDIENCE <old-application-client-id>
+azd env set AUSPEX_OWNER_LEGACY_OBJECT_ID <owner-object-id-in-the-OLD-tenant>
+```
+
+Tokens are always verified against the keys and audience of *their own*
+issuer, so a legacy issuer can never be used to accept a token minted
+elsewhere. Only the configured old owner object ID aliases to the new owner
+account; all other users must re-register under their new immutable identity.
+
+Because a user's data partition is derived from their Entra object ID, the
+pre-existing production owner would otherwise land on an empty ledger under
+their new identity. Pin their historical partition once:
+
+```powershell
+azd env set AUSPEX_OWNER_OBJECT_ID <the-owner-object-id-in-the-NEW-tenant>
+azd env set AUSPEX_OWNER_LEDGER_PARTITION_KEY <the-existing-owner_user_sk>
+```
+
+The override applies only to that one principal, at registration, and only
+when their object ID matches `AUSPEX_OWNER_OBJECT_ID`; everyone else is
+partitioned by their own derived ID.
+
+Before enabling the multi-user lifecycle on an existing single-owner
+deployment, seed that owner as the active administrator with the new image:
+
+```powershell
+python -m auspex migrate-multi-user
+```
+
+The command is idempotent, requires both owner settings above plus
+`AUSPEX_INITIAL_ADMIN_EMAIL`, and refuses to activate a different principal.
+
+### First administrator
+
+`AUSPEX_INITIAL_ADMIN_EMAIL` is required and names the first administrator so a
+new deployment has somebody who can approve everyone else. For this deployment,
+set it to `fsodano79@gmail.com`.
+
+It is consulted **only while no administrator exists**. The first principal to
+register with that verified email becomes an administrator, and authority is
+then bound permanently to their immutable Entra object ID — changing the
+setting afterwards grants nothing. Every other principal registers as
+`PENDING_APPROVAL` and can reach nothing but their own status until an
+administrator approves them.
 
 Public PyPI is the default package source. Microsoft-managed devices can use the
 approved Central Feed Services proxy without changing repository defaults:
@@ -255,6 +401,23 @@ azd env set AUSPEX_LEDGER_DATABASE_NAME <database>
 An existing Key Vault must have `enableRbacAuthorization=true`. Access-policy
 vaults are rejected by the post-provision check because workload access is
 defined exclusively through least-privilege Azure RBAC.
+
+An in-place upgrade can also preserve the names and managed identities of an
+earlier Auspex deployment. Set the legacy-name switch and explicitly identify
+the four environment-derived resources before `azd up`:
+
+```powershell
+azd env set AUSPEX_PRESERVE_LEGACY_RESOURCE_NAMES true
+azd env set AUSPEX_PRIMARY_COSMOS_ACCOUNT_NAME <primary-cosmos-account>
+azd env set AUSPEX_STORAGE_ACCOUNT_NAME <blob-storage-account>
+azd env set AUSPEX_REGISTRY_NAME <container-registry>
+azd env set AUSPEX_OPENAI_ACCOUNT_NAME <azure-openai-account>
+```
+
+Fresh deployments leave these values empty and use environment-qualified
+resource names. Explicit overrides prevent an upgrade from accidentally
+creating parallel data, registry or model resources when an older deployment
+used a different suffix formula.
 
 The external ledger must contain:
 

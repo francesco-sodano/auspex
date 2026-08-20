@@ -1,5 +1,6 @@
 param location string
 param environmentName string
+param preserveLegacyResourceNames bool = false
 param infrastructureSubnetId string
 param logAnalyticsCustomerId string
 @secure()
@@ -17,7 +18,16 @@ param authTenantId string
 param authAuthority string
 param authIssuer string
 param authJwksUrl string
+param authOpenIdConfigurationUrl string = ''
+param authKnownAuthority string = ''
+param authApiScope string = ''
+param authLegacyIssuer string = ''
+param authLegacyJwksUrl string = ''
+param authLegacyAudience string = ''
 param ownerProviderUserId string
+param ownerLegacyProviderUserId string = ''
+param ownerLedgerPartitionKey string = ''
+param initialAdminEmail string
 param secEdgarUserAgent string
 
 var commonEnvironment = [
@@ -101,9 +111,56 @@ var commonEnvironment = [
     name: 'AUSPEX_ENTRA_JWKS_URL'
     value: authJwksUrl
   }
+  // The tenant's own OpenID metadata is the authoritative source for the
+  // issuer and signing keys. Configuring it means an external (CIAM) tenant
+  // cannot be broken by guessing the wrong issuer form.
+  {
+    name: 'AUSPEX_ENTRA_OPENID_CONFIGURATION_URL'
+    value: authOpenIdConfigurationUrl
+  }
+  // MSAL only trusts login.microsoftonline.com implicitly; an external
+  // tenant's *.ciamlogin.com host must be declared or the SPA cannot sign in.
+  {
+    name: 'AUSPEX_ENTRA_KNOWN_AUTHORITY'
+    value: authKnownAuthority
+  }
+  {
+    name: 'AUSPEX_ENTRA_API_SCOPE'
+    value: authApiScope
+  }
+  // Tenant-migration window: tokens from the previous tenant keep validating
+  // against that tenant's own keys until everyone has re-authenticated.
+  {
+    name: 'AUSPEX_ENTRA_LEGACY_ISSUER'
+    value: authLegacyIssuer
+  }
+  {
+    name: 'AUSPEX_ENTRA_LEGACY_JWKS_URL'
+    value: authLegacyJwksUrl
+  }
+  {
+    name: 'AUSPEX_ENTRA_LEGACY_AUDIENCE'
+    value: authLegacyAudience
+  }
   {
     name: 'AUSPEX_OWNER_PROVIDER_USER_ID'
     value: ownerProviderUserId
+  }
+  {
+    name: 'AUSPEX_OWNER_LEGACY_PROVIDER_USER_ID'
+    value: ownerLegacyProviderUserId
+  }
+  {
+    name: 'AUSPEX_OWNER_LEDGER_PARTITION_KEY'
+    value: ownerLedgerPartitionKey
+  }
+  // Names the first administrator by email so a brand-new deployment has
+  // somebody who can approve everyone else. Consulted only while no
+  // administrator exists; authority then binds permanently to that
+  // principal's immutable Entra object ID.
+  {
+    name: 'AUSPEX_INITIAL_ADMIN_EMAIL'
+    value: initialAdminEmail
   }
   {
     name: 'AUSPEX_EDGAR_USER_AGENT'
@@ -120,7 +177,7 @@ var commonEnvironment = [
 ]
 
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
-  name: environmentName
+  name: preserveLegacyResourceNames ? 'cae-auspex' : 'cae-auspex-${environmentName}'
   location: location
   properties: {
     vnetConfiguration: {
@@ -145,7 +202,7 @@ resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
 }
 
 resource api 'Microsoft.App/containerApps@2024-03-01' = {
-  name: 'app-auspex-${environmentName}-api'
+  name: preserveLegacyResourceNames ? 'app-auspex-api' : 'app-auspex-${environmentName}-api'
   location: location
   tags: {
     'azd-env-name': environmentName
@@ -237,7 +294,7 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = {
 }
 
 resource pipeline 'Microsoft.App/jobs@2024-03-01' = {
-  name: 'job-auspex-${environmentName}-pipeline'
+  name: preserveLegacyResourceNames ? 'job-auspex-pipeline' : 'job-auspex-${environmentName}-pipeline'
   location: location
   tags: {
     'azd-env-name': environmentName
@@ -290,7 +347,7 @@ resource pipeline 'Microsoft.App/jobs@2024-03-01' = {
 }
 
 resource performance 'Microsoft.App/jobs@2024-03-01' = {
-  name: 'job-auspex-${environmentName}-performance'
+  name: preserveLegacyResourceNames ? 'job-auspex-performance' : 'job-auspex-${environmentName}-performance'
   location: location
   tags: {
     'azd-env-name': environmentName

@@ -322,6 +322,7 @@ async def get_briefing(
         recommendation
         for recommendation in recommendation_rows
         if not recommendation.action.value.startswith("HOLD")
+        and not recommendation.suppressed
     ]
 
     def benefit(recommendation) -> tuple[float, int]:  # noqa: ANN001

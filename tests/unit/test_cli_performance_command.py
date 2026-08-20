@@ -17,6 +17,8 @@ write to the non-user-partitioned `performance` container.
 
 from __future__ import annotations
 
+import importlib
+from contextlib import asynccontextmanager
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
@@ -78,12 +80,16 @@ class FakeBootstrapRunnerForPerformance:
         scored_dates=None,
         performance_repo=None,
         accepted_recommendation_ids=None,
+        attribution_user_id=None,
+        include_recommendation_metrics=True,
     ):
         self.compute_performance_metrics_kwargs = {
             "ctx": ctx,
             "scored_dates": scored_dates,
             "performance_repo": performance_repo,
             "accepted_recommendation_ids": accepted_recommendation_ids,
+            "attribution_user_id": attribution_user_id,
+            "include_recommendation_metrics": include_recommendation_metrics,
         }
         return self.metrics_to_return
 
@@ -96,6 +102,9 @@ def patch_common(monkeypatch, *, runner_cls=FakeBootstrapRunnerForPerformance) -
         async def read_transactions(self):
             return []
 
+        async def resolve_owner_user_sk(self):
+            return "owner-sk"
+
     monkeypatch.setattr("auspex.config.load_universe", make_universe)
     monkeypatch.setattr("auspex.persistence.cosmos_client.get_cosmos_context", lambda: object())
     monkeypatch.setattr("auspex.persistence.cosmos_client.get_source_ledger_context", lambda: object())
@@ -103,6 +112,12 @@ def patch_common(monkeypatch, *, runner_cls=FakeBootstrapRunnerForPerformance) -
     monkeypatch.setattr("auspex.portfolio.adapter.PortfolioAdapter", FakePortfolioAdapter)
     monkeypatch.setattr("auspex.portfolio.mapping.load_portfolio_mapping", lambda: object())
     monkeypatch.setattr("auspex.cli.bootstrap.BootstrapRunner", runner_cls)
+
+    async def no_active_users(_cosmos):
+        return []
+
+    main_module = importlib.import_module("auspex.cli.main")
+    monkeypatch.setattr(main_module, "_resolve_active_users", no_active_users)
 
 
 class TestPerformanceCommandWiring:
@@ -123,8 +138,10 @@ class TestPerformanceCommandWiring:
         # own to pass (arc42 §5.8).
         assert runner.compute_performance_metrics_kwargs["scored_dates"] is None
         assert runner.compute_performance_metrics_kwargs["performance_repo"] is not None
-        assert runner.compute_performance_metrics_kwargs["accepted_recommendation_ids"] == set()
+        assert runner.compute_performance_metrics_kwargs["accepted_recommendation_ids"] is None
         assert runner.compute_performance_metrics_kwargs["ctx"].as_of_date == as_of
+        assert runner.compute_performance_metrics_kwargs["attribution_user_id"] is None
+        assert runner.compute_performance_metrics_kwargs["include_recommendation_metrics"] is False
 
     @pytest.mark.asyncio
     async def test_returns_zero_when_no_metrics_computed_yet(self, monkeypatch):
@@ -191,6 +208,31 @@ class TestPerformanceCommandWiring:
             lambda rows: rows,
         )
 
+        async def one_active_user(_cosmos):
+            return [("owner-sk", "owner-sk")]
+
+        monkeypatch.setattr(
+            importlib.import_module("auspex.cli.main"),
+            "_resolve_active_users",
+            one_active_user,
+        )
+        fenced_users = []
+
+        class FakeUserService:
+            def __init__(self, **kwargs):
+                pass
+
+            @asynccontextmanager
+            async def user_operation(self, user_id, *, require_active):
+                assert require_active is True
+                fenced_users.append(user_id)
+                yield
+
+        monkeypatch.setattr(
+            "auspex.users.service.AppUserService",
+            FakeUserService,
+        )
+
         result = await _performance_command(date(2026, 8, 8))
 
         assert result == 0
@@ -200,3 +242,4 @@ class TestPerformanceCommandWiring:
         assert runner.compute_performance_metrics_kwargs[
             "accepted_recommendation_ids"
         ] == {"recommendation-1"}
+        assert fenced_users == ["owner-sk"]

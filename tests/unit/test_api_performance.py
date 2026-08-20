@@ -16,6 +16,7 @@ from auspex.api.deps import (
     get_performance_repo,
     get_portfolio_ledger_service,
     get_recommendation_repo,
+    get_user_performance_repo,
 )
 from auspex.api.routes import performance
 from auspex.models.performance import PerformanceMetric
@@ -31,6 +32,7 @@ def _metric(
     scope: str = "universe",
     sample_size: int = 10,
     detail: dict[str, str] | None = None,
+    user_id: str | None = None,
 ) -> PerformanceMetric:
     return PerformanceMetric(
         id=f"{metric_type}:{as_of.isoformat()}:{scope}",
@@ -41,16 +43,18 @@ def _metric(
         value=value,
         sample_size=sample_size,
         detail=detail or {},
+        user_id=user_id,
     )
 
 
-def _make_client(repo=None, authed: bool = True):
+def _make_client(repo=None, authed: bool = True, user_repo=None):
     class EmptyLedger:
         async def list_transactions(self, _user_id):
             return []
 
     overrides = {
         get_performance_repo: lambda: repo or FakeCosmosRepository(),
+        get_user_performance_repo: lambda: user_repo or FakeCosmosRepository(),
         get_recommendation_repo: lambda: FakeCosmosRepository(),
         get_portfolio_ledger_service: EmptyLedger,
     }
@@ -142,10 +146,10 @@ def test_leg_correlation_matrix_is_symmetric_and_labelled():
 
 def test_dispositions_reads_accepted_and_rejected_scopes():
     rows = [
-        _metric("disposition_outcome", date(2026, 8, 1), "0.70", scope="accepted"),
-        _metric("disposition_outcome", date(2026, 8, 1), "0.40", scope="rejected"),
+        _metric("disposition_outcome", date(2026, 8, 1), "0.70", scope="accepted", user_id="owner-1"),
+        _metric("disposition_outcome", date(2026, 8, 1), "0.40", scope="rejected", user_id="owner-1"),
     ]
-    client = _make_client(FakeCosmosRepository(rows))
+    client = _make_client(user_repo=FakeCosmosRepository(rows))
 
     response = client.get("/api/performance")
 
@@ -155,6 +159,29 @@ def test_dispositions_reads_accepted_and_rejected_scopes():
         "accepted_sample_size": 10,
         "rejected_sample_size": 10,
     }
+
+
+def test_private_performance_never_reads_another_user_partition():
+    rows = [
+        _metric(
+            "suggestion_hit_rate",
+            date(2026, 8, 1),
+            "0.65",
+            user_id="owner-1",
+        ),
+        _metric(
+            "suggestion_hit_rate",
+            date(2026, 8, 1),
+            "0.05",
+            user_id="other-user",
+        ),
+    ]
+
+    body = _make_client(
+        user_repo=FakeCosmosRepository(rows)
+    ).get("/api/performance").json()
+
+    assert body["suggestion_hit_rate"] == "0.65"
 
 
 def test_cohort_dispersion_strips_the_cohort_prefix():
@@ -175,9 +202,10 @@ def test_sample_size_and_backfilled_sample_size_come_from_the_hit_rate_row():
             horizon_days=126,
             sample_size=42,
             detail={"backfilled_sample_size": "7"},
+            user_id="owner-1",
         )
     ]
-    client = _make_client(FakeCosmosRepository(rows))
+    client = _make_client(user_repo=FakeCosmosRepository(rows))
 
     response = client.get("/api/performance")
 

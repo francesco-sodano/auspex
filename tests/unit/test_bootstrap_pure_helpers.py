@@ -536,3 +536,106 @@ class TestComputePerformanceMetricsScoredDatesDerivation:
 
         assert metrics
         assert {m.id for m in performance_repo.all()} == {m.id for m in metrics}
+
+
+class TestPerformanceAttributionPrivacy:
+    """Score metrics are shared; recommendation attribution is not (arc42 §5.8).
+
+    Composite/leg IC measure the research and are identical for everybody.
+    Suggestion hit rate and disposition outcome describe what one person did
+    with their own suggestions, so with several users they must be scoped to
+    one user rather than blended into the shared `performance` container.
+    """
+
+    def _ctx_with_recommendations(self, as_of: date) -> PipelineContext:
+        from auspex.models.enums import Action
+        from auspex.models.policy import Recommendation
+
+        score_repo: InMemoryRepository[ScoreSnapshot] = InMemoryRepository()
+        snapshots = [make_snapshot("sec-a", as_of, 80), make_snapshot("sec-b", as_of, 20)]
+        for snap in snapshots:
+            asyncio.run(score_repo.upsert(snap))
+        price_sink = InMemoryPriceSink()
+        for bar in make_daily_bars("sec-a", as_of, 200, 100, 1) + make_daily_bars(
+            "sec-b", as_of, 200, 100, -1
+        ):
+            asyncio.run(price_sink.upsert_price_bar(bar))
+
+        recommendation_repo: InMemoryRepository[Recommendation] = InMemoryRepository()
+        for user_id, security_id in (("user-alice", "sec-a"), ("user-bob", "sec-b")):
+            asyncio.run(
+                recommendation_repo.upsert(
+                    Recommendation(
+                        id=f"{user_id}:{security_id}:{as_of.isoformat()}",
+                        user_id=user_id,
+                        security_id=security_id,
+                        as_of_date=as_of,
+                        action=Action.BUY,
+                        config_version_id="cfg-1",
+                    )
+                )
+            )
+
+        repos = PipelineRepos(
+            document_sink=InMemoryDocumentSink(),
+            price_sink=price_sink,
+            fx_sink=InMemoryFxSink(),
+            fundamental_sink=InMemoryFundamentalSink(),
+            blob_sink=InMemoryBlobSink(),
+            watermarks=InMemoryWatermarkStore(),
+            score_repo=score_repo,
+            recommendation_repo=recommendation_repo,
+        )
+        return PipelineContext(
+            universe=Universe(securities=[]), config={}, as_of_date=as_of, user_id="system", repos=repos
+        )
+
+    def test_score_metrics_are_identical_regardless_of_attribution_scope(self):
+        as_of = date(2026, 1, 5)
+        runner = BootstrapRunner(universe=Universe(securities=[]), context_factory=lambda d: None)
+
+        unscoped = asyncio.run(
+            runner.compute_performance_metrics(self._ctx_with_recommendations(as_of), scored_dates=None)
+        )
+        scoped = asyncio.run(
+            runner.compute_performance_metrics(
+                self._ctx_with_recommendations(as_of),
+                scored_dates=None,
+                attribution_user_id="user-alice",
+            )
+        )
+
+        def score_metrics(metrics):
+            return sorted(
+                m.id for m in metrics if not m.metric_type.startswith(("suggestion", "disposition"))
+            )
+
+        assert score_metrics(unscoped) == score_metrics(scoped)
+        assert score_metrics(scoped), "score metrics must still be produced"
+
+    def test_attribution_scope_excludes_other_users_recommendations(self):
+        as_of = date(2026, 1, 5)
+        runner = BootstrapRunner(universe=Universe(securities=[]), context_factory=lambda d: None)
+
+        alice = asyncio.run(
+            runner.compute_performance_metrics(
+                self._ctx_with_recommendations(as_of),
+                scored_dates=None,
+                attribution_user_id="user-alice",
+            )
+        )
+        nobody = asyncio.run(
+            runner.compute_performance_metrics(
+                self._ctx_with_recommendations(as_of),
+                scored_dates=None,
+                attribution_user_id="user-nobody",
+            )
+        )
+
+        def attribution(metrics):
+            return [m for m in metrics if m.metric_type.startswith(("suggestion", "disposition"))]
+
+        # A user with no recommendations of their own yields no attribution.
+        assert attribution(nobody) == []
+        # Alice's own suggestions still produce her attribution metrics.
+        assert attribution(alice)

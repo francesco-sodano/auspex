@@ -135,6 +135,13 @@ def make_manifest(status: RunStatus = RunStatus.SUCCESS):
     return SimpleNamespace(status=status)
 
 
+def make_run_result(status: RunStatus = RunStatus.SUCCESS):
+    """Shape returned by the multi-user runner: a shared manifest plus
+    per-user outcomes (see :mod:`auspex.pipeline.fanout`)."""
+
+    return SimpleNamespace(manifest=make_manifest(status), user_results=[], failed_user_ids=[])
+
+
 def patch_common(
     monkeypatch,
     *,
@@ -169,11 +176,14 @@ def patch_common(
 
     seen_ctx: list = []
 
-    async def fake_run_pipeline_wrapper(ctx):
+    async def fake_run_pipeline_wrapper(ctx, **kwargs):
         seen_ctx.append(ctx)
         if wrapper is not None:
-            return await wrapper(ctx)
-        return make_manifest()
+            result = await wrapper(ctx)
+            if hasattr(result, "manifest"):
+                return result
+            return SimpleNamespace(manifest=result, user_results=[], failed_user_ids=[])
+        return make_run_result()
 
     # `auspex.cli.__init__` does `from auspex.cli.main import main`, which
     # shadows the `main` submodule with that function as a package attribute
@@ -183,6 +193,11 @@ def patch_common(
     # _run_pipeline_command` import) directly instead.
     main_module = importlib.import_module("auspex.cli.main")
     monkeypatch.setattr(main_module, "run_pipeline_wrapper", fake_run_pipeline_wrapper)
+
+    async def no_roster(_cosmos):
+        return None
+
+    monkeypatch.setattr(main_module, "_resolve_active_users", no_roster)
     return seen_ctx
 
 

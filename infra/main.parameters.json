@@ -5,6 +5,9 @@
     "environmentName": {
       "value": "${AZURE_ENV_NAME}"
     },
+    "preserveLegacyResourceNames": {
+      "value": "${AUSPEX_PRESERVE_LEGACY_RESOURCE_NAMES=false}"
+    },
     "location": {
       "value": "${AZURE_LOCATION}"
     },
@@ -17,8 +20,47 @@
     "authClientId": {
       "value": "${AUSPEX_AUTH_CLIENT_ID}"
     },
+    "authTenantType": {
+      "value": "${AUSPEX_AUTH_TENANT_TYPE=workforce}"
+    },
+    "authTenantSubdomain": {
+      "value": "${AUSPEX_AUTH_TENANT_SUBDOMAIN=}"
+    },
+    "authAuthorityOverride": {
+      "value": "${AUSPEX_AUTH_AUTHORITY=}"
+    },
+    "authIssuerOverride": {
+      "value": "${AUSPEX_AUTH_ISSUER=}"
+    },
+    "authJwksUrlOverride": {
+      "value": "${AUSPEX_AUTH_JWKS_URL=}"
+    },
+    "authOpenIdConfigurationUrlOverride": {
+      "value": "${AUSPEX_AUTH_OPENID_CONFIGURATION_URL=}"
+    },
+    "authApiScope": {
+      "value": "${AUSPEX_AUTH_API_SCOPE=}"
+    },
+    "authLegacyIssuer": {
+      "value": "${AUSPEX_AUTH_LEGACY_ISSUER=}"
+    },
+    "authLegacyJwksUrl": {
+      "value": "${AUSPEX_AUTH_LEGACY_JWKS_URL=}"
+    },
+    "authLegacyAudience": {
+      "value": "${AUSPEX_AUTH_LEGACY_AUDIENCE=}"
+    },
     "ownerProviderUserId": {
-      "value": "${AUSPEX_OWNER_OBJECT_ID}"
+      "value": "${AUSPEX_OWNER_OBJECT_ID=}"
+    },
+    "ownerLegacyProviderUserId": {
+      "value": "${AUSPEX_OWNER_LEGACY_OBJECT_ID=}"
+    },
+    "ownerLedgerPartitionKey": {
+      "value": "${AUSPEX_OWNER_LEDGER_PARTITION_KEY=}"
+    },
+    "initialAdminEmail": {
+      "value": "${AUSPEX_INITIAL_ADMIN_EMAIL}"
     },
     "secEdgarUserAgent": {
       "value": "${AUSPEX_EDGAR_USER_AGENT}"
@@ -46,6 +88,18 @@
     },
     "ledgerDatabaseName": {
       "value": "${AUSPEX_LEDGER_DATABASE_NAME}"
+    },
+    "primaryCosmosAccountNameOverride": {
+      "value": "${AUSPEX_PRIMARY_COSMOS_ACCOUNT_NAME=}"
+    },
+    "storageAccountNameOverride": {
+      "value": "${AUSPEX_STORAGE_ACCOUNT_NAME=}"
+    },
+    "registryNameOverride": {
+      "value": "${AUSPEX_REGISTRY_NAME=}"
+    },
+    "openAiAccountNameOverride": {
+      "value": "${AUSPEX_OPENAI_ACCOUNT_NAME=}"
     },
     "monthlyBudgetAmount": {
       "value": "${AUSPEX_MONTHLY_BUDGET}"

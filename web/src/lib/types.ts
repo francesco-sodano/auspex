@@ -268,7 +268,12 @@ export type PerformanceReport = {
 }
 
 export type RiskProfile = 'CONSERVATIVE' | 'MODERATE' | 'AGGRESSIVE'
-export type InvestmentHorizon = 'SHORT_TERM' | 'MEDIUM_TERM' | 'LONG_TERM'
+export type InvestmentHorizon =
+  | 'SIX_MONTHS'
+  | 'ONE_YEAR'
+  | 'ONE_TO_THREE_YEARS'
+  | 'THREE_TO_SEVEN_YEARS'
+  | 'OVER_SEVEN_YEARS'
 export type InvestmentObjective =
   | 'CAPITAL_PRESERVATION'
   | 'INCOME'
@@ -300,6 +305,69 @@ export type UserSettingsInput = Omit<
 export type AccountConfiguration = {
   themes: Array<{ id: string; label: string }>
   cohorts: Array<{ id: string; parent: string; tickers: string[] }>
+}
+
+export type UserRole = 'ADMIN' | 'USER'
+export type UserLifecycleStatus =
+  | 'UNREGISTERED'
+  | 'PENDING_APPROVAL'
+  | 'APPROVED_NEEDS_ONBOARDING'
+  | 'ACTIVE'
+  | 'REJECTED'
+  | 'SUSPENDED'
+  | 'DELETION_PENDING'
+  | 'DELETED'
+
+export type UserSession = {
+  user_id: string | null
+  email: string | null
+  display_name: string | null
+  role: UserRole
+  status: UserLifecycleStatus
+  onboarding_completed: boolean
+  created_at: string | null
+  approved_at: string | null
+  deletion_status: string | null
+}
+
+export type RegistrationInput = UserSettingsInput & {
+  display_name: string
+}
+
+export type OpeningPositionInput = {
+  ticker: string
+  quantity: string
+  price: string
+  currency: 'CHF' | 'USD'
+  fx_rate_to_base: string | null
+  acquisition_date: string
+}
+
+export type InitialPortfolioInput = {
+  client_request_id: string
+  opening_cash_chf: string
+  positions: OpeningPositionInput[]
+}
+
+export type AdminUser = {
+  user_id: string
+  email: string | null
+  display_name: string | null
+  role: UserRole
+  status: Exclude<UserLifecycleStatus, 'UNREGISTERED'>
+  onboarding_completed: boolean
+  created_at: string | null
+  approved_at: string | null
+  approved_by: string | null
+}
+
+export type AccountDeletionStatus = {
+  status: 'NOT_REQUESTED' | 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED'
+  requested_at: string | null
+  completed_at: string | null
+  deleted_items: number
+  remaining_items: number
+  error: string | null
 }
 
 export type ConversationTurn = {

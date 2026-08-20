@@ -8,17 +8,23 @@ from datetime import date, timedelta
 import pytest
 
 from auspex.api.auth import AuthenticatedUser, get_current_user
-from auspex.api.deps import get_recommendation_repo
+from auspex.api.deps import get_recommendation_disposition_repo, get_recommendation_repo
 from auspex.api.routes import recommendations
 from auspex.config.loader import Universe
-from auspex.models.enums import Action, FilerProfile
+from auspex.models.enums import Action, DispositionStatus, FilerProfile
 from auspex.models.policy import Recommendation
 from auspex.models.security import Security
+from auspex.settings import get_settings
 from tests.unit.conftest import FakeCosmosRepository, make_router_app
 
 
 def _recommendation(
-    user_id: str = "owner-1", security_id: str = "sec-a", as_of: date = date(2026, 8, 8)
+    user_id: str = "owner-1",
+    security_id: str = "sec-a",
+    as_of: date = date(2026, 8, 8),
+    *,
+    decision_signature: str | None = "v1:abc123",
+    suppressed: bool = False,
 ) -> Recommendation:
     return Recommendation(
         id=f"{user_id}:{security_id}:{as_of.isoformat()}",
@@ -27,11 +33,16 @@ def _recommendation(
         as_of_date=as_of,
         action="HOLD_NO_ACTION",
         config_version_id="cfg-1",
+        decision_signature=decision_signature,
+        suppressed=suppressed,
     )
 
 
-def _make_client(repo=None, authed: bool = True):
-    overrides = {get_recommendation_repo: lambda: repo or FakeCosmosRepository()}
+def _make_client(repo=None, authed: bool = True, disposition_repo=None):
+    overrides = {
+        get_recommendation_repo: lambda: repo or FakeCosmosRepository(),
+        get_recommendation_disposition_repo: lambda: disposition_repo or FakeCosmosRepository(),
+    }
     if authed:
         overrides[get_current_user] = lambda: AuthenticatedUser(user_id="owner-1", claims={})
     return make_router_app(recommendations.router, overrides)
@@ -54,6 +65,37 @@ class TestListRecommendations:
         recorded = repo.queries[0]
         assert recorded.partition_key == "owner-1"
         assert {"name": "@user_id", "value": "owner-1"} in recorded.parameters
+
+    def test_suppressed_decisions_are_withheld_by_default(self):
+        """A decision the user already rejected must not reappear in the feed."""
+
+        repo = FakeCosmosRepository(
+            [
+                _recommendation(security_id="sec-a"),
+                _recommendation(security_id="sec-b", suppressed=True),
+            ]
+        )
+        client = _make_client(repo)
+
+        body = client.get("/api/recommendations", params={"as_of_date": "2026-08-08"}).json()
+
+        assert [row["security_id"] for row in body] == ["sec-a"]
+
+    def test_suppressed_decisions_remain_available_for_audit(self):
+        repo = FakeCosmosRepository(
+            [
+                _recommendation(security_id="sec-a"),
+                _recommendation(security_id="sec-b", suppressed=True),
+            ]
+        )
+        client = _make_client(repo)
+
+        body = client.get(
+            "/api/recommendations",
+            params={"as_of_date": "2026-08-08", "include_suppressed": "true"},
+        ).json()
+
+        assert {row["security_id"] for row in body} == {"sec-a", "sec-b"}
 
 
 class TestSetDisposition:
@@ -108,6 +150,81 @@ class TestSetDisposition:
         )
 
         assert response.status_code == 422
+
+
+class TestDispositionSuppression:
+    def test_rejection_records_an_indefinite_suppression_for_that_signature(self):
+        recommendation = _recommendation(decision_signature="v1:sig-buy-10")
+        dispositions = FakeCosmosRepository()
+        client = _make_client(FakeCosmosRepository([recommendation]), disposition_repo=dispositions)
+
+        body = client.post(
+            f"/api/recommendations/{recommendation.id}/disposition",
+            json={"disposition": "REJECTED"},
+        ).json()
+
+        stored = dispositions.upserted[-1]
+        assert stored.id == "owner-1:sec-a"
+        assert stored.user_id == "owner-1"
+        assert stored.decision_signature == "v1:sig-buy-10"
+        assert stored.disposition is DispositionStatus.REJECTED
+        assert stored.expires_at is None
+        assert body["suppressed"] is True
+        assert body["suppression_reason"] == "REJECTED"
+
+    def test_deferral_expires_after_the_configured_window(self):
+        recommendation = _recommendation(decision_signature="v1:sig-buy-10")
+        dispositions = FakeCosmosRepository()
+        client = _make_client(FakeCosmosRepository([recommendation]), disposition_repo=dispositions)
+
+        body = client.post(
+            f"/api/recommendations/{recommendation.id}/disposition",
+            json={"disposition": "DEFERRED"},
+        ).json()
+
+        stored = dispositions.upserted[-1]
+        assert stored.disposition is DispositionStatus.DEFERRED
+        assert stored.expires_at is not None
+        window = stored.expires_at - stored.recorded_at
+        assert window == timedelta(days=get_settings().deferred_disposition_days)
+        assert body["suppressed"] is True
+        assert body["suppression_reason"] == "DEFERRED"
+
+    def test_acceptance_suppresses_nothing_going_forward(self):
+        recommendation = _recommendation(decision_signature="v1:sig-buy-10", suppressed=True)
+        dispositions = FakeCosmosRepository()
+        client = _make_client(FakeCosmosRepository([recommendation]), disposition_repo=dispositions)
+
+        body = client.post(
+            f"/api/recommendations/{recommendation.id}/disposition",
+            json={"disposition": "ACCEPTED"},
+        ).json()
+
+        assert body["suppressed"] is False
+        assert dispositions.upserted[-1].disposition is DispositionStatus.ACCEPTED
+
+    def test_no_suppression_is_written_without_a_signature(self):
+        """A pre-signature row cannot suppress anything — there is nothing to match."""
+
+        recommendation = _recommendation(decision_signature=None)
+        dispositions = FakeCosmosRepository()
+        client = _make_client(FakeCosmosRepository([recommendation]), disposition_repo=dispositions)
+
+        client.post(
+            f"/api/recommendations/{recommendation.id}/disposition",
+            json={"disposition": "REJECTED"},
+        )
+
+        assert dispositions.upserted == []
+
+    def test_dispositions_are_listed_only_for_the_caller(self):
+        dispositions = FakeCosmosRepository()
+        client = _make_client(disposition_repo=dispositions)
+
+        response = client.get("/api/recommendations/dispositions")
+
+        assert response.status_code == 200
+        assert dispositions.queries[-1].partition_key == "owner-1"
 
 
 @pytest.mark.asyncio

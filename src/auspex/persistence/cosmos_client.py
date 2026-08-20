@@ -20,14 +20,45 @@ CONTAINER_PARTITION_KEYS: dict[str, str] = {
     "scores": "/security_id",
     "leg_changes": "/security_id",
     "recommendations": "/user_id",
+    "recommendation_dispositions": "/user_id",
     "portfolio_projection": "/user_id",
     "conversations": "/user_id",
     "performance": "/metric_type",
+    "user_performance": "/user_id",
     "runs": "/run_date",
     "config_versions": "/config_type",
     "user_settings": "/user_id",
     "watermarks": "/scope",
+    # --- multi-user administration (arc42 §5.7) ---
+    # Private, one logical partition per user. Every request path reaches
+    # these by point read or single-partition query on the caller's own
+    # `user_id`; none of them is ever scanned cross-partition.
+    "app_users": "/user_id",
+    "onboarding": "/user_id",
+    "deletion_jobs": "/user_id",
+    "audit_events": "/user_id",
+    # The administrator roster and the singleton admin-authority binding live
+    # in one small logical partition (`registry`) so listing users is a
+    # single-partition query rather than a cross-partition scan of `app_users`
+    # — and so no private user data is co-located with the roster.
+    "app_user_index": "/scope",
 }
+
+#: Containers holding one logical partition per user. Account deletion must
+#: purge every one of these; adding a user-partitioned container without
+#: adding it here would silently leave data behind.
+USER_PARTITIONED_CONTAINERS: tuple[str, ...] = (
+    "recommendations",
+    "recommendation_dispositions",
+    "portfolio_projection",
+    "conversations",
+    "user_settings",
+    "user_performance",
+    "app_users",
+    "onboarding",
+    "deletion_jobs",
+    "audit_events",
+)
 
 
 class CosmosContext:

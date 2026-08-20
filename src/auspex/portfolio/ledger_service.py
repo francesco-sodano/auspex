@@ -9,7 +9,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
-from azure.cosmos.exceptions import CosmosResourceExistsError
+from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosResourceNotFoundError
 
 from auspex.models.common import sha256_hex, utc_now
 from auspex.portfolio.adapter import PortfolioAdapter
@@ -100,23 +100,96 @@ def _normalize_cost_category(category: str, transaction_type: str) -> str:
 
 
 class PortfolioLedgerService:
+    """Validated, append-only writes against one user's event ledger.
+
+    **Multi-user.** A service instance is bound to exactly one ledger
+    partition, supplied as ``owner_user_sk`` by the caller that already knows
+    who the authenticated principal is. There is no global "the owner" here
+    any more: :meth:`_owner` derives the partition from the authenticated
+    ``user_id`` alone, so two users can never observe or mutate each other's
+    events regardless of what identifiers appear in a request body.
+
+    ``owner_user_sk`` exists only so an imported deployment can pin a
+    pre-existing ledger partition that is not the derived ``user_id``; when it
+    is supplied, every call must still present the matching authenticated
+    ``user_id``.
+    """
+
     def __init__(
         self,
         database: WritableDatabase,
         mapping: PortfolioMappingConfig,
         adapter: PortfolioAdapter,
         valid_tickers: set[str],
+        owner_user_sk: str | None = None,
+        authenticated_user_id: str | None = None,
     ) -> None:
         self._database = database
         self._mapping = mapping
         self._adapter = adapter
         self._valid_tickers = valid_tickers
+        self._owner_user_sk = owner_user_sk or None
+        self._authenticated_user_id = authenticated_user_id or None
 
     async def _owner(self, authenticated_user_id: str) -> str:
-        owner = await self._adapter.resolve_owner_user_sk()
-        if owner != authenticated_user_id:
-            raise PermissionError("authenticated user does not own the portfolio ledger")
-        return owner
+        """Ledger partition for the authenticated caller.
+
+        The partition is derived from the caller's own identity — never from
+        anything in the request — so ordinary user operations cannot address
+        another user's ledger. When the service was constructed for a specific
+        principal, a mismatched ``authenticated_user_id`` is refused outright
+        rather than quietly rebinding.
+        """
+
+        if not authenticated_user_id:
+            raise PermissionError("an authenticated user is required for ledger access")
+        if self._authenticated_user_id is not None and authenticated_user_id != self._authenticated_user_id:
+            raise PermissionError("authenticated user does not match this ledger binding")
+        if self._owner_user_sk is not None:
+            return self._owner_user_sk
+        explicit = getattr(self._adapter, "owner_user_sk", None)
+        if explicit is not None:
+            return explicit
+        return authenticated_user_id
+
+    async def purge_owner_ledger(self, authenticated_user_id: str) -> int:
+        """Hard-delete every event in this user's ledger partition.
+
+        Used only by account deletion (arc42 §8.3). Idempotent: replaying it
+        over an already-empty partition deletes nothing and succeeds.
+        """
+
+        owner = await self._owner(authenticated_user_id)
+        container = self._container()
+        deleted = 0
+        items = container.query_items(
+            query="SELECT VALUE c.id FROM c",
+            parameters=[],
+            partition_key=owner,
+        )
+        document_ids = [str(item) async for item in items]
+        for document_id in document_ids:
+            delete_item = getattr(container, "delete_item", None)
+            if delete_item is None:  # pragma: no cover - defensive
+                raise PortfolioLedgerValidationError("ledger container does not support deletion")
+            try:
+                await delete_item(item=document_id, partition_key=owner)
+            except CosmosResourceNotFoundError:
+                continue
+            deleted += 1
+        return deleted
+
+    async def count_owner_ledger(self, authenticated_user_id: str) -> int:
+        """Documents remaining in this user's ledger partition."""
+
+        owner = await self._owner(authenticated_user_id)
+        items = self._container().query_items(
+            query="SELECT VALUE COUNT(1) FROM c",
+            parameters=[],
+            partition_key=owner,
+        )
+        rows = [row async for row in items]
+        return int(rows[0]) if rows else 0
 
     def _container(self) -> WritableContainer:
         return self._database.get_container_client(self._mapping.transactions.container)

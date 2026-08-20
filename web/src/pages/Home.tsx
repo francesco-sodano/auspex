@@ -1,4 +1,4 @@
-import { ArrowDownRight, ArrowUpRight, MessageSquareText, ShieldAlert } from 'lucide-react'
+import { ArrowDownRight, ArrowUpRight, Ban, Clock3, MessageSquareText, ShieldAlert } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { ActionPill, ErrorBlock, Loading, MetricTile, Section, formatMoney, formatNumber } from '../components/common'
 import { useApi } from '../lib/api'
@@ -51,20 +51,38 @@ function Movers({ movers, direction }: { movers: ScoreMover[]; direction: 'up' |
 export function Home() {
   const api = useApi()
   const [briefing, setBriefing] = useState<Briefing | null>(null)
-  const [error, setError] = useState<unknown>(null)
+  const [loadError, setLoadError] = useState<unknown>(null)
+  const [actionError, setActionError] = useState<unknown>(null)
+  const [hiddenSuggestions, setHiddenSuggestions] = useState<Set<string>>(new Set())
+  const [savingDisposition, setSavingDisposition] = useState<string | null>(null)
+  const [announcement, setAnnouncement] = useState('')
 
   useEffect(() => {
-    void api.getBriefing().then(setBriefing).catch(setError)
+    void api.getBriefing().then(setBriefing).catch(setLoadError)
   }, [api])
 
-  if (error) return <ErrorBlock error={error} />
+  if (loadError) return <ErrorBlock error={loadError} />
   if (!briefing) return <Loading label="Preparing the daily briefing" />
 
   const portfolio = briefing.portfolio
   const suggestions = briefing.recommendations
     .filter((recommendation) => !recommendation.action.startsWith('HOLD'))
+    .filter((recommendation) => !hiddenSuggestions.has(recommendation.id))
     .slice(0, 5)
   const additionCount = suggestions.filter((item) => item.action === 'BUY' || item.action === 'ADD').length
+  const setDisposition = async (recommendation: Recommendation, disposition: 'REJECTED' | 'DEFERRED') => {
+    setSavingDisposition(recommendation.id)
+    setActionError(null)
+    try {
+      await api.disposition(recommendation.id, disposition)
+      setHiddenSuggestions((current) => new Set(current).add(recommendation.id))
+      setAnnouncement(`${recommendation.ticker} suggestion ${disposition === 'DEFERRED' ? 'hidden for now' : 'declined'}.`)
+    } catch (cause) {
+      setActionError(cause)
+    } finally {
+      setSavingDisposition(null)
+    }
+  }
 
   return (
     <>
@@ -121,13 +139,15 @@ export function Home() {
 
       <Section title="Daily Suggestions" description="Up to five portfolio actions with the strongest estimated benefit" count={suggestions.length}>
         <div className="suggestion-grid">
+          <span className="sr-only" aria-live="polite">{announcement}</span>
+          {actionError && <div className="suggestion-action-error"><ErrorBlock error={actionError} /></div>}
           {suggestions.length === 0 && <div className="empty">No portfolio action is justified today. Existing positions remain unchanged.</div>}
           {suggestions.length > 0 && additionCount === 0 && <div className="suggestion-note">No new BUY or ADD candidate cleared every active policy gate today.</div>}
           {suggestions.map((recommendation) => (
             <article className="suggestion-card" key={recommendation.id}>
               <a className="identity identity-link" href={`#/analysis?security=${encodeURIComponent(recommendation.security_id)}`}>
                 <span className="ticker">{recommendation.ticker}</span>
-                <div><strong>{recommendation.company_name}</strong><small>{formatNumber(recommendation.current_weight ?? 0)}% → target {formatNumber(recommendation.target_weight ?? 0)}%</small></div>
+                <div><strong>{recommendation.company_name}</strong><small>{formatNumber(recommendation.current_weight)}% → target {formatNumber(recommendation.target_weight)}%</small></div>
               </a>
               <p>{recommendation.rationale}</p>
               <div className="score-readiness">
@@ -136,7 +156,27 @@ export function Home() {
               </div>
               <footer>
                 <span>{suggestedAction(recommendation)}</span>
-                <a className="action-link" href={`#/analysis?security=${encodeURIComponent(recommendation.security_id)}`}><ActionPill action={recommendation.action} /></a>
+                <div className="suggestion-actions">
+                  <button
+                    className="button compact"
+                    type="button"
+                    disabled={savingDisposition === recommendation.id}
+                    onClick={() => void setDisposition(recommendation, 'DEFERRED')}
+                    title="Hide this exact suggestion for seven days. It returns sooner if the action, quantity, gates, or evidence change."
+                  >
+                    <Clock3 size={12} /> Not now
+                  </button>
+                  <button
+                    className="button compact danger"
+                    type="button"
+                    disabled={savingDisposition === recommendation.id}
+                    onClick={() => { if (window.confirm(`Decline this ${recommendation.action} suggestion for ${recommendation.ticker}?`)) void setDisposition(recommendation, 'REJECTED') }}
+                    title="Record that you declined this exact suggestion. A materially changed suggestion can still return."
+                  >
+                    <Ban size={12} /> Decline
+                  </button>
+                  <a className="action-link" href={`#/analysis?security=${encodeURIComponent(recommendation.security_id)}`}><ActionPill action={recommendation.action} /></a>
+                </div>
               </footer>
             </article>
           ))}

@@ -18,7 +18,7 @@ def valid_settings():
     return {
         "risk_profile": "CONSERVATIVE",
         "cash_reserve_chf": "5000",
-        "investment_horizon": "LONG_TERM",
+        "investment_horizon": "THREE_TO_SEVEN_YEARS",
         "investment_objective": "CAPITAL_GROWTH",
         "directional_only_acknowledged": True,
         "no_guarantee_acknowledged": True,
@@ -32,15 +32,35 @@ def test_settings_require_authentication() -> None:
     assert make_client(authed=False).get("/api/account/settings").status_code == 401
 
 
-def test_get_returns_safe_unsaved_moderate_defaults() -> None:
+def test_get_returns_safe_unsaved_defaults() -> None:
     response = make_client().get("/api/account/settings")
 
     assert response.status_code == 200
     assert response.json()["risk_profile"] == "MODERATE"
     assert response.json()["cash_reserve_chf"] == "3000"
-    assert response.json()["investment_horizon"] == "LONG_TERM"
+    # Default horizon is the longest of the five non-overlapping bands.
+    assert response.json()["investment_horizon"] == "OVER_SEVEN_YEARS"
     assert response.json()["investment_objective"] == "CAPITAL_GROWTH"
     assert response.json()["directional_only_acknowledged"] is False
+
+
+def test_put_accepts_legacy_horizon_and_stores_migrated_band() -> None:
+    """Older clients still send SHORT/MEDIUM/LONG_TERM.
+
+    The request is accepted (no client is broken by the split) but what is
+    stored and returned is the migrated five-band value, so the rest of the
+    system only ever sees one vocabulary.
+    """
+
+    repo = FakeCosmosRepository()
+    payload = valid_settings()
+    payload["investment_horizon"] = "MEDIUM_TERM"
+
+    response = make_client(repo).put("/api/account/settings", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["investment_horizon"] == "THREE_TO_SEVEN_YEARS"
+    assert repo.upserted[-1].investment_horizon.value == "THREE_TO_SEVEN_YEARS"
 
 
 def test_put_requires_every_acknowledgement() -> None:

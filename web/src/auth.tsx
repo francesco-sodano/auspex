@@ -32,9 +32,17 @@ let redirectInProgress = false
 type RuntimeAuthConfig = {
   client_id: string
   authority: string
+  known_authorities?: string[]
+  api_scope?: string
 }
 
-async function loadConfiguration(): Promise<Configuration> {
+type LoadedAuthConfiguration = {
+  configuration: Configuration
+  tokenScopes: string[]
+  preferAccessToken: boolean
+}
+
+async function loadConfiguration(): Promise<LoadedAuthConfiguration> {
   const buildClientId = import.meta.env.VITE_ENTRA_CLIENT_ID
   const buildAuthority = import.meta.env.VITE_ENTRA_AUTHORITY
   let runtime: RuntimeAuthConfig
@@ -49,16 +57,23 @@ async function loadConfiguration(): Promise<Configuration> {
     throw new Error('Authentication configuration is incomplete.')
   }
   return {
-    auth: {
-      clientId: runtime.client_id,
-      authority: runtime.authority,
-      redirectUri: window.location.origin,
-      postLogoutRedirectUri: window.location.origin,
-      navigateToLoginRequestUrl: false,
+    configuration: {
+      auth: {
+        clientId: runtime.client_id,
+        authority: runtime.authority,
+        knownAuthorities: runtime.known_authorities,
+        redirectUri: window.location.origin,
+        postLogoutRedirectUri: window.location.origin,
+        navigateToLoginRequestUrl: false,
+      },
+      cache: {
+        cacheLocation: 'localStorage',
+      },
     },
-    cache: {
-      cacheLocation: 'localStorage',
-    },
+    tokenScopes: runtime.api_scope
+      ? [runtime.api_scope]
+      : ['openid', 'profile', 'email'],
+    preferAccessToken: Boolean(runtime.api_scope),
   }
 }
 
@@ -75,6 +90,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [ready, setReady] = useState(false)
   const [account, setAccount] = useState<AccountInfo | null>(devBypass ? developmentAccount : null)
   const [msal, setMsal] = useState<PublicClientApplication | null>(null)
+  const [tokenScopes, setTokenScopes] = useState<string[]>(['openid', 'profile', 'email'])
+  const [preferAccessToken, setPreferAccessToken] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -84,12 +101,15 @@ export function AuthProvider({ children }: PropsWithChildren) {
     }
     void (async () => {
       try {
-        const application = new PublicClientApplication(await loadConfiguration())
+        const loaded = await loadConfiguration()
+        const application = new PublicClientApplication(loaded.configuration)
         await application.initialize()
         const result = await application.handleRedirectPromise()
         const selected = result?.account ?? application.getActiveAccount() ?? application.getAllAccounts()[0] ?? null
         if (selected) application.setActiveAccount(selected)
         setMsal(application)
+        setTokenScopes(loaded.tokenScopes)
+        setPreferAccessToken(loaded.preferAccessToken)
         setAccount(selected)
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : 'Microsoft sign-in failed.')
@@ -122,9 +142,11 @@ export function AuthProvider({ children }: PropsWithChildren) {
     try {
       const result = await msal.acquireTokenSilent({
         account: selected,
-        scopes: ['openid', 'profile', 'email'],
+        scopes: tokenScopes,
       })
-      return result.idToken || result.accessToken
+      return preferAccessToken
+        ? result.accessToken
+        : result.idToken || result.accessToken
     } catch (cause) {
       if (!(cause instanceof InteractionRequiredAuthError)) throw cause
       if (!redirectInProgress) {
@@ -132,7 +154,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         try {
           await msal.acquireTokenRedirect({
             account: selected,
-            scopes: ['openid', 'profile', 'email'],
+            scopes: tokenScopes,
           })
         } catch (redirectError) {
           redirectInProgress = false
@@ -141,7 +163,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       }
       throw new Error('Microsoft sign-in is being refreshed.')
     }
-  }, [account, msal])
+  }, [account, msal, preferAccessToken, tokenScopes])
 
   const value = useMemo<AuthState>(() => ({
     ready,

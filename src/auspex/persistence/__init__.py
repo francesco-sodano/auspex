@@ -5,6 +5,7 @@ from __future__ import annotations
 from auspex.persistence.blob_client import BlobContext, get_blob_context
 from auspex.persistence.cosmos_client import (
     CONTAINER_PARTITION_KEYS,
+    USER_PARTITIONED_CONTAINERS,
     CosmosContext,
     SourceLedgerCosmosContext,
     get_cosmos_context,
@@ -16,6 +17,7 @@ __all__ = [
     "BlobContext",
     "get_blob_context",
     "CONTAINER_PARTITION_KEYS",
+    "USER_PARTITIONED_CONTAINERS",
     "CosmosContext",
     "SourceLedgerCosmosContext",
     "get_cosmos_context",

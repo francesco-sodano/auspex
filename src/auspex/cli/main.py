@@ -48,6 +48,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "seed-edgar-watermarks",
         help="advance missing filing/Form 4 watermarks after a historical bootstrap",
     )
+    subparsers.add_parser(
+        "migrate-multi-user",
+        help="idempotently seed the configured legacy owner as the initial active administrator",
+    )
 
     nightly_parser = subparsers.add_parser(
         "nightly", help="run the nightly 20-step pipeline (arc42 §6.1, job-auspex-pipeline)"
@@ -64,6 +68,70 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--port", type=int, default=8080)
 
     return parser
+
+
+async def _migrate_multi_user_command() -> int:
+    """Create the initial administrator before lifecycle enforcement goes live."""
+
+    from auspex.api.deps import get_app_user_service
+    from auspex.models.app_user import UserRole, UserStatus
+    from auspex.persistence.cosmos_client import get_cosmos_context
+    from auspex.settings import get_settings
+
+    settings = get_settings()
+    provider_user_id = (settings.owner_provider_user_id or "").strip()
+    ledger_partition_key = (settings.owner_ledger_partition_key or "").strip()
+    initial_admin_email = (settings.initial_admin_email or "").strip()
+    if not provider_user_id:
+        logger.error("migrate-multi-user: AUSPEX_OWNER_PROVIDER_USER_ID is required")
+        return 1
+    if not initial_admin_email:
+        logger.error("migrate-multi-user: AUSPEX_INITIAL_ADMIN_EMAIL is required")
+        return 1
+    if not ledger_partition_key:
+        logger.error(
+            "migrate-multi-user: AUSPEX_OWNER_LEDGER_PARTITION_KEY is required "
+            "to preserve the existing portfolio"
+        )
+        return 1
+
+    cosmos = get_cosmos_context()
+    service = get_app_user_service()
+    try:
+        user = await service.register(
+            provider_user_id=provider_user_id,
+            email=initial_admin_email,
+            email_verified=False,
+        )
+        if user.ledger_partition_key != ledger_partition_key:
+            logger.error(
+                "migrate-multi-user: owner record uses ledger partition %s, "
+                "expected the explicitly configured %s",
+                user.ledger_partition_key,
+                ledger_partition_key,
+            )
+            return 1
+        if user.status is UserStatus.APPROVED_NEEDS_ONBOARDING:
+            user = await service.complete_onboarding(user.user_id)
+        if user.status is not UserStatus.ACTIVE:
+            logger.error(
+                "migrate-multi-user: configured owner resolved to unexpected status %s",
+                user.status.value,
+            )
+            return 1
+        if user.role is not UserRole.ADMIN:
+            user = await service.set_role(
+                user.user_id,
+                UserRole.ADMIN,
+                actor_user_id=user.user_id,
+            )
+        logger.info(
+            "migrate-multi-user: owner is ACTIVE ADMIN with preserved ledger partition %s",
+            user.ledger_partition_key,
+        )
+        return 0
+    finally:
+        await cosmos.aclose()
 
 
 def _parse_date(value: str | None) -> date:
@@ -97,7 +165,7 @@ async def _run_pipeline_command(as_of_date: date) -> int:
     )
     from auspex.models.common import utc_now
     from auspex.models.config_version import ConfigVersion
-    from auspex.models.policy import Recommendation
+    from auspex.models.policy import Recommendation, RecommendationDisposition
     from auspex.models.portfolio import PortfolioProjection
     from auspex.models.run import RunManifest
     from auspex.models.scoring import LegChange, ScoreSnapshot
@@ -138,33 +206,78 @@ async def _run_pipeline_command(as_of_date: date) -> int:
     blob = get_blob_context()
     settings = get_settings()
 
-    # Read-only binding to the existing, owner-owned portfolio ledger (arc42 §5.7,
-    # a separate Cosmos account from Auspex's own — resolved *before*
-    # any provider/repo wiring so a bad binding fails fast. `resolve_owner_user_sk`
-    # is also the single source of truth for the `user_id` this run writes under:
-    # every user_id-partitioned container (recommendations, portfolio_projection,
-    # conversations) must agree with whatever the API resolves for the
-    # authenticated owner's requests (arc42 §11), and the source ledger read
-    # itself is partitioned on that same value. Binding absence or ambiguity (no
-    # config/portfolio_mapping.yaml, no resolvable/unique app_users document,
-    # etc) is therefore a hard failure — degrading to an empty portfolio or a
-    # placeholder user_id would silently write data under a user_sk nobody could
-    # ever read back or reconcile against the real ledger.
+    # Bind to the source portfolio ledger account (arc42 §5.7 — a separate Cosmos
+    # account from Auspex's own) and resolve who this run is for.
+    #
+    # Multi-user: the nightly run no longer belongs to a single owner. Shared
+    # research (ingestion, extraction, scoring, narratives) runs once; the
+    # per-user stage then runs for every ACTIVE application user, each against a
+    # ledger binding that can only see their own partition. If the roster cannot
+    # be read at all, the run falls back to the legacy single-owner binding so a
+    # deployment that has not yet registered anybody still produces its owner's
+    # recommendations exactly as before.
     source_ledger = None
     try:
         mapping = load_portfolio_mapping()
         source_ledger = get_source_ledger_context()
-        portfolio_reader = PortfolioAdapter(source_ledger, mapping)
-        user_id = await portfolio_reader.resolve_owner_user_sk()
-    except Exception as exc:  # noqa: BLE001 - fatal: no unambiguous owner to bind writes to
+    except Exception as exc:  # noqa: BLE001 - fatal: no ledger binding at all
         logger.error(
-            "nightly: could not resolve the portfolio owner via PortfolioAdapter — cannot proceed "
-            "without an unambiguous user_sk for user-scoped writes: %s",
-            exc,
-            exc_info=True,
+            "nightly: could not bind to the source portfolio ledger: %s", exc, exc_info=True
         )
         await _aclose_unique(source_ledger, blob, cosmos)
         return 1
+
+    active_users = await _resolve_active_users(cosmos)
+    uses_multi_user_roster = active_users is not None
+    fallback_reader = None
+    if active_users is None:
+        # No roster yet (fresh deployment, or a pre-multi-user database): keep
+        # the historical behaviour of resolving the one configured owner rather
+        # than silently producing nothing.
+        try:
+            fallback_reader = PortfolioAdapter(source_ledger, mapping)
+            legacy_user_id = await fallback_reader.resolve_owner_user_sk()
+            active_users = [(legacy_user_id, legacy_user_id)]
+        except Exception as exc:  # noqa: BLE001 - fatal: nobody to write for
+            logger.error(
+                "nightly: no ACTIVE application users and no resolvable legacy owner — "
+                "cannot proceed without an unambiguous user_sk for user-scoped writes: %s",
+                exc,
+                exc_info=True,
+            )
+            await _aclose_unique(source_ledger, blob, cosmos)
+            return 1
+    elif not active_users:
+        logger.error(
+            "nightly: the application-user roster exists but contains no ACTIVE users; "
+            "refusing to fall back to a legacy partition"
+        )
+        await _aclose_unique(source_ledger, blob, cosmos)
+        return 1
+
+    user_operation_factory = None
+    if uses_multi_user_roster:
+        from auspex.models.app_user import AppUser, AppUserSummary
+        from auspex.users.service import AppUserService
+
+        user_service = AppUserService(
+            user_repo=CosmosRepository(cosmos, "app_users", AppUser),
+            index_repo=CosmosRepository(
+                cosmos,
+                "app_user_index",
+                AppUserSummary,
+            ),
+        )
+        def user_operation_factory(user_id):
+            return user_service.user_operation(
+                user_id,
+                require_active=True,
+            )
+
+    primary_user_id = active_users[0][0]
+    portfolio_reader = fallback_reader or PortfolioAdapter(
+        source_ledger, mapping, owner_user_sk=active_users[0][1]
+    )
 
     # Persist the config version bundle actually used by this run (arc42
     # §5.11) — every `scores` row cites `config_version_id`, so without this
@@ -231,6 +344,9 @@ async def _run_pipeline_command(as_of_date: date) -> int:
         score_repo=CosmosRepository(cosmos, "scores", ScoreSnapshot),
         leg_change_repo=CosmosRepository(cosmos, "leg_changes", LegChange),
         recommendation_repo=CosmosRepository(cosmos, "recommendations", Recommendation),
+        recommendation_disposition_repo=CosmosRepository(
+            cosmos, "recommendation_dispositions", RecommendationDisposition
+        ),
         run_repo=CosmosRepository(cosmos, "runs", RunManifest),
         portfolio_projection_repo=CosmosRepository(cosmos, "portfolio_projection", PortfolioProjection),
         user_settings_repo=CosmosRepository(
@@ -242,12 +358,39 @@ async def _run_pipeline_command(as_of_date: date) -> int:
     )
 
     ctx = PipelineContext(
-        universe=universe, config=config, as_of_date=as_of_date, user_id=user_id, repos=repos, providers=providers
+        universe=universe,
+        config=config,
+        as_of_date=as_of_date,
+        user_id=primary_user_id,
+        repos=repos,
+        providers=providers,
     )
     ctx.__dict__["_config_version_id"] = config_version.id
 
+    def reader_for(user_id: str):
+        partition = next(
+            (partition for candidate, partition in active_users if candidate == user_id), user_id
+        )
+        if fallback_reader is not None and user_id == primary_user_id:
+            return fallback_reader
+        return PortfolioAdapter(source_ledger, mapping, owner_user_sk=partition)
+
     try:
-        manifest = await run_pipeline_wrapper(ctx)
+        result = await run_pipeline_wrapper(
+            ctx,
+            user_ids=[user_id for user_id, _ in active_users],
+            portfolio_reader_factory=reader_for,
+            user_operation_factory=user_operation_factory,
+            concurrency=settings.nightly_user_concurrency,
+        )
+        manifest = result.manifest
+        if result.failed_user_ids:
+            logger.warning(
+                "nightly: per-user stage failed for %d of %d users: %s",
+                len(result.failed_user_ids),
+                len(active_users),
+                ", ".join(result.failed_user_ids),
+            )
     finally:
         # Release all per-run SDK clients and credentials.
         await _aclose_unique(
@@ -261,14 +404,76 @@ async def _run_pipeline_command(as_of_date: date) -> int:
             cosmos,
         )
 
-    logger.info("pipeline run finished: status=%s", manifest.status.value)
+    logger.info(
+        "pipeline run finished: status=%s users=%d",
+        manifest.status.value,
+        len(active_users),
+    )
     return 0 if manifest.status.value in ("SUCCESS", "DEGRADED") else 1
 
 
-async def run_pipeline_wrapper(ctx):
-    from auspex.pipeline.runner import run_nightly_pipeline
+async def _resolve_active_users(cosmos) -> list[tuple[str, str]] | None:
+    """``(user_id, ledger_partition_key)`` for every ACTIVE application user.
 
-    return await run_nightly_pipeline(ctx)
+    Read through the roster projection, which is a single-partition query.
+    A missing container (a database provisioned before multi-user) is not an
+    error: it simply means "no roster", and the caller falls back to the
+    legacy single-owner binding.
+    """
+
+    from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+    from auspex.models.app_user import AppUser, AppUserSummary, UserStatus
+    from auspex.persistence.repositories import CosmosRepository as _Repo
+    from auspex.users.service import AppUserService
+
+    try:
+        service = AppUserService(
+            user_repo=_Repo(cosmos, "app_users", AppUser),
+            index_repo=_Repo(cosmos, "app_user_index", AppUserSummary),
+        )
+        summaries = await service.list_users(status=UserStatus.ACTIVE)
+    except CosmosResourceNotFoundError:
+        logger.info("nightly: no application-user roster available; using legacy owner binding")
+        return None
+
+    resolved: list[tuple[str, str]] = []
+    for summary in summaries:
+        user = await service.get_user(summary.user_id)
+        if user is None or user.status is not UserStatus.ACTIVE:
+            logger.warning(
+                "nightly: ignoring stale ACTIVE roster entry for user %s",
+                summary.user_id,
+            )
+            continue
+        resolved.append((user.user_id, user.ledger_partition_key))
+    return resolved
+
+
+async def run_pipeline_wrapper(
+    ctx,
+    *,
+    user_ids: list[str] | None = None,
+    portfolio_reader_factory=None,
+    user_operation_factory=None,
+    concurrency: int = 4,
+):
+    """Run the nightly pipeline for one or many users.
+
+    Kept as a thin seam so tests can substitute the whole run. With a single
+    user and no reader factory this is behaviourally identical to the
+    original single-owner runner.
+    """
+
+    from auspex.pipeline.fanout import run_multi_user_pipeline
+
+    return await run_multi_user_pipeline(
+        ctx,
+        user_ids if user_ids is not None else [ctx.user_id],
+        portfolio_reader_factory=portfolio_reader_factory,
+        user_operation_factory=user_operation_factory,
+        concurrency=concurrency,
+    )
 
 
 async def _performance_command(as_of_date: date) -> int:
@@ -280,13 +485,20 @@ async def _performance_command(as_of_date: date) -> int:
     (arc42 §6.3 step 10) rather than duplicating the cross-sectional IC
     computation here.
 
-    Unlike ``_run_pipeline_command``/``_bootstrap_command``, this job binds
-    to no owner-owned portfolio ledger: the ``performance`` container (arc42
-    §5.8) is partitioned by ``/metric_type``, not by ``user_id``, and
-    ``compute_performance_metrics`` never reads ``ctx.user_id``. The
-    ``user_id`` on the throwaway :class:`~auspex.pipeline.context.PipelineContext`
-    built below is therefore inert — a fixed service literal, not an
-    operator argument or a resolved portfolio owner.
+    Unlike ``_run_pipeline_command``/``_bootstrap_command``, this job publishes
+    into the shared ``performance`` container (arc42 §5.8), which is
+    partitioned by ``/metric_type`` rather than ``user_id``: composite/leg IC,
+    leg correlation and cohort quality measure the *research*, and are the
+    same population-level facts for everybody.
+
+    Attribution is different. Suggestion hit rate and disposition outcome
+    describe what one person did with their suggestions, so they are scoped to
+    the single ledger owner whose transactions supply
+    ``accepted_recommendation_ids``; blending several users' recommendations
+    into a shared metric would both double-count the same decision and leak
+    one user's behaviour to another. The ``user_id`` on the throwaway
+    :class:`~auspex.pipeline.context.PipelineContext` built below remains a
+    fixed service literal — never an operator argument.
     """
 
     from auspex.cli.bootstrap import BootstrapRunner
@@ -343,22 +555,101 @@ async def _performance_command(as_of_date: date) -> int:
     ctx = PipelineContext(universe=universe, config={}, as_of_date=as_of_date, user_id="system", repos=repos)
 
     runner = BootstrapRunner(universe=universe, context_factory=lambda _as_of: ctx)
-    portfolio_adapter = PortfolioAdapter(
-        get_source_ledger_context(),
-        load_portfolio_mapping(),
-    )
-    accepted_recommendation_ids = {
-        transaction.recommendation_id
-        for transaction in effective_transactions(
-            await portfolio_adapter.read_transactions()
-        )
-        if transaction.followed_auspex and transaction.recommendation_id
-    }
     metrics = await runner.compute_performance_metrics(
         ctx,
         performance_repo=performance_repo,
-        accepted_recommendation_ids=accepted_recommendation_ids,
+        include_recommendation_metrics=False,
     )
+
+    source_ledger = get_source_ledger_context()
+    mapping = load_portfolio_mapping()
+    active_users = await _resolve_active_users(cosmos)
+    uses_multi_user_roster = active_users is not None
+    if active_users is None:
+        try:
+            legacy = PortfolioAdapter(source_ledger, mapping)
+            legacy_user_id = await legacy.resolve_owner_user_sk()
+            active_users = [(legacy_user_id, legacy_user_id)]
+        except Exception:  # noqa: BLE001 - no owner means shared metrics only
+            active_users = []
+            logger.info(
+                "performance: no resolvable ledger owner; publishing shared score metrics only"
+            )
+
+    user_performance_repo = CosmosRepository(
+        cosmos, "user_performance", PerformanceMetric
+    )
+
+    performance_user_service = None
+    if uses_multi_user_roster:
+        from auspex.models.app_user import AppUser, AppUserSummary
+        from auspex.users.service import AppUserService
+
+        performance_user_service = AppUserService(
+            user_repo=CosmosRepository(cosmos, "app_users", AppUser),
+            index_repo=CosmosRepository(
+                cosmos,
+                "app_user_index",
+                AppUserSummary,
+            ),
+        )
+
+    async def compute_private_metrics(
+        user_id: str,
+        ledger_partition: str,
+    ) -> None:
+        adapter = PortfolioAdapter(
+            source_ledger,
+            mapping,
+            owner_user_sk=ledger_partition,
+        )
+        accepted_recommendation_ids = {
+            transaction.recommendation_id
+            for transaction in effective_transactions(
+                await adapter.read_transactions()
+            )
+            if transaction.followed_auspex and transaction.recommendation_id
+        }
+        user_metrics = await runner.compute_performance_metrics(
+            ctx,
+            performance_repo=None,
+            accepted_recommendation_ids=accepted_recommendation_ids,
+            attribution_user_id=user_id,
+        )
+        for metric in user_metrics:
+            if metric.metric_type not in {
+                "suggestion_hit_rate",
+                "disposition_outcome",
+            }:
+                continue
+            await user_performance_repo.upsert(
+                metric.model_copy(
+                    update={
+                        "id": f"{user_id}:{metric.id}",
+                        "user_id": user_id,
+                    }
+                )
+            )
+
+    for user_id, ledger_partition in active_users:
+        try:
+            if performance_user_service is None:
+                await compute_private_metrics(user_id, ledger_partition)
+            else:
+                async with performance_user_service.user_operation(
+                    user_id,
+                    require_active=True,
+                ):
+                    await compute_private_metrics(
+                        user_id,
+                        ledger_partition,
+                    )
+        except Exception:  # noqa: BLE001 - isolate one user's private attribution
+            logger.error(
+                "performance: private attribution failed for user %s",
+                user_id,
+                exc_info=True,
+            )
 
     logger.info(
         "performance: complete — metrics_computed=%d (arc42 §5.8, job-auspex-performance)",
@@ -942,6 +1233,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_bootstrap_audit_command())
     if args.command == "seed-edgar-watermarks":
         return asyncio.run(_seed_edgar_watermarks_command())
+    if args.command == "migrate-multi-user":
+        return asyncio.run(_migrate_multi_user_command())
     if args.command == "performance":
         return asyncio.run(_performance_command(_parse_date(args.date)))
     if args.command == "serve":

@@ -57,6 +57,15 @@ class PortfolioAdapter:
     Every Cosmos call this class makes is a query or a point read —
     :class:`ReadOnlyContainer` has no write method to call even by mistake
     The API's separate write service owns mutation and validation.
+
+    **Multi-user.** An adapter is bound to exactly one ledger partition. In a
+    request path that partition comes from the authenticated caller
+    (``owner_user_sk=...``); in the nightly fan-out it comes from the user
+    currently being processed. Only legacy single-owner flows (bootstrap of a
+    pre-existing imported ledger) leave it unset and fall back to resolving
+    "the one active owner" from configuration. Because the binding is
+    per-instance and immutable, an adapter can never be reused across users
+    and silently serve the wrong partition — construct one per user.
     """
 
     def __init__(
@@ -64,12 +73,20 @@ class PortfolioAdapter:
         database: ReadOnlyDatabase,
         mapping: PortfolioMappingConfig,
         fx_rate_to_chf: Any | None = None,
+        owner_user_sk: str | None = None,
     ) -> None:
         self._database = database
         self._mapping = mapping
         self._fx_rate_to_chf = fx_rate_to_chf
-        self._owner_user_sk_cache: str | None = None
+        self._owner_user_sk_cache: str | None = owner_user_sk or None
+        self._explicit_owner_user_sk: str | None = owner_user_sk or None
         self._degraded_fields: set[str] = set()
+
+    @property
+    def owner_user_sk(self) -> str | None:
+        """The explicitly bound ledger partition, if this adapter has one."""
+
+        return self._explicit_owner_user_sk
 
     @property
     def holdings_container_name(self) -> str:
@@ -79,6 +96,8 @@ class PortfolioAdapter:
         return sorted(self._degraded_fields)
 
     async def _resolve_owner_user_sk(self) -> str:
+        if self._explicit_owner_user_sk is not None:
+            return self._explicit_owner_user_sk
         if self._owner_user_sk_cache is not None:
             return self._owner_user_sk_cache
         if self._mapping.owner_user_sk:

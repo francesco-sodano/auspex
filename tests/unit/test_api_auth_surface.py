@@ -6,8 +6,9 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from auspex.api import create_app
-from auspex.api.auth import AuthenticatedUser, get_current_user
 from auspex.settings import get_settings
+
+from .conftest import lifecycle_overrides, make_app_user
 
 
 def make_client() -> TestClient:
@@ -40,10 +41,29 @@ class TestPublicAuthConfiguration:
         try:
             response = make_client().get("/auth-config.json")
             assert response.status_code == 200
-            assert response.json() == {
-                "client_id": "client-id",
-                "authority": "https://login.microsoftonline.com/tenant-id",
-            }
+            body = response.json()
+            assert body["client_id"] == "client-id"
+            assert body["authority"] == "https://login.microsoftonline.com/tenant-id"
+            # A workforce authority is implicitly trusted by MSAL.
+            assert body["known_authorities"] == []
+        finally:
+            get_settings.cache_clear()
+
+    def test_auth_config_advertises_an_external_tenant_authority(self, monkeypatch):
+        """An Entra External ID host must be declared or MSAL refuses it.
+
+        This is what lets friends sign in with a personal Gmail address, so
+        the SPA has to receive the ciamlogin.com host at runtime.
+        """
+
+        monkeypatch.setenv("AUSPEX_ENTRA_AUDIENCE", "client-id")
+        monkeypatch.setenv(
+            "AUSPEX_ENTRA_AUTHORITY", "https://auspexfriends.ciamlogin.com/tenant-id"
+        )
+        get_settings.cache_clear()
+        try:
+            body = make_client().get("/auth-config.json").json()
+            assert body["known_authorities"] == ["auspexfriends.ciamlogin.com"]
         finally:
             get_settings.cache_clear()
 
@@ -66,7 +86,7 @@ class TestApiRoutesRequireAuth:
 
     def test_api_health_succeeds_with_valid_token(self):
         app = create_app()
-        app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(user_id="owner", claims={})
+        app.dependency_overrides.update(lifecycle_overrides(make_app_user("owner")))
         client = TestClient(app)
         response = client.get("/api/health")
         assert response.status_code == 200

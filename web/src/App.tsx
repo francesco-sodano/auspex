@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import {
   Activity,
   BookOpenText,
@@ -7,25 +7,30 @@ import {
   Menu,
   MessageSquareText,
   Search,
+  Shield,
   Settings,
   WalletCards,
   X,
 } from 'lucide-react'
 import { AuthProvider, useAuth } from './auth'
-import { ApiProvider } from './lib/api'
-import { Account } from './pages/Account'
-import { Analysis } from './pages/Analysis'
-import { Discussion } from './pages/Discussion'
-import { Home } from './pages/Home'
-import { Performance } from './pages/Performance'
-import { PortfolioPage } from './pages/Portfolio'
+import { ErrorBlock, Loading } from './components/common'
+import { ApiProvider, useApi } from './lib/api'
+import { AdminPanel, ApprovalStatus, InitialPortfolio, Registration } from './pages/Lifecycle'
+import type { UserSession } from './lib/types'
 import './App.css'
 
-export type Page = 'home' | 'analysis' | 'discussion' | 'portfolio' | 'performance' | 'account'
+const Account = lazy(() => import('./pages/Account').then((module) => ({ default: module.Account })))
+const Analysis = lazy(() => import('./pages/Analysis').then((module) => ({ default: module.Analysis })))
+const Discussion = lazy(() => import('./pages/Discussion').then((module) => ({ default: module.Discussion })))
+const Home = lazy(() => import('./pages/Home').then((module) => ({ default: module.Home })))
+const Performance = lazy(() => import('./pages/Performance').then((module) => ({ default: module.Performance })))
+const PortfolioPage = lazy(() => import('./pages/Portfolio').then((module) => ({ default: module.PortfolioPage })))
+
+export type Page = 'home' | 'analysis' | 'discussion' | 'portfolio' | 'performance' | 'account' | 'admin'
 
 const pageFromHash = (): Page => {
   const page = window.location.hash.replace('#/', '').split('?')[0]
-  return ['home', 'analysis', 'discussion', 'portfolio', 'performance', 'account'].includes(page)
+  return ['home', 'analysis', 'discussion', 'portfolio', 'performance', 'account', 'admin'].includes(page)
     ? page as Page
     : 'home'
 }
@@ -63,13 +68,13 @@ function Login() {
         <p>Auspex reads the market overnight, scores every company deterministically, and presents the evidence for you to decide.</p>
         {error && <div className="notice danger" role="alert">{error}</div>}
         <button className="button primary" onClick={signIn}>Continue with Microsoft</button>
-        <small>Single-owner access · Decision support only · No trade execution</small>
+        <small>Admin-approved access · Decision support only · No trade execution</small>
       </section>
     </main>
   )
 }
 
-function Workspace() {
+function Workspace({ session }: { session: UserSession }) {
   const auth = useAuth()
   const [page, setPage] = useState<Page>(pageFromHash)
   const [mobileOpen, setMobileOpen] = useState(false)
@@ -90,13 +95,18 @@ function Workspace() {
       case 'portfolio': return <PortfolioPage />
       case 'performance': return <Performance />
       case 'account': return <Account />
+      case 'admin': return session.role === 'ADMIN'
+        ? <AdminPanel session={session} />
+        : <ErrorBlock error={new Error('Administrator access is required.')} />
       default: return <Home />
     }
-  }, [page])
+  }, [page, session])
+  const visibleNavigation = session.role === 'ADMIN'
+    ? [...navigation, { page: 'admin' as const, label: 'Admin', icon: Shield }]
+    : navigation
 
   return (
-    <ApiProvider getToken={auth.getToken}>
-      <div className="app-shell">
+    <div className="app-shell">
         <header className="topbar">
           <Brand />
           <button
@@ -107,7 +117,7 @@ function Workspace() {
             {mobileOpen ? <X size={19} /> : <Menu size={19} />}
           </button>
           <nav className={mobileOpen ? 'open' : ''} aria-label="Primary navigation">
-            {navigation.map(({ page: target, label, icon: Icon }) => (
+            {visibleNavigation.map(({ page: target, label, icon: Icon }) => (
               <a key={target} href={`#/${target}`} aria-current={page === target ? 'page' : undefined}>
                 <Icon size={15} aria-hidden="true" />
                 {label}
@@ -122,22 +132,61 @@ function Workspace() {
             </button>
           </div>
         </header>
-        <main className="workspace">{content}</main>
+        <main className="workspace">
+          <Suspense fallback={<Loading label="Loading workspace" />}>{content}</Suspense>
+        </main>
         <footer>
           <span>Auspex is research support, not financial advice.</span>
           <span>AI reads · Code decides · AI explains · You act</span>
         </footer>
-      </div>
-    </ApiProvider>
+    </div>
   )
 }
 
+function LifecycleRouter() {
+  const auth = useAuth()
+  const api = useApi()
+  const [session, setSession] = useState<UserSession | null>(null)
+  const [error, setError] = useState<unknown>(null)
+
+  useEffect(() => {
+    let active = true
+    const refresh = () => {
+      void api.getSession().then((value) => {
+        if (active) {
+          setSession(value)
+          setError(null)
+        }
+      }).catch((cause) => {
+        if (active) setError(cause)
+      })
+    }
+    refresh()
+    window.addEventListener('focus', refresh)
+    return () => {
+      active = false
+      window.removeEventListener('focus', refresh)
+    }
+  }, [api])
+
+  if (error) return <main className="lifecycle-shell"><section className="lifecycle-panel"><ErrorBlock error={error} /><button className="button" onClick={() => void auth.signOut()}>Sign out</button></section></main>
+  if (!session) return <main className="loading-shell"><Brand /><span className="auspex-spinner" aria-label="Loading account" /></main>
+  if (session.status === 'UNREGISTERED') return <Registration displayName={auth.accountName} onRegistered={setSession} onSignOut={auth.signOut} />
+  if (session.status === 'APPROVED_NEEDS_ONBOARDING') return <InitialPortfolio onComplete={setSession} onSignOut={auth.signOut} />
+  if (session.status !== 'ACTIVE') return <ApprovalStatus session={session} onRefresh={setSession} onSignOut={auth.signOut} />
+  if (!session.onboarding_completed) return <ErrorBlock error={new Error('This account is active but onboarding is incomplete. Contact an administrator.')} />
+  return <Workspace session={session} />
+}
+
 function AuthenticatedApp() {
-  const { ready, account } = useAuth()
+  const auth = useAuth()
+  const { ready, account } = auth
   if (!ready) {
     return <main className="loading-shell"><Brand /><span className="auspex-spinner" aria-label="Loading Auspex" /></main>
   }
-  return account ? <Workspace /> : <Login />
+  return account
+    ? <ApiProvider key={account.homeAccountId} getToken={auth.getToken}><LifecycleRouter /></ApiProvider>
+    : <Login />
 }
 
 export default function App() {

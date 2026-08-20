@@ -17,6 +17,19 @@ if ($env:AUSPEX_MANAGE_ENTRA_REDIRECT_URI -eq "false") {
     exit 0
 }
 
+# An external tenant (Microsoft Entra External ID) holds its own app
+# registration, which is *not* in the Azure subscription's tenant. `az ad app`
+# and Graph here are scoped to the logged-in tenant, so touching the app would
+# either fail or, worse, patch a same-named app in the wrong directory. Managing
+# the redirect URI there requires a separate `az login --tenant <external>`, so
+# it is opt-in rather than automatic.
+if ($env:AUSPEX_AUTH_TENANT_TYPE -eq "external" -and $env:AUSPEX_MANAGE_ENTRA_REDIRECT_URI -ne "true") {
+    Write-Host "External tenant detected — add this SPA redirect URI manually in the external tenant:"
+    Write-Host "  $($env:SERVICE_API_URI)"
+    Write-Host "Set AUSPEX_MANAGE_ENTRA_REDIRECT_URI=true after 'az login --tenant <external-tenant-id>' to automate it."
+    exit 0
+}
+
 if (-not $env:AUSPEX_AUTH_CLIENT_ID -or -not $env:SERVICE_API_URI) {
     throw "AUSPEX_AUTH_CLIENT_ID and SERVICE_API_URI are required after provisioning."
 }
