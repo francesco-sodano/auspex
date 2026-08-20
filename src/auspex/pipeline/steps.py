@@ -24,6 +24,7 @@ from auspex.extraction.cache import channel_a_cache_key, channel_b_cache_key
 from auspex.extraction.channel_a import ChannelAExtractor
 from auspex.extraction.channel_b import ChannelBExtractor
 from auspex.extraction.sections import WHOLE_DOCUMENT_FORMS, target_sections
+from auspex.marketdata.quarantine import exclude_quarantined
 from auspex.models.common import utc_now
 from auspex.models.document import Document
 from auspex.models.enums import Action, CohortConfidence, Direction, FilerProfile, LegName
@@ -48,6 +49,8 @@ from auspex.policy.assertions import run_post_run_assertions
 from auspex.policy.engine import load_policy_thresholds
 from auspex.scoring.engine import SecurityScoringInput, build_cohort_scopes, score_universe
 from auspex.scoring.legs import (
+    FundamentalHealthInputs,
+    ValuationMetrics,
     attention_acceleration,
     fundamental_health,
     narrative_premium,
@@ -56,9 +59,20 @@ from auspex.scoring.legs import (
     valuation_brake,
 )
 from auspex.scoring.normalize import percentile_rank
+from auspex.scoring.sessions import (
+    contiguous_weakening_streak,
+    normalise_calendar,
+    nth_prior_session,
+    prior_sessions,
+)
 from auspex.settings import get_settings
 
 logger = logging.getLogger("auspex.pipeline")
+
+#: Direction compares today's composite against roughly one trading week back.
+#: Expressed in trading sessions so a market holiday cannot shift the reference
+#: point onto a day that never had a score row.
+DIRECTION_LOOKBACK_SESSIONS = 5
 
 
 async def step_start_run(ctx: PipelineContext, manifest: RunManifest) -> None:
@@ -369,12 +383,16 @@ async def step_compute_raw_legs(ctx: PipelineContext, manifest: RunManifest) -> 
     """Compute all six raw legs per non-stale security (arc42 §5.5).
 
     Fundamental-health ratios may use a consistent native reporting currency.
-    Valuation remains USD-only because market prices are USD-denominated.
+    Valuation needs one common currency to be comparable across peers, so a
+    non-USD reporter is converted with point-in-time authoritative FX when an
+    ``FxConverter`` is available and otherwise has its valuation leg marked
+    *structurally not applicable* rather than silently failing coverage.
     """
 
     start_step(manifest, "COMPUTE_RAW_LEGS")
     weights_cfg = WeightsConfig.from_yaml(ctx.config["weights"])
     xbrl_concepts = ctx.config["xbrl_concepts"]
+    fx_converter = ctx.__dict__.get("_fx_converter")
 
     documents_by_security: dict[str, list] = {}
     documents = ctx.__dict__.get("_preloaded_documents")
@@ -411,7 +429,9 @@ async def step_compute_raw_legs(ctx: PipelineContext, manifest: RunManifest) -> 
         return values[-1][1]
 
     per_security_state: dict[str, dict] = {}
-    valuation_metrics_by_security: dict[str, object] = {}
+    valuation_metrics_by_security: dict[str, ValuationMetrics] = {}
+    fundamental_inputs_by_security: dict[str, FundamentalHealthInputs] = {}
+    fx_unavailable_ids: set[str] = set()
 
     for sec in ctx.universe.securities:
         docs = documents_by_security.get(sec.id, [])
@@ -426,6 +446,7 @@ async def step_compute_raw_legs(ctx: PipelineContext, manifest: RunManifest) -> 
         fundamental_inputs = build_fundamental_health_inputs(
             fundamentals, xbrl_concepts, weights_cfg.roic_tax_rate, ctx.as_of_date
         )
+        fundamental_inputs_by_security[sec.id] = fundamental_inputs
 
         # market_cap = latest close price x shares outstanding (both point-in-time,
         # arc42 §5.3), used by both smart_money's denominator and valuation_brake's EV.
@@ -433,13 +454,16 @@ async def step_compute_raw_legs(ctx: PipelineContext, manifest: RunManifest) -> 
         shares = _shares_outstanding(fundamentals, ctx.as_of_date)
         market_cap = (price * shares) if (price is not None and shares is not None) else None
 
-        valuation_metrics = build_valuation_metrics(market_cap, fundamentals, xbrl_concepts, ctx.as_of_date)
-        valuation_metrics_by_security[sec.id] = valuation_metrics
+        valuation = build_valuation_metrics(
+            market_cap, fundamentals, xbrl_concepts, ctx.as_of_date, fx_converter=fx_converter
+        )
+        valuation_metrics_by_security[sec.id] = valuation.metrics
+        if valuation.fx_unavailable:
+            fx_unavailable_ids.add(sec.id)
 
         leg_raw: dict[LegName, Decimal | None] = {
             LegName.THESIS_LINKAGE: thesis_linkage(thesis_events, weights_cfg.recency_half_life_days),
             LegName.ATTENTION_ACCELERATION: attention_acceleration(attention_events),
-            LegName.FUNDAMENTAL_HEALTH: fundamental_health(fundamental_inputs),
         }
         if sec.filer_profile == FilerProfile.DOMESTIC:
             leg_raw[LegName.SMART_MONEY] = smart_money(insider_events, market_cap)
@@ -451,6 +475,7 @@ async def step_compute_raw_legs(ctx: PipelineContext, manifest: RunManifest) -> 
             "leg_raw": leg_raw,
             "narrative_events": narrative_events,
             "revenue_growth_yoy": fundamental_inputs.revenue_growth_yoy,
+            "cohort": sec.cohort,
         }
 
     active_ids = {
@@ -461,12 +486,18 @@ async def step_compute_raw_legs(ctx: PipelineContext, manifest: RunManifest) -> 
     cohort_scopes = build_cohort_scopes(
         ctx.universe, active_ids, ctx.config["cohorts"]
     )
+
+    def _tier_subset(source: dict[str, object], ids: tuple[str, ...]) -> dict:
+        return {i: source[i] for i in ids if i in source and i in active_ids}
+
     for sec in ctx.universe.securities:
         state = per_security_state[sec.id]
+        scope = cohort_scopes[sec.cohort]
+
+        # Narrative premium's growth percentile, standardised within the scope.
         own_growth = state["revenue_growth_yoy"]
         growth_percentile = None
         if own_growth is not None and not state["is_stale"]:
-            scope = cohort_scopes[sec.cohort]
             population = [
                 per_security_state[member_id]["revenue_growth_yoy"]
                 for member_id in scope.member_ids
@@ -477,24 +508,51 @@ async def step_compute_raw_legs(ctx: PipelineContext, manifest: RunManifest) -> 
             state["narrative_events"], growth_percentile
         )
 
-    # valuation_brake's own raw value needs a cross-section (arc42 §5.5 leg 6: each of
-    # EV/Sales, EV/EBITDA, FCF yield is z-scored *within cohort*, sign-inverted, then
-    # averaged). Cohort assignment does not happen until step 11 (ASSIGN_COHORTS), so
-    # this inner cross-section pragmatically uses the full universe here; the *outer*
-    # composite z-score applied to the resulting raw value in step 12 (NORMALISE) is
-    # the one that actually uses the assigned cohort/parent/universe fallback scope.
-    for sec_id, state in per_security_state.items():
-        own_metrics = valuation_metrics_by_security[sec_id]
-        state["leg_raw"][LegName.VALUATION_BRAKE] = valuation_brake(own_metrics, valuation_metrics_by_security, sec_id)
+        # Fundamental health: each sub-metric is standardised within the security's
+        # own cohort scope (blended with parent/universe by the scope's shrinkage
+        # lambdas) before the equal-weight combination, so a growth rate and an OLS
+        # margin slope carry the same influence regardless of their raw units.
+        health = fundamental_health(
+            fundamental_inputs_by_security[sec.id],
+            cohort_inputs=_tier_subset(fundamental_inputs_by_security, scope.cohort_member_ids),
+            parent_inputs=_tier_subset(fundamental_inputs_by_security, scope.parent_member_ids),
+            universe_inputs=_tier_subset(fundamental_inputs_by_security, scope.universe_member_ids),
+            lambda_cohort=scope.lambda_cohort,
+            lambda_parent=scope.lambda_parent,
+        )
+        state["leg_raw"][LegName.FUNDAMENTAL_HEALTH] = health.value
+        state["fundamental_health_detail"] = health
+
+        # Valuation brake's inner cross-section must be *comparable peers*, i.e. the
+        # security's assigned cohort scope blended with the wider tiers — not the
+        # whole investable universe, against which an EV/Sales multiple is not a
+        # valuation signal. The outer composite z-score in step 12 (NORMALISE) then
+        # applies the same scope to the resulting raw value.
+        state["leg_raw"][LegName.VALUATION_BRAKE] = valuation_brake(
+            valuation_metrics_by_security[sec.id],
+            _tier_subset(valuation_metrics_by_security, scope.cohort_member_ids),
+            sec.id,
+            parent_metrics=_tier_subset(valuation_metrics_by_security, scope.parent_member_ids),
+            universe_metrics=_tier_subset(valuation_metrics_by_security, scope.universe_member_ids),
+            lambda_cohort=scope.lambda_cohort,
+            lambda_parent=scope.lambda_parent,
+        )
 
     scoring_inputs: list[SecurityScoringInput] = [
         SecurityScoringInput(
-            security_id=sid, filer_profile=state["filer_profile"], is_stale=state["is_stale"], leg_raw=state["leg_raw"]
+            security_id=sid,
+            filer_profile=state["filer_profile"],
+            is_stale=state["is_stale"],
+            leg_raw=state["leg_raw"],
+            not_applicable_legs=(
+                frozenset({LegName.VALUATION_BRAKE}) if sid in fx_unavailable_ids else frozenset()
+            ),
         )
         for sid, state in per_security_state.items()
     ]
 
     ctx.__dict__["_scoring_inputs"] = scoring_inputs
+    ctx.__dict__["_fx_unavailable_securities"] = fx_unavailable_ids
     complete_step(manifest, "COMPUTE_RAW_LEGS", detail=f"securities={len(scoring_inputs)}")
 
 
@@ -584,7 +642,9 @@ async def step_write_snapshot(ctx: PipelineContext, manifest: RunManifest) -> No
     config_version_id = ctx.__dict__.get("_config_version_id", "unversioned")
 
     prior_composites_7d: dict[str, Decimal] = {}
-    target_date = ctx.as_of_date - timedelta(days=7)
+    # Direction compares against one trading week (5 sessions) back rather than 7
+    # calendar days, which lands on a non-session whenever a holiday intervenes.
+    target_date = await _prior_session_date(ctx, DIRECTION_LOOKBACK_SESSIONS, fallback_days=7)
     if hasattr(ctx.repos.score_repo, "for_dates"):
         prior_rows = await ctx.repos.score_repo.for_dates({target_date})
     else:
@@ -610,6 +670,7 @@ async def step_write_snapshot(ctx: PipelineContext, manifest: RunManifest) -> No
                     contribution=str(leg_res.contribution) if leg_res.contribution is not None else None,
                     computable=leg_res.computable,
                     evidence_ids=[],
+                    reason_not_computable=leg_res.reason_not_computable,
                 )
 
         composite_dec = res.composite_result.composite if res.composite_result else None
@@ -665,6 +726,41 @@ async def _latest_fx_rate(ctx: PipelineContext) -> Decimal:
     return Decimal("1")
 
 
+async def _session_calendar(ctx: PipelineContext) -> tuple[date, ...]:
+    """Trading sessions on or before ``as_of``, derived from observed price bars.
+
+    A price bar exists only for a day the market actually traded, so the union of
+    ``PriceBar.session_date`` across the universe *is* the trading calendar for
+    the dates we hold data for. Cached on the context because several steps need
+    it and the underlying read is cross-partition.
+
+    Returns an empty tuple when no bars are available; callers must then fall
+    back to calendar-day arithmetic rather than silently comparing nothing.
+    """
+
+    cached = ctx.__dict__.get("_session_calendar")
+    if cached is not None:
+        return cached
+    try:
+        bars = await fetch_all(ctx.repos.price_sink)
+    except Exception:  # pragma: no cover - a missing sink must not break scoring
+        bars = []
+    calendar = normalise_calendar(bar.session_date for bar in bars if bar.session_date <= ctx.as_of_date)
+    ctx.__dict__["_session_calendar"] = calendar
+    return calendar
+
+
+async def _prior_session_date(ctx: PipelineContext, sessions_back: int, *, fallback_days: int) -> date:
+    """``sessions_back`` trading sessions before ``as_of``, or a calendar-day fallback."""
+
+    calendar = await _session_calendar(ctx)
+    if calendar:
+        resolved = nth_prior_session(calendar, ctx.as_of_date, sessions_back)
+        if resolved is not None:
+            return resolved
+    return ctx.as_of_date - timedelta(days=fallback_days)
+
+
 async def _latest_prices_usd(ctx: PipelineContext) -> dict[str, Decimal]:
     """Latest close price per ``security_id``."""
 
@@ -679,13 +775,13 @@ async def _latest_prices_usd(ctx: PipelineContext) -> dict[str, Decimal]:
         )
         result = {
             bar.security_id: Decimal(bar.close_adjusted)
-            for bar in rows
+            for bar in exclude_quarantined(rows)
         }
         ctx.__dict__["_latest_prices_usd"] = result
         return result
 
     prices: dict[str, tuple] = {}
-    for bar in await fetch_all(ctx.repos.price_sink):
+    for bar in exclude_quarantined(await fetch_all(ctx.repos.price_sink)):
         existing = prices.get(bar.security_id)
         if existing is None or bar.session_date > existing[0]:
             prices[bar.security_id] = (bar.session_date, Decimal(bar.close_adjusted))
@@ -766,9 +862,32 @@ def _suggested_trade_quantity(
 def _consecutive_weakening_sessions(
     current_direction: Direction,
     prior_snapshots: list[ScoreSnapshot],
+    calendar: tuple[date, ...] = (),
+    as_of_date: date | None = None,
 ) -> int:
+    """Length of the *contiguous* run of weakening sessions ending today.
+
+    "Consecutive" has to mean consecutive. Walking an arbitrary list of prior
+    snapshots and breaking only on a non-weakening direction happily welded
+    together snapshots from January and March into a single long streak, which
+    then tripped the sell gate on a security that had not weakened in months.
+    With a session calendar we verify each step back really is the adjacent
+    trading session and treat a gap as the end of the streak.
+    """
+
     if current_direction != Direction.WEAKENING:
         return 0
+    if calendar and as_of_date is not None:
+        directions_by_date = {
+            snapshot.as_of_date: snapshot.direction
+            for snapshot in sorted(prior_snapshots, key=lambda item: item.as_of_date)
+        }
+        return contiguous_weakening_streak(
+            current_direction,
+            directions_by_date,
+            calendar,
+            as_of_date,
+        )
     streak = 1
     for snapshot in sorted(prior_snapshots, key=lambda item: item.as_of_date, reverse=True):
         if snapshot.direction != Direction.WEAKENING:
@@ -862,10 +981,22 @@ async def step_run_policy(ctx: PipelineContext, manifest: RunManifest) -> None:
         14,
         thresholds.sell_min_consecutive_weakening_sessions * 4,
     )
-    weakening_dates = {
-        ctx.as_of_date - timedelta(days=offset)
-        for offset in range(1, weakening_lookback_days + 1)
-    }
+    session_calendar = await _session_calendar(ctx)
+    if session_calendar:
+        # Read back the required number of *sessions*; a fixed calendar-day
+        # window silently truncates the streak whenever holidays intervene.
+        weakening_dates = set(
+            prior_sessions(
+                session_calendar,
+                ctx.as_of_date,
+                max(weakening_lookback_days, thresholds.sell_min_consecutive_weakening_sessions + 1),
+            )
+        )
+    else:
+        weakening_dates = {
+            ctx.as_of_date - timedelta(days=offset)
+            for offset in range(1, weakening_lookback_days + 1)
+        }
     if hasattr(ctx.repos.score_repo, "for_dates"):
         prior_score_rows = await ctx.repos.score_repo.for_dates(weakening_dates)
     else:
@@ -934,6 +1065,8 @@ async def step_run_policy(ctx: PipelineContext, manifest: RunManifest) -> None:
             consecutive_weakening_sessions=_consecutive_weakening_sessions(
                 current_direction,
                 prior_scores_by_security.get(sec.id, []),
+                session_calendar,
+                ctx.as_of_date,
             ),
             current_weight_pct=current_weight_pct,
             target_weight_pct=target_pct,

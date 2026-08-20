@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 
 from auspex.models.enums import Form4TransactionCode
 from auspex.scoring.legs import (
+    FUNDAMENTAL_HEALTH_REASON_NO_CROSS_SECTION,
+    FUNDAMENTAL_HEALTH_REASON_TOO_FEW,
     AttentionEvent,
     FundamentalHealthInputs,
     InsiderTxnEvent,
@@ -170,6 +173,43 @@ class TestSmartMoney:
 
 
 class TestFundamentalHealth:
+    """Sub-metrics are standardised inside the cohort before being combined.
+
+    The previous implementation averaged the raw numbers directly. Those numbers
+    are not commensurable: ``net_cash_ratio`` swings across whole units while
+    ``gross_margin_trend_slope`` lives near 0.02, so the average was dominated by
+    whichever sub-metric happened to have the widest natural units. Standardising
+    each sub-metric against the same cohort first makes the equal weighting real.
+    """
+
+    @staticmethod
+    def _cohort(**overrides: dict[str, Decimal | None]) -> dict[str, FundamentalHealthInputs]:
+        base = {
+            "peer1": FundamentalHealthInputs(
+                revenue_growth_yoy=Decimal("0.10"),
+                gross_margin_trend_slope=Decimal("0.00"),
+                fcf_margin=Decimal("0.05"),
+                net_cash_ratio=Decimal("0.00"),
+                roic=Decimal("0.08"),
+            ),
+            "peer2": FundamentalHealthInputs(
+                revenue_growth_yoy=Decimal("0.20"),
+                gross_margin_trend_slope=Decimal("0.01"),
+                fcf_margin=Decimal("0.08"),
+                net_cash_ratio=Decimal("0.10"),
+                roic=Decimal("0.12"),
+            ),
+            "peer3": FundamentalHealthInputs(
+                revenue_growth_yoy=Decimal("0.05"),
+                gross_margin_trend_slope=Decimal("-0.01"),
+                fcf_margin=Decimal("0.02"),
+                net_cash_ratio=Decimal("-0.05"),
+                roic=Decimal("0.04"),
+            ),
+        }
+        base.update(overrides)  # type: ignore[arg-type]
+        return base  # type: ignore[return-value]
+
     def test_none_with_insufficient_submetrics(self):
         inputs = FundamentalHealthInputs(
             revenue_growth_yoy=Decimal("0.1"),
@@ -178,9 +218,11 @@ class TestFundamentalHealth:
             net_cash_ratio=None,
             roic=None,
         )
-        assert fundamental_health(inputs) is None
+        result = fundamental_health(inputs, cohort_inputs={**self._cohort(), "self": inputs})
+        assert result.value is None
+        assert result.reason_not_computable == FUNDAMENTAL_HEALTH_REASON_TOO_FEW
 
-    def test_averages_available_submetrics(self):
+    def test_combines_standardised_submetrics(self):
         inputs = FundamentalHealthInputs(
             revenue_growth_yoy=Decimal("0.30"),
             gross_margin_trend_slope=Decimal("0.02"),
@@ -188,9 +230,82 @@ class TestFundamentalHealth:
             net_cash_ratio=Decimal("0.20"),
             roic=Decimal("0.18"),
         )
-        result = fundamental_health(inputs)
-        expected = (Decimal("0.30") + Decimal("0.02") + Decimal("0.10") + Decimal("0.20") + Decimal("0.18")) / 5
-        assert result == expected
+        result = fundamental_health(inputs, cohort_inputs={**self._cohort(), "self": inputs})
+        assert result.value is not None
+        assert result.available_sub_metrics == 5
+        assert result.sub_metric_coverage == Decimal(1)
+        # Best-in-cohort on every sub-metric, so every standardised score is positive.
+        assert all(z > 0 for z in result.sub_metric_z.values())
+        assert result.value > 0
+
+    def test_result_is_invariant_to_submetric_units(self):
+        """Rescaling one sub-metric's units across the whole cohort changes nothing.
+
+        This is the regression that motivated the change: multiplying
+        ``net_cash_ratio`` by 100 for every member is a pure change of units and
+        must not move anyone's health score. Under raw averaging it moved every
+        score dramatically.
+        """
+
+        inputs = FundamentalHealthInputs(
+            revenue_growth_yoy=Decimal("0.30"),
+            gross_margin_trend_slope=Decimal("0.02"),
+            fcf_margin=Decimal("0.10"),
+            net_cash_ratio=Decimal("0.20"),
+            roic=Decimal("0.18"),
+        )
+        cohort = {**self._cohort(), "self": inputs}
+
+        def rescale(item: FundamentalHealthInputs) -> FundamentalHealthInputs:
+            return replace(
+                item,
+                net_cash_ratio=None if item.net_cash_ratio is None else item.net_cash_ratio * 100,
+            )
+
+        rescaled_cohort = {key: rescale(value) for key, value in cohort.items()}
+
+        before = fundamental_health(inputs, cohort_inputs=cohort)
+        after = fundamental_health(rescale(inputs), cohort_inputs=rescaled_cohort)
+
+        assert before.value is not None
+        assert after.value == before.value
+
+    def test_missing_submetric_contributes_neutrally(self):
+        full = FundamentalHealthInputs(
+            revenue_growth_yoy=Decimal("0.30"),
+            gross_margin_trend_slope=Decimal("0.02"),
+            fcf_margin=Decimal("0.10"),
+            net_cash_ratio=Decimal("0.20"),
+            roic=Decimal("0.18"),
+        )
+        partial = replace(full, roic=None)
+        cohort = {**self._cohort(), "self": full}
+
+        full_result = fundamental_health(full, cohort_inputs=cohort)
+        partial_result = fundamental_health(partial, cohort_inputs={**cohort, "self": partial})
+
+        assert full_result.value is not None and partial_result.value is not None
+        assert partial_result.available_sub_metrics == 4
+        assert partial_result.sub_metric_coverage == Decimal(4) / Decimal(5)
+        # The trace still names the sub-metric so the omission is explainable.
+        assert partial_result.sub_metric_z["roic"] is None
+        # Neutral, not renormalised: the score moves toward zero rather than
+        # inflating the remaining sub-metrics.
+        assert abs(partial_result.value) < abs(full_result.value)
+
+    def test_no_cross_section_is_reported_explicitly(self):
+        inputs = FundamentalHealthInputs(
+            revenue_growth_yoy=Decimal("0.30"),
+            gross_margin_trend_slope=Decimal("0.02"),
+            fcf_margin=Decimal("0.10"),
+            net_cash_ratio=Decimal("0.20"),
+            roic=Decimal("0.18"),
+        )
+        # Every peer identical -> zero dispersion on every sub-metric.
+        flat = {f"peer{i}": inputs for i in range(4)}
+        result = fundamental_health(inputs, cohort_inputs=flat)
+        assert result.value is None
+        assert result.reason_not_computable == FUNDAMENTAL_HEALTH_REASON_NO_CROSS_SECTION
 
     def test_revenue_growth_yoy(self):
         assert revenue_growth_yoy(Decimal(120), Decimal(100)) == Decimal("0.2")

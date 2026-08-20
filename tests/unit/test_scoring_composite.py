@@ -5,7 +5,14 @@ from __future__ import annotations
 from decimal import Decimal
 
 from auspex.models.enums import Direction, FilerProfile, LegName
-from auspex.scoring.composite import classify_direction, compute_percentile, compute_security_composite
+from auspex.scoring.composite import (
+    REASON_DEGENERATE_CROSS_SECTION,
+    REASON_NOT_APPLICABLE,
+    REASON_RAW_MISSING,
+    classify_direction,
+    compute_percentile,
+    compute_security_composite,
+)
 from auspex.scoring.coverage import applicable_legs, coverage, is_stale
 
 
@@ -30,7 +37,18 @@ class TestComputeSecurityComposite:
         assert not result.legs[LegName.THESIS_LINKAGE].computable
         assert result.composite is None  # no computable legs at all
 
-    def test_composite_renormalises_over_available_weights(self):
+    def test_composite_uses_neutral_zero_for_missing_leg(self):
+        """A missing leg contributes neutral z=0; it does not reweight the rest.
+
+        Renormalising over the available weights silently promoted whichever
+        legs happened to be present. A security missing its smart-money leg had
+        its thesis leg quietly doubled in importance, so an incomplete security
+        could out-score a fully-covered one on the strength of a single good
+        number. The applicable-weight denominator now stays fixed and the
+        missing leg simply contributes nothing — coverage, reported separately,
+        is what tells the reader the picture is incomplete.
+        """
+
         weights = {LegName.THESIS_LINKAGE: Decimal("0.5"), LegName.SMART_MONEY: Decimal("0.5")}
         leg_raw = {LegName.THESIS_LINKAGE: Decimal("0.8"), LegName.SMART_MONEY: None}
         cohort_raw = {
@@ -38,8 +56,74 @@ class TestComputeSecurityComposite:
             LegName.SMART_MONEY: {"a": None, "b": Decimal("0.0"), "c": None},
         }
         result = compute_security_composite(leg_raw, cohort_raw, weights, "a")
-        assert result.weight_sum == Decimal("0.5")
+
+        # The denominator is every *applicable* leg, not just the computable ones.
+        assert result.weight_sum == Decimal("1.0")
+        assert result.computable_weight == Decimal("0.5")
         assert result.composite is not None
+
+        missing = result.legs[LegName.SMART_MONEY]
+        assert not missing.computable
+        assert missing.applicable
+        assert missing.contribution == Decimal(0)
+        assert missing.z is None
+        assert missing.reason_not_computable == REASON_RAW_MISSING
+
+    def test_missing_leg_pulls_the_composite_toward_neutral(self):
+        weights = {LegName.THESIS_LINKAGE: Decimal("0.5"), LegName.SMART_MONEY: Decimal("0.5")}
+        cohort_raw = {
+            LegName.THESIS_LINKAGE: {"a": Decimal("0.8"), "b": Decimal("0.4"), "c": Decimal("0.2")},
+            LegName.SMART_MONEY: {"a": Decimal("0.02"), "b": Decimal("0.0"), "c": Decimal("-0.01")},
+        }
+        both = compute_security_composite(
+            {LegName.THESIS_LINKAGE: Decimal("0.8"), LegName.SMART_MONEY: Decimal("0.02")},
+            cohort_raw,
+            weights,
+            "a",
+        )
+        one = compute_security_composite(
+            {LegName.THESIS_LINKAGE: Decimal("0.8"), LegName.SMART_MONEY: None},
+            cohort_raw,
+            weights,
+            "a",
+        )
+        assert both.composite is not None and one.composite is not None
+        # Both legs were positive for "a"; dropping one must not leave the score
+        # unchanged (renormalisation) — it must move toward zero.
+        assert abs(one.composite) < abs(both.composite)
+
+    def test_structurally_excluded_leg_leaves_the_denominator(self):
+        """A leg that does not apply is not a gap — it is simply absent."""
+
+        weights = {LegName.THESIS_LINKAGE: Decimal("0.5"), LegName.VALUATION_BRAKE: Decimal("0.5")}
+        leg_raw = {LegName.THESIS_LINKAGE: Decimal("0.8"), LegName.VALUATION_BRAKE: None}
+        cohort_raw = {
+            LegName.THESIS_LINKAGE: {"a": Decimal("0.8"), "b": Decimal("0.4"), "c": Decimal("0.2")},
+            LegName.VALUATION_BRAKE: {"a": None, "b": Decimal("0.1"), "c": Decimal("0.3")},
+        }
+        result = compute_security_composite(
+            leg_raw,
+            cohort_raw,
+            weights,
+            "a",
+            not_applicable_legs=frozenset({LegName.VALUATION_BRAKE}),
+        )
+        excluded = result.legs[LegName.VALUATION_BRAKE]
+        assert not excluded.applicable
+        assert excluded.weight == Decimal(0)
+        assert excluded.contribution is None
+        assert excluded.reason_not_computable == REASON_NOT_APPLICABLE
+        assert result.weight_sum == Decimal("0.5")
+
+    def test_degenerate_cross_section_is_reported_distinctly(self):
+        weights = {LegName.THESIS_LINKAGE: Decimal("1.0")}
+        leg_raw = {LegName.THESIS_LINKAGE: Decimal("0.5")}
+        cohort_raw = {LegName.THESIS_LINKAGE: {"a": Decimal("0.5"), "b": Decimal("0.5")}}
+        result = compute_security_composite(leg_raw, cohort_raw, weights, "a")
+        leg = result.legs[LegName.THESIS_LINKAGE]
+        assert not leg.computable
+        assert leg.raw == Decimal("0.5")
+        assert leg.reason_not_computable == REASON_DEGENERATE_CROSS_SECTION
 
     def test_winsorisation_caps_extreme_z(self):
         weights = {LegName.THESIS_LINKAGE: Decimal("1.0")}
@@ -79,7 +163,13 @@ class TestPercentile:
 
     def test_percentile_computed_within_population(self):
         composites = {"a": Decimal(10), "b": Decimal(5), "c": Decimal(1)}
-        assert compute_percentile("a", composites) == 100
+        # Midpoint convention: (2 + 0.5) / 3 = 83%, not a flat 100.
+        assert compute_percentile("a", composites) == 83
+
+    def test_best_of_a_small_population_is_not_reported_as_top_of_market(self):
+        composites = {"a": Decimal(10), "b": Decimal(5), "c": Decimal(1)}
+        assert compute_percentile("a", composites) < 100
+        assert compute_percentile("c", composites) > 0
 
 
 class TestCoverage:

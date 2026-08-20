@@ -162,7 +162,7 @@ def _fundamentals(
         if current_price is not None and shares is not None
         else None
     )
-    valuation = build_valuation_metrics(market_cap, rows, config, as_of)
+    valuation = build_valuation_metrics(market_cap, rows, config, as_of).metrics
     eps_aliases = set(config["concepts"]["diluted_eps"])
     annual_eps = sorted(
         (

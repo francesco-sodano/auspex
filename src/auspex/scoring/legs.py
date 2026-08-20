@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from auspex.models.enums import Form4TransactionCode
-from auspex.scoring.normalize import clip, exponential_decay, mean_std, zscore
+from auspex.scoring.normalize import blended_zscore, clip, exponential_decay
 
 # ---------------------------------------------------------------------------
 # 1. Thesis linkage
@@ -145,6 +145,15 @@ def smart_money(events: list[InsiderTxnEvent], market_cap_usd: Decimal | None) -
 # ---------------------------------------------------------------------------
 
 
+SUB_METRIC_NAMES: tuple[str, ...] = (
+    "revenue_growth_yoy",
+    "gross_margin_trend_slope",
+    "fcf_margin",
+    "net_cash_ratio",
+    "roic",
+)
+
+
 @dataclass(frozen=True)
 class FundamentalHealthInputs:
     revenue_growth_yoy: Decimal | None
@@ -153,27 +162,126 @@ class FundamentalHealthInputs:
     net_cash_ratio: Decimal | None
     roic: Decimal | None
 
+    def as_map(self) -> dict[str, Decimal | None]:
+        return {name: getattr(self, name) for name in SUB_METRIC_NAMES}
+
     def sub_metrics(self) -> list[Decimal]:
-        return [
-            v
-            for v in (
-                self.revenue_growth_yoy,
-                self.gross_margin_trend_slope,
-                self.fcf_margin,
-                self.net_cash_ratio,
-                self.roic,
-            )
-            if v is not None
-        ]
+        return [v for v in self.as_map().values() if v is not None]
 
 
-def fundamental_health(inputs: FundamentalHealthInputs, min_submetrics: int = 3) -> Decimal | None:
-    """Equal-weight average of available sub-metrics; non-computable below ``min_submetrics``."""
+@dataclass(frozen=True)
+class FundamentalHealthResult:
+    """Standardised fundamental-health leg plus its own availability trace."""
 
-    values = inputs.sub_metrics()
-    if len(values) < min_submetrics:
-        return None
-    return sum(values, Decimal(0)) / Decimal(len(values))
+    value: Decimal | None
+    sub_metric_z: dict[str, Decimal | None]
+    available_sub_metrics: int
+    sub_metric_coverage: Decimal
+    reason_not_computable: str | None = None
+
+
+FUNDAMENTAL_HEALTH_REASON_TOO_FEW = "too_few_sub_metrics"
+FUNDAMENTAL_HEALTH_REASON_NO_CROSS_SECTION = "no_standardisable_sub_metric"
+
+
+def fundamental_health(
+    inputs: FundamentalHealthInputs,
+    *,
+    cohort_inputs: dict[str, FundamentalHealthInputs],
+    parent_inputs: dict[str, FundamentalHealthInputs] | None = None,
+    universe_inputs: dict[str, FundamentalHealthInputs] | None = None,
+    lambda_cohort: Decimal = Decimal(1),
+    lambda_parent: Decimal = Decimal(1),
+    min_submetrics: int = 3,
+) -> FundamentalHealthResult:
+    """Equal-weight combination of *standardised* sub-metrics (arc42 §5.5).
+
+    Each sub-metric is z-scored against the same sub-metric across the
+    security's cohort scope (blended with the parent and universe tiers by the
+    scope's shrinkage lambdas) *before* combination. Averaging raw units — a
+    growth rate, an OLS margin slope, a cash ratio and a return on capital —
+    would let whichever series happens to have the widest natural dispersion
+    dominate the leg; standardising first makes the equal weights real.
+
+    Deterministic missing behaviour:
+
+    * a sub-metric that is absent, or whose cross-section is degenerate,
+      contributes a neutral ``z = 0`` and is excluded from
+      ``available_sub_metrics``;
+    * below ``min_submetrics`` genuinely standardisable sub-metrics the whole
+      leg is non-computable (``value is None``) — never 0;
+    * ``sub_metric_coverage`` reports availability separately so the caller can
+      keep coverage and confidence distinct from the score itself.
+    """
+
+    cohort_map = dict(cohort_inputs)
+    parent_map = dict(parent_inputs or {})
+    universe_map = dict(universe_inputs or {})
+    own = inputs.as_map()
+
+    sub_metric_z: dict[str, Decimal | None] = {}
+    total = Decimal(0)
+    available = 0
+
+    for name in SUB_METRIC_NAMES:
+        value = own[name]
+        if value is None:
+            sub_metric_z[name] = None
+            continue
+        z = blended_zscore(
+            value,
+            cohort_values=[
+                peer_value
+                for peer in cohort_map.values()
+                if (peer_value := getattr(peer, name)) is not None
+            ],
+            parent_values=[
+                peer_value
+                for peer in parent_map.values()
+                if (peer_value := getattr(peer, name)) is not None
+            ],
+            universe_values=[
+                peer_value
+                for peer in universe_map.values()
+                if (peer_value := getattr(peer, name)) is not None
+            ],
+            lambda_cohort=lambda_cohort,
+            lambda_parent=lambda_parent,
+        )
+        sub_metric_z[name] = z
+        if z is None:
+            continue
+        total += z
+        available += 1
+
+    sub_metric_coverage = Decimal(available) / Decimal(len(SUB_METRIC_NAMES))
+
+    if available == 0:
+        return FundamentalHealthResult(
+            value=None,
+            sub_metric_z=sub_metric_z,
+            available_sub_metrics=0,
+            sub_metric_coverage=sub_metric_coverage,
+            reason_not_computable=FUNDAMENTAL_HEALTH_REASON_NO_CROSS_SECTION,
+        )
+    if available < min_submetrics:
+        return FundamentalHealthResult(
+            value=None,
+            sub_metric_z=sub_metric_z,
+            available_sub_metrics=available,
+            sub_metric_coverage=sub_metric_coverage,
+            reason_not_computable=FUNDAMENTAL_HEALTH_REASON_TOO_FEW,
+        )
+
+    # Equal weight over *all* sub-metrics: an unavailable one contributes a
+    # neutral standardised 0 rather than being renormalised away, so a security
+    # cannot raise its own leg by having fewer, better-looking sub-metrics.
+    return FundamentalHealthResult(
+        value=total / Decimal(len(SUB_METRIC_NAMES)),
+        sub_metric_z=sub_metric_z,
+        available_sub_metrics=available,
+        sub_metric_coverage=sub_metric_coverage,
+    )
 
 
 def gross_margin_trend_slope(margins: list[Decimal]) -> Decimal | None:
@@ -241,27 +349,53 @@ def valuation_brake(
     security_metrics: ValuationMetrics,
     cohort_metrics: dict[str, ValuationMetrics],
     security_id: str,
+    *,
+    parent_metrics: dict[str, ValuationMetrics] | None = None,
+    universe_metrics: dict[str, ValuationMetrics] | None = None,
+    lambda_cohort: Decimal = Decimal(1),
+    lambda_parent: Decimal = Decimal(1),
 ) -> Decimal | None:
     """Cross-sectional z-score each metric within cohort and orient cheap high.
+
+    ``cohort_metrics`` must be the security's *comparable peer scope* — the
+    cohort it was assigned, blended with its parent and the universe by the
+    scope's shrinkage lambdas. Ranking an EV/Sales multiple against the whole
+    investable universe rather than against comparable peers is not a valuation
+    signal, so the caller is responsible for passing peer scopes here.
+
+    Every value entering these cross-sections must already be expressed in one
+    common currency; the caller performs any conversion with point-in-time
+    authoritative FX and omits the security entirely when no such rate exists
+    (see :mod:`auspex.pipeline.feature_builder`).
 
     A metric that is negative or undefined for a given security is dropped
     from that security's composite rather than imputed (arc42 §5.5 leg 6).
     """
 
+    del security_id  # cross-sections are supplied pre-scoped by the caller
     metric_names = ("ev_sales", "ev_ebitda", "fcf_yield")
     oriented_zs: list[Decimal] = []
     for name in metric_names:
         own_value = getattr(security_metrics, name)
         if own_value is None or own_value <= 0:
             continue
-        cross_section = [v for sid, m in cohort_metrics.items() if (v := getattr(m, name)) is not None and v > 0]
-        if len(cross_section) < 2:
-            continue
-        mean, std = mean_std(cross_section)
-        z = zscore(own_value, mean, std)
+        z = blended_zscore(
+            own_value,
+            cohort_values=_positive_metric_values(cohort_metrics, name),
+            parent_values=_positive_metric_values(parent_metrics, name),
+            universe_values=_positive_metric_values(universe_metrics, name),
+            lambda_cohort=lambda_cohort,
+            lambda_parent=lambda_parent,
+        )
         if z is None:
             continue
         oriented_zs.append(z if name == "fcf_yield" else -z)
     if not oriented_zs:
         return None
     return sum(oriented_zs, Decimal(0)) / Decimal(len(oriented_zs))
+
+
+def _positive_metric_values(metrics: dict[str, ValuationMetrics] | None, name: str) -> list[Decimal]:
+    if not metrics:
+        return []
+    return [v for m in metrics.values() if (v := getattr(m, name)) is not None and v > 0]

@@ -23,6 +23,11 @@ class SecurityScoringInput:
     filer_profile: FilerProfile
     is_stale: bool
     leg_raw: dict[LegName, Decimal | None]
+    #: Legs that cannot exist for this security at all (as opposed to merely
+    #: being unevidenced today) — e.g. the valuation brake when no point-in-time
+    #: authoritative FX rate exists for a non-USD reporter. These leave both the
+    #: composite denominator and the coverage denominator.
+    not_applicable_legs: frozenset[LegName] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -74,13 +79,27 @@ def build_cohort_scopes(
     return scopes
 
 
+def _raw_by_leg_for_members(
+    members: list[str],
+    by_id: dict[str, SecurityScoringInput],
+    legs: list[LegName],
+) -> dict[LegName, dict[str, Decimal | None]]:
+    return {leg: {m: by_id[m].leg_raw.get(leg) for m in members if m in by_id} for leg in legs}
+
+
 def score_universe(
     inputs: list[SecurityScoringInput],
     weights_by_profile: dict[FilerProfile, dict[LegName, Decimal]],
     cohort_scope_by_security: dict[str, CohortScope],
     winsor_sigma: Decimal = Decimal("2.5"),
 ) -> dict[str, SecurityScoreResult]:
-    """Score every non-stale security in ``inputs`` cross-sectionally within its scope."""
+    """Score every non-stale security in ``inputs`` cross-sectionally within its scope.
+
+    Cross-sections are built for all three tiers (own cohort, parent, universe)
+    and blended by the scope's shrinkage lambdas, so a cohort gaining or losing
+    a member shifts scores continuously rather than snapping to a different
+    scope's statistics.
+    """
 
     by_id = {i.security_id: i for i in inputs}
     results: dict[str, SecurityScoreResult] = {}
@@ -88,14 +107,17 @@ def score_universe(
     active = [i for i in inputs if not i.is_stale]
     active_ids = {i.security_id for i in active}
 
-    # Build cohort_raw_by_leg per scope: leg -> {security_id: raw} restricted to
-    # the members sharing that exact scope (same cohort or same fallback scope).
+    # Scope-label members preserve the historical "same reported scope" grouping,
+    # used for the percentile population and as the cohort tier fallback.
     scope_members: dict[str, list[str]] = {}
-    for sid in active_ids:
+    for sid in sorted(active_ids):
         scope = cohort_scope_by_security.get(sid)
         if scope is None:
             continue
         scope_members.setdefault(scope.scope, []).append(sid)
+
+    def _active(ids: tuple[str, ...] | list[str]) -> list[str]:
+        return [i for i in ids if i in active_ids and i in by_id]
 
     for sec_input in inputs:
         if sec_input.is_stale:
@@ -112,21 +134,27 @@ def score_universe(
         scope = cohort_scope_by_security.get(sec_input.security_id)
         members = scope_members.get(scope.scope, []) if scope else [sec_input.security_id]
         weights = weights_by_profile[sec_input.filer_profile]
+        legs = list(weights)
 
-        cohort_raw_by_leg: dict[LegName, dict[str, Decimal | None]] = {}
-        for leg in weights:
-            cohort_raw_by_leg[leg] = {m: by_id[m].leg_raw.get(leg) for m in members if m in by_id}
+        cohort_members = _active(scope.cohort_member_ids) if scope and scope.cohort_member_ids else members
+        parent_members = _active(scope.parent_member_ids) if scope else []
+        universe_members = _active(scope.universe_member_ids) if scope else []
 
         composite_result = compute_security_composite(
             leg_raw_by_leg=sec_input.leg_raw,
-            cohort_raw_by_leg=cohort_raw_by_leg,
+            cohort_raw_by_leg=_raw_by_leg_for_members(cohort_members, by_id, legs),
             weights=weights,
             security_id=sec_input.security_id,
             winsor_sigma=winsor_sigma,
+            not_applicable_legs=sec_input.not_applicable_legs,
+            parent_raw_by_leg=_raw_by_leg_for_members(parent_members, by_id, legs),
+            universe_raw_by_leg=_raw_by_leg_for_members(universe_members, by_id, legs),
+            lambda_cohort=scope.lambda_cohort if scope else Decimal(1),
+            lambda_parent=scope.lambda_parent if scope else Decimal(1),
         )
 
         computable_legs = {leg for leg, r in composite_result.legs.items() if r.computable}
-        cov = coverage(computable_legs, sec_input.filer_profile)
+        cov = coverage(computable_legs, sec_input.filer_profile, sec_input.not_applicable_legs)
 
         results[sec_input.security_id] = SecurityScoreResult(
             security_id=sec_input.security_id,
@@ -136,6 +164,32 @@ def score_universe(
             coverage=cov,
             percentile=None,  # filled in below once all composites are known
         )
+
+    # second pass: percentile rank within each scope's composite population
+    composites_by_scope: dict[str, dict[str, Decimal | None]] = {}
+    for sid, res in results.items():
+        if res.excluded_stale or res.cohort_scope is None:
+            continue
+        composites_by_scope.setdefault(res.cohort_scope.scope, {})[sid] = (
+            res.composite_result.composite if res.composite_result else None
+        )
+
+    final: dict[str, SecurityScoreResult] = {}
+    for sid, res in results.items():
+        if res.excluded_stale or res.cohort_scope is None:
+            final[sid] = res
+            continue
+        population = composites_by_scope[res.cohort_scope.scope]
+        percentile = compute_percentile(sid, population)
+        final[sid] = SecurityScoreResult(
+            security_id=res.security_id,
+            excluded_stale=res.excluded_stale,
+            cohort_scope=res.cohort_scope,
+            composite_result=res.composite_result,
+            coverage=res.coverage,
+            percentile=percentile,
+        )
+    return final
 
     # second pass: percentile rank within each scope's composite population
     composites_by_scope: dict[str, dict[str, Decimal | None]] = {}

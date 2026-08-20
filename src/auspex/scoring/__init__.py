@@ -23,6 +23,7 @@ from auspex.scoring.engine import (
 from auspex.scoring.legs import (
     AttentionEvent,
     FundamentalHealthInputs,
+    FundamentalHealthResult,
     InsiderTxnEvent,
     NarrativeClaimEvent,
     ThemeClaimEvent,
@@ -43,12 +44,24 @@ from auspex.scoring.legs import (
 from auspex.scoring.normalize import (
     CohortScope,
     assign_cohort_scope,
+    blended_percentile_rank,
+    blended_zscore,
     clip,
     exponential_decay,
     mean_std,
     percentile_rank,
+    percentile_rank_fraction,
+    shrinkage_lambda,
+    shrinkage_tier_weights,
     winsorise,
     zscore,
+)
+from auspex.scoring.sessions import (
+    contiguous_weakening_streak,
+    latest_session_on_or_before,
+    normalise_calendar,
+    nth_prior_session,
+    prior_sessions,
 )
 
 __all__ = [
@@ -67,6 +80,7 @@ __all__ = [
     "score_universe",
     "AttentionEvent",
     "FundamentalHealthInputs",
+    "FundamentalHealthResult",
     "InsiderTxnEvent",
     "NarrativeClaimEvent",
     "ThemeClaimEvent",
@@ -85,10 +99,20 @@ __all__ = [
     "valuation_brake",
     "CohortScope",
     "assign_cohort_scope",
+    "blended_percentile_rank",
+    "blended_zscore",
     "clip",
     "exponential_decay",
     "mean_std",
     "percentile_rank",
+    "percentile_rank_fraction",
+    "shrinkage_lambda",
+    "shrinkage_tier_weights",
     "winsorise",
     "zscore",
+    "contiguous_weakening_streak",
+    "latest_session_on_or_before",
+    "normalise_calendar",
+    "nth_prior_session",
+    "prior_sessions",
 ]

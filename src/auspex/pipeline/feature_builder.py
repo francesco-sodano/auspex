@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from typing import Protocol
 
 from auspex.models.document import Document
 from auspex.models.enums import DocumentType
@@ -101,31 +102,53 @@ def build_attention_events(
     as_of_date: date,
     trailing_days: int = 60,
 ) -> list[AttentionEvent]:
+    """Exactly one attention event per source document.
+
+    Attention measures how much *disclosure* a security produced. A single
+    filing that happens to yield three Channel A extractions is still one
+    disclosure event; emitting a document event and then an additional event per
+    extraction counted the same filing up to four times and let extraction
+    verbosity — an artefact of the extractor, not of issuer behaviour — inflate
+    the leg.
+
+    Extraction materiality therefore *enriches* the document's single event:
+    the event's weight is ``max(baseline, best extraction materiality)``. Taking
+    the maximum keeps the mapping monotone (more material findings can only
+    raise attention) and never lets an extraction demote a filing below its
+    structural baseline. A news item with no extraction has a baseline of 0 and
+    so still contributes nothing, preserving the existing "news counts only when
+    something was extracted from it" rule.
+    """
+
+    materiality_by_document: dict[str, Decimal] = {}
+    for ext in extractions:
+        if ext.document_id not in documents_by_id:
+            continue
+        materiality = weights.materiality_weight[ext.materiality.value]
+        current = materiality_by_document.get(ext.document_id)
+        if current is None or materiality > current:
+            materiality_by_document[ext.document_id] = materiality
+
     events: list[AttentionEvent] = []
-    for doc in documents_by_id.values():
-        if doc.document_type not in _FILING_DOCUMENT_TYPES:
+    for doc_id, doc in sorted(documents_by_id.items()):
+        is_filing = doc.document_type in _FILING_DOCUMENT_TYPES
+        extraction_materiality = materiality_by_document.get(doc_id)
+        if not is_filing and extraction_materiality is None:
             continue
         age = _age_days(doc.knowledge_date, as_of_date)
         if age < 0 or age > trailing_days:
             continue
+        baseline = Decimal(1) if is_filing else Decimal(0)
+        weight = baseline if extraction_materiality is None else max(baseline, extraction_materiality)
+        if weight <= 0:
+            continue
         events.append(
             AttentionEvent(
-                materiality_weight=Decimal(1),
+                materiality_weight=weight,
                 document_authority=weights.authority_for(doc),
                 days_ago=age,
             )
         )
-
-    for ext in extractions:
-        doc = documents_by_id.get(ext.document_id)
-        if doc is None:
-            continue
-        age = _age_days(doc.knowledge_date, as_of_date)
-        if age < 0 or age > trailing_days:
-            continue
-        authority = weights.authority_for(doc)
-        materiality = weights.materiality_weight[ext.materiality.value]
-        events.append(AttentionEvent(materiality_weight=materiality, document_authority=authority, days_ago=age))
     return events
 
 
@@ -172,15 +195,15 @@ def build_insider_events(documents: list[Document], as_of_date: date, trailing_d
     return events
 
 
-def _latest_facts(
+def _latest_facts_with_end(
     snapshots: list[FundamentalSnapshot],
     concept_aliases: list[str],
     as_of_date: date,
     n: int = 1,
     *,
     unit: str | None = None,
-) -> list[Decimal]:
-    """Most recent ``n`` distinct-period values for the first matching alias, filed <= as_of_date."""
+) -> list[tuple[date, Decimal]]:
+    """As :func:`_latest_facts` but keeps each value's period end for FX lookup."""
 
     candidates = []
     for snap in snapshots:
@@ -199,8 +222,21 @@ def _latest_facts(
     by_end: dict = {}
     for end, value in candidates:
         by_end[end] = value
-    ordered = [by_end[k] for k in sorted(by_end)]
+    ordered = [(k, by_end[k]) for k in sorted(by_end)]
     return ordered[-n:] if n else ordered
+
+
+def _latest_facts(
+    snapshots: list[FundamentalSnapshot],
+    concept_aliases: list[str],
+    as_of_date: date,
+    n: int = 1,
+    *,
+    unit: str | None = None,
+) -> list[Decimal]:
+    """Most recent ``n`` distinct-period values for the first matching alias, filed <= as_of_date."""
+
+    return [value for _end, value in _latest_facts_with_end(snapshots, concept_aliases, as_of_date, n, unit=unit)]
 
 
 def _reporting_currency(
@@ -344,58 +380,137 @@ def build_fundamental_health_inputs(
     )
 
 
+class FxConverter(Protocol):
+    """Point-in-time authoritative FX, supplied by the pipeline layer.
+
+    ``rate_to_usd`` must return the rate that was authoritative *on
+    ``on_date``* — the period end of the fact being converted — or ``None`` if
+    no such rate is available. Returning ``None`` is a first-class answer:
+    scoring must never approximate a rate, carry one backwards from today, or
+    assume parity.
+    """
+
+    def rate_to_usd(self, currency: str, on_date: date) -> Decimal | None: ...
+
+
+VALUATION_REASON_NO_MARKET_CAP = "market_cap_unavailable"
+VALUATION_REASON_FX_UNAVAILABLE = "fx_rate_unavailable"
+
+
+@dataclass(frozen=True)
+class ValuationBuildResult:
+    """Valuation metrics plus why they may be absent.
+
+    ``fx_unavailable`` distinguishes "this security's valuation could not be
+    computed because nobody can put it on a comparable footing" from "this
+    security has no valuation data". The former is a *structural* exclusion:
+    the caller drops the valuation leg from the applicable set entirely so a
+    non-USD reporter is not silently marked down on coverage for a leg that
+    could not exist for it.
+    """
+
+    metrics: ValuationMetrics
+    reporting_currency: str | None
+    fx_unavailable: bool = False
+    reason: str | None = None
+
+
+_EMPTY_VALUATION_METRICS = ValuationMetrics(ev_sales=None, ev_ebitda=None, fcf_yield=None)
+
+
 def build_valuation_metrics(
     market_cap: Decimal | None,
     snapshots: list[FundamentalSnapshot],
     xbrl_concepts: dict,
     as_of_date: date,
-) -> ValuationMetrics:
-    if market_cap is None:
-        return ValuationMetrics(ev_sales=None, ev_ebitda=None, fcf_yield=None)
+    *,
+    fx_converter: FxConverter | None = None,
+) -> ValuationBuildResult:
+    """Build EV/Sales, EV/EBITDA and FCF yield in USD.
+
+    ``market_cap`` is already USD (prices are collected in USD). Fundamentals
+    are reported in the issuer's own currency, so for a non-USD reporter every
+    fundamental must be converted at the rate authoritative on that fact's own
+    period end before it can be divided into a USD market cap.
+
+    When no ``fx_converter`` is supplied, or it cannot provide a rate for any
+    required period, the result is an explicit ``fx_unavailable`` — never a
+    silent all-``None`` that reads downstream as "this issuer has poor data".
+    """
 
     concepts = xbrl_concepts["concepts"]
-    if _reporting_currency(snapshots, concepts["revenues"], as_of_date) != "USD":
-        return ValuationMetrics(ev_sales=None, ev_ebitda=None, fcf_yield=None)
-    revenues = _latest_facts(snapshots, concepts["revenues"], as_of_date, n=1, unit="USD")
-    cash = _latest_facts(
-        snapshots,
-        concepts["cash_and_equivalents"],
-        as_of_date,
-        n=1,
-        unit="USD",
-    )
-    debt = _latest_facts(snapshots, concepts["total_debt"], as_of_date, n=1, unit="USD")
-    op_income = _latest_facts(
-        snapshots,
-        concepts["ebitda_operating_income"],
-        as_of_date,
-        n=1,
-        unit="USD",
-    )
-    da = _latest_facts(
-        snapshots,
-        concepts["depreciation_amortization"],
-        as_of_date,
-        n=1,
-        unit="USD",
-    )
-    cfo = _latest_facts(
-        snapshots,
-        concepts["net_cash_from_operations"],
-        as_of_date,
-        n=1,
-        unit="USD",
-    )
-    capex = _latest_facts(snapshots, concepts["capex"], as_of_date, n=1, unit="USD")
+    currency = _reporting_currency(snapshots, concepts["revenues"], as_of_date)
 
-    cash_v = cash[-1] if cash else Decimal(0)
-    debt_v = debt[-1] if debt else Decimal(0)
+    if market_cap is None:
+        return ValuationBuildResult(
+            metrics=_EMPTY_VALUATION_METRICS,
+            reporting_currency=currency,
+            reason=VALUATION_REASON_NO_MARKET_CAP,
+        )
+
+    unit = currency if currency else "USD"
+    needs_fx = unit != "USD"
+    if needs_fx and fx_converter is None:
+        return ValuationBuildResult(
+            metrics=_EMPTY_VALUATION_METRICS,
+            reporting_currency=currency,
+            fx_unavailable=True,
+            reason=VALUATION_REASON_FX_UNAVAILABLE,
+        )
+
+    def _latest(concept_key: str) -> tuple[date, Decimal] | None:
+        facts = _latest_facts_with_end(snapshots, concepts[concept_key], as_of_date, n=1, unit=unit)
+        return facts[-1] if facts else None
+
+    raw = {
+        key: _latest(key)
+        for key in (
+            "revenues",
+            "cash_and_equivalents",
+            "total_debt",
+            "ebitda_operating_income",
+            "depreciation_amortization",
+            "net_cash_from_operations",
+            "capex",
+        )
+    }
+
+    converted: dict[str, Decimal | None] = {}
+    for key, fact in raw.items():
+        if fact is None:
+            converted[key] = None
+            continue
+        end, value = fact
+        if not needs_fx:
+            converted[key] = value
+            continue
+        rate = fx_converter.rate_to_usd(unit, end) if fx_converter else None
+        if rate is None or rate <= 0:
+            return ValuationBuildResult(
+                metrics=_EMPTY_VALUATION_METRICS,
+                reporting_currency=currency,
+                fx_unavailable=True,
+                reason=VALUATION_REASON_FX_UNAVAILABLE,
+            )
+        converted[key] = value * rate
+
+    cash_v = converted["cash_and_equivalents"] or Decimal(0)
+    debt_v = converted["total_debt"] or Decimal(0)
     ev = market_cap + debt_v - cash_v
 
-    ev_sales = (ev / revenues[-1]) if revenues and revenues[-1] != 0 else None
-    ebitda = (op_income[-1] + (da[-1] if da else Decimal(0))) if op_income else None
-    ev_ebitda = (ev / ebitda) if ebitda and ebitda != 0 else None
-    fcf = (cfo[-1] - capex[-1]) if cfo and capex else None
+    revenue = converted["revenues"]
+    op_income = converted["ebitda_operating_income"]
+    da = converted["depreciation_amortization"] or Decimal(0)
+    cfo = converted["net_cash_from_operations"]
+    capex = converted["capex"]
+
+    ev_sales = (ev / revenue) if revenue else None
+    ebitda = (op_income + da) if op_income is not None else None
+    ev_ebitda = (ev / ebitda) if ebitda else None
+    fcf = (cfo - capex) if cfo is not None and capex is not None else None
     fcf_yield = (fcf / market_cap) if fcf is not None and market_cap != 0 else None
 
-    return ValuationMetrics(ev_sales=ev_sales, ev_ebitda=ev_ebitda, fcf_yield=fcf_yield)
+    return ValuationBuildResult(
+        metrics=ValuationMetrics(ev_sales=ev_sales, ev_ebitda=ev_ebitda, fcf_yield=fcf_yield),
+        reporting_currency=currency,
+    )

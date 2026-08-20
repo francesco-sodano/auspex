@@ -29,14 +29,40 @@ MIN_COVERAGE_FOR_BUY = Decimal("0.80")
 MAX_STALE_SESSIONS = 2
 
 
-def applicable_legs(filer_profile: FilerProfile) -> tuple[LegName, ...]:
-    return APPLICABLE_LEGS[filer_profile]
+def applicable_legs(
+    filer_profile: FilerProfile,
+    structural_exclusions: frozenset[LegName] | None = None,
+) -> tuple[LegName, ...]:
+    """Legs that *can* exist for this security.
+
+    ``structural_exclusions`` removes legs that are impossible for this
+    particular security rather than merely unevidenced — today that is the
+    valuation brake when no point-in-time authoritative FX rate exists to put a
+    non-USD reporter's fundamentals on a comparable footing with its peers.
+    Excluding them keeps such an issuer from being silently marked down on
+    coverage for a leg nobody could have computed. FPI applicability
+    (no SMART_MONEY) is unchanged and still comes from ``APPLICABLE_LEGS``.
+    """
+
+    legs = APPLICABLE_LEGS[filer_profile]
+    if not structural_exclusions:
+        return legs
+    return tuple(leg for leg in legs if leg not in structural_exclusions)
 
 
-def coverage(computable_legs: set[LegName], filer_profile: FilerProfile) -> Decimal:
-    """computable_legs / applicable_legs (arc42 §5.5)."""
+def coverage(
+    computable_legs: set[LegName],
+    filer_profile: FilerProfile,
+    structural_exclusions: frozenset[LegName] | None = None,
+) -> Decimal:
+    """computable_legs / applicable_legs (arc42 §5.5).
 
-    applicable = applicable_legs(filer_profile)
+    Coverage stays an explicit signal, separate from the composite: the
+    composite substitutes a neutral ``z = 0`` for an unevidenced leg, and this
+    ratio is what records that the leg was in fact unevidenced.
+    """
+
+    applicable = applicable_legs(filer_profile, structural_exclusions)
     if not applicable:
         return Decimal(0)
     computable_count = sum(1 for leg in applicable if leg in computable_legs)
