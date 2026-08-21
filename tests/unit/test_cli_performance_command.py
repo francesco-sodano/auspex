@@ -94,7 +94,18 @@ class FakeBootstrapRunnerForPerformance:
         return self.metrics_to_return
 
 
-def patch_common(monkeypatch, *, runner_cls=FakeBootstrapRunnerForPerformance) -> None:
+def patch_common(
+    monkeypatch, *, runner_cls=FakeBootstrapRunnerForPerformance
+) -> list[str]:
+    closed_resources: list[str] = []
+
+    class FakeContext:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def aclose(self) -> None:
+            closed_resources.append(self.name)
+
     class FakePortfolioAdapter:
         def __init__(self, *_args, **_kwargs):
             pass
@@ -106,9 +117,18 @@ def patch_common(monkeypatch, *, runner_cls=FakeBootstrapRunnerForPerformance) -
             return "owner-sk"
 
     monkeypatch.setattr("auspex.config.load_universe", make_universe)
-    monkeypatch.setattr("auspex.persistence.cosmos_client.get_cosmos_context", lambda: object())
-    monkeypatch.setattr("auspex.persistence.cosmos_client.get_source_ledger_context", lambda: object())
-    monkeypatch.setattr("auspex.persistence.blob_client.get_blob_context", lambda: object())
+    monkeypatch.setattr(
+        "auspex.persistence.cosmos_client.get_cosmos_context",
+        lambda: FakeContext("cosmos"),
+    )
+    monkeypatch.setattr(
+        "auspex.persistence.cosmos_client.get_source_ledger_context",
+        lambda: FakeContext("source_ledger"),
+    )
+    monkeypatch.setattr(
+        "auspex.persistence.blob_client.get_blob_context",
+        lambda: FakeContext("blob"),
+    )
     monkeypatch.setattr("auspex.portfolio.adapter.PortfolioAdapter", FakePortfolioAdapter)
     monkeypatch.setattr("auspex.portfolio.mapping.load_portfolio_mapping", lambda: object())
     monkeypatch.setattr("auspex.cli.bootstrap.BootstrapRunner", runner_cls)
@@ -118,13 +138,14 @@ def patch_common(monkeypatch, *, runner_cls=FakeBootstrapRunnerForPerformance) -
 
     main_module = importlib.import_module("auspex.cli.main")
     monkeypatch.setattr(main_module, "_resolve_active_users", no_active_users)
+    return closed_resources
 
 
 class TestPerformanceCommandWiring:
     @pytest.mark.asyncio
     async def test_returns_zero_and_calls_compute_performance_metrics_with_no_explicit_dates(self, monkeypatch):
         FakeBootstrapRunnerForPerformance.last_instance = None
-        patch_common(monkeypatch)
+        closed_resources = patch_common(monkeypatch)
 
         as_of = date(2026, 8, 8)
         result = await _performance_command(as_of)
@@ -142,6 +163,11 @@ class TestPerformanceCommandWiring:
         assert runner.compute_performance_metrics_kwargs["ctx"].as_of_date == as_of
         assert runner.compute_performance_metrics_kwargs["attribution_user_id"] is None
         assert runner.compute_performance_metrics_kwargs["include_recommendation_metrics"] is False
+        assert set(closed_resources) == {
+            "cosmos",
+            "source_ledger",
+            "blob",
+        }
 
     @pytest.mark.asyncio
     async def test_returns_zero_when_no_metrics_computed_yet(self, monkeypatch):

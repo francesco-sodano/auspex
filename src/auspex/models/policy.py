@@ -41,6 +41,18 @@ class Recommendation(AuspexModel):
     current_weight_pct: str | None = None
     suggested_trade_chf: str | None = None
     suggested_quantity: str | None = None
+    allocation_mode: str = Field(
+        default="LEGACY_INDEPENDENT",
+        description="LEGACY_INDEPENDENT | JOINT_CASH | RISK_AWARE",
+    )
+    shadow_suggested_trade_chf: str | None = Field(
+        default=None,
+        description=(
+            "risk-aware challenger allocation; never presented as executable "
+            "until promotion gates pass"
+        ),
+    )
+    allocation_trace: list[GateResult] = Field(default_factory=list)
     gate_trace: list[GateResult] = Field(default_factory=list)
     cost_overlay: CostOutcomeOverlay | None = None
     config_version_id: str

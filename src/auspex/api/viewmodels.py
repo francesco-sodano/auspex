@@ -118,6 +118,8 @@ def build_recommendation_out(
         current_weight=recommendation.current_weight_pct,
         suggested_trade_chf=recommendation.suggested_trade_chf,
         suggested_quantity=recommendation.suggested_quantity,
+        allocation_mode=recommendation.allocation_mode,
+        allocation_trace=gate_trace_out(recommendation.allocation_trace),
         estimated_cost_chf=(recommendation.cost_overlay.estimated_cost_chf if recommendation.cost_overlay else None),
         auspex_score=score.percentile if score is not None else None,
         buy_ready=buy_ready,

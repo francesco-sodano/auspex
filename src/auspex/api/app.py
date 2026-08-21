@@ -49,7 +49,7 @@ from auspex.api.static import mount_spa
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Auspex API",
-        version="4.1.0",
+        version="4.2.0",
         description="Personal AI financial research assistant — backend API",
     )
 

@@ -52,6 +52,12 @@ class PriceProvider(Protocol):
 
 
 class FxProvider(Protocol):
+    async def get_daily_fx(
+        self,
+        pair: str,
+        since: date,
+    ) -> list[FxRateDTO]: ...
+
     async def get_usd_chf(self, since: date) -> list[FxRateDTO]: ...
 
 

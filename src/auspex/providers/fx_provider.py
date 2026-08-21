@@ -22,23 +22,40 @@ class ExchangeRateFxProvider:
             await self._client.aclose()
 
     async def get_usd_chf(self, since: date) -> list[FxRateDTO]:
+        return await self.get_daily_fx("USDCHF", since)
+
+    async def get_daily_fx(
+        self,
+        pair: str,
+        since: date,
+    ) -> list[FxRateDTO]:
+        normalized = pair.strip().upper()
+        if len(normalized) != 6 or not normalized.isalpha():
+            raise ValueError("FX pair must contain two three-letter currencies")
+        base, quote_currency = normalized[:3], normalized[3:]
         url = f"{self._base_url}/timeframe"
         params = {
             "access_key": self._api_key,
             "start_date": since.isoformat(),
             "end_date": date.today().isoformat(),
-            "source": "USD",
-            "currencies": "CHF",
+            "source": base,
+            "currencies": quote_currency,
         }
         response = await self._client.get(url, params=params)
         response.raise_for_status()
         payload = response.json()
         rates = payload.get("quotes", {})
         results: list[FxRateDTO] = []
-        for day_key, quote in rates.items():
+        for day_key, quote_values in rates.items():
             session_date = date.fromisoformat(day_key)
-            close_rate = to_decimal(quote["USDCHF"])
-            results.append(FxRateDTO(pair="USDCHF", session_date=session_date, close_rate=close_rate))
+            close_rate = to_decimal(quote_values[normalized])
+            results.append(
+                FxRateDTO(
+                    pair=normalized,
+                    session_date=session_date,
+                    close_rate=close_rate,
+                )
+            )
         return sorted(results, key=lambda r: r.session_date)
 
 

@@ -3,7 +3,7 @@
 # `config_version_id` is derived from a hash of this file plus policy.yaml at load time
 # (auspex.config.loader.build_config_version) and is written onto every scores row so
 # historical scores remain reproducible even if weights change later (arc42 5.11).
-schema_version: "4.0"
+schema_version: "5.0"
 config_type: weights
 
 domestic:
@@ -54,3 +54,9 @@ materiality_weight:
 roic_tax_rate: "0.21"
 
 winsorize_sigma: "2.5"
+
+# Daily pairs retained for point-in-time conversion of reported fundamentals.
+# Pair direction is explicit: EURUSD means USD per EUR; USDCHF means CHF per USD.
+valuation_fx_pairs:
+  - USDCHF
+  - EURUSD

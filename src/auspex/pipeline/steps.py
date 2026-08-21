@@ -10,6 +10,7 @@ coverage, they do not abort the run.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta
 from decimal import ROUND_FLOOR, Decimal
@@ -117,7 +118,15 @@ async def step_collect_fx(ctx: PipelineContext, manifest: RunManifest) -> None:
         skip_step(manifest, "COLLECT_FX", detail="no FX provider configured")
         return
     collector = FxCollector(ctx.providers.fx_provider, ctx.repos.fx_sink, ctx.repos.watermarks)
-    result = await collector.collect(ctx.as_of_date - timedelta(days=7))
+    result = await collector.collect(
+        ctx.as_of_date - timedelta(days=7),
+        pairs=tuple(
+            ctx.config["weights"].get(
+                "valuation_fx_pairs",
+                ["USDCHF"],
+            )
+        ),
+    )
     complete_step(manifest, "COLLECT_FX", detail=f"written={result.items_written}", degraded=result.degraded)
 
 
@@ -393,6 +402,13 @@ async def step_compute_raw_legs(ctx: PipelineContext, manifest: RunManifest) -> 
     weights_cfg = WeightsConfig.from_yaml(ctx.config["weights"])
     xbrl_concepts = ctx.config["xbrl_concepts"]
     fx_converter = ctx.__dict__.get("_fx_converter")
+    if fx_converter is None:
+        from auspex.currency.table import PointInTimeFxTable
+
+        fx_converter = PointInTimeFxTable(
+            await fetch_all(ctx.repos.fx_sink)
+        )
+        ctx.__dict__["_fx_converter"] = fx_converter
 
     documents_by_security: dict[str, list] = {}
     documents = ctx.__dict__.get("_preloaded_documents")
@@ -719,7 +735,11 @@ async def step_write_snapshot(ctx: PipelineContext, manifest: RunManifest) -> No
 
 
 async def _latest_fx_rate(ctx: PipelineContext) -> Decimal:
-    rates = await fetch_all(ctx.repos.fx_sink)
+    rates = [
+        rate
+        for rate in await fetch_all(ctx.repos.fx_sink)
+        if rate.pair == "USDCHF" and rate.session_date <= ctx.as_of_date
+    ]
     if rates:
         latest = max(rates, key=lambda r: r.session_date)
         return Decimal(latest.close_rate)
@@ -729,10 +749,9 @@ async def _latest_fx_rate(ctx: PipelineContext) -> Decimal:
 async def _session_calendar(ctx: PipelineContext) -> tuple[date, ...]:
     """Trading sessions on or before ``as_of``, derived from observed price bars.
 
-    A price bar exists only for a day the market actually traded, so the union of
-    ``PriceBar.session_date`` across the universe *is* the trading calendar for
-    the dates we hold data for. Cached on the context because several steps need
-    it and the underlying read is cross-partition.
+    A liquid universe member's price bars define the trading sessions. Production
+    performs one partition-local bounded query rather than scanning every price
+    partition merely to discover calendar dates.
 
     Returns an empty tuple when no bars are available; callers must then fall
     back to calendar-day arithmetic rather than silently comparing nothing.
@@ -741,9 +760,31 @@ async def _session_calendar(ctx: PipelineContext) -> tuple[date, ...]:
     cached = ctx.__dict__.get("_session_calendar")
     if cached is not None:
         return cached
+    history_as_of = getattr(ctx.repos.price_sink, "history_as_of", None)
     try:
-        bars = await fetch_all(ctx.repos.price_sink)
-    except Exception:  # pragma: no cover - a missing sink must not break scoring
+        if history_as_of is not None and ctx.universe.securities:
+            histories = await asyncio.gather(
+                *(
+                    history_as_of(
+                        security.id,
+                        ctx.as_of_date,
+                        130,
+                    )
+                    for security in ctx.universe.securities[:3]
+                )
+            )
+            bars = [
+                bar
+                for history in histories
+                for bar in history
+            ]
+        else:
+            bars = await fetch_all(ctx.repos.price_sink)
+    except Exception:  # noqa: BLE001 - calendar loss must degrade, not abort
+        logger.warning(
+            "trading-session calendar unavailable; using calendar-day fallback",
+            exc_info=True,
+        )
         bars = []
     calendar = normalise_calendar(bar.session_date for bar in bars if bar.session_date <= ctx.as_of_date)
     ctx.__dict__["_session_calendar"] = calendar
@@ -1012,6 +1053,7 @@ async def step_run_policy(ctx: PipelineContext, manifest: RunManifest) -> None:
     actions: list[Action] = []
     eligible_but_no_cash_count = 0
     recommendations = []
+    recommendation_context: dict[str, dict] = {}
     suppressed_count = 0
     dispositions = await _active_dispositions(ctx)
     evaluated_at = utc_now()
@@ -1033,7 +1075,14 @@ async def step_run_policy(ctx: PipelineContext, manifest: RunManifest) -> None:
         )
 
         gap_chf = max((target_pct - current_weight_pct) / 100 * total_portfolio_value_chf, Decimal(0))
-        trade_notional_chf = min(gap_chf, cash_chf)
+        individually_available_cash_chf = max(
+            cash_chf - thresholds.buy_min_cash_after_trade_chf,
+            Decimal(0),
+        )
+        trade_notional_chf = min(
+            gap_chf,
+            individually_available_cash_chf,
+        )
         resulting_weight_pct = current_weight_pct + (
             trade_notional_chf / total_portfolio_value_chf * 100 if total_portfolio_value_chf > 0 else Decimal(0)
         )
@@ -1079,7 +1128,6 @@ async def step_run_policy(ctx: PipelineContext, manifest: RunManifest) -> None:
         from auspex.policy.engine import evaluate_action
 
         action, trace = evaluate_action(gate_ctx, thresholds)
-        actions.append(action)
         suggested_trade_chf = Decimal(0)
         if action in (Action.BUY, Action.ADD):
             suggested_trade_chf = trade_notional_chf
@@ -1164,37 +1212,229 @@ async def step_run_policy(ctx: PipelineContext, manifest: RunManifest) -> None:
             cost_overlay=cost_overlay,
             config_version_id=ctx.__dict__.get("_config_version_id", "unversioned"),
         )
-        rec.decision_signature = compute_decision_signature(
-            action=action,
-            security_id=sec.id,
-            suggested_quantity=suggested_quantity,
-            suggested_trade_chf=suggested_trade_chf,
-            target_weight_pct=target_pct,
-            gate_trace=trace,
+        recommendations.append(rec)
+        recommendation_context[sec.id] = {
+            "security": sec,
+            "result": res,
+            "gate_context": gate_ctx,
+            "position": position,
+            "latest_price_usd": latest_price_usd,
+            "preliminary_action": action,
+            "estimated_cost_chf": action_cost_chf,
+        }
+
+    from auspex.models.user_settings import InvestmentHorizon, InvestmentObjective
+    from auspex.policy.allocation import (
+        AllocationCandidate,
+        AllocationConstraints,
+        allocate_candidates,
+        allocation_gate_trace,
+        preference_constraints,
+    )
+
+    market_risk_estimates = ctx.__dict__.get("_market_risk_estimates", {})
+    correlation_group_by_security = ctx.__dict__.get(
+        "_correlation_groups",
+        {},
+    )
+    cohort_by_ticker = {
+        security.ticker: security.cohort
+        for security in ctx.universe.securities
+    }
+    security_by_ticker = {
+        security.ticker: security.id
+        for security in ctx.universe.securities
+    }
+    current_cohort_weights_pct: dict[str, Decimal] = {}
+    current_correlated_group_weights_pct: dict[str, Decimal] = {}
+    for portfolio_position in projection.positions:
+        if portfolio_position.weight is None:
+            continue
+        weight_pct = portfolio_position.weight * Decimal(100)
+        cohort = cohort_by_ticker.get(portfolio_position.ticker)
+        if cohort is not None:
+            current_cohort_weights_pct[cohort] = (
+                current_cohort_weights_pct.get(cohort, Decimal(0))
+                + weight_pct
+            )
+        security_id = security_by_ticker.get(portfolio_position.ticker)
+        correlation_group = (
+            correlation_group_by_security.get(security_id)
+            if security_id is not None
+            else None
+        )
+        if correlation_group is not None:
+            current_correlated_group_weights_pct[correlation_group] = (
+                current_correlated_group_weights_pct.get(
+                    correlation_group,
+                    Decimal(0),
+                )
+                + weight_pct
+            )
+
+    def candidates(*, risk_aware: bool) -> list[AllocationCandidate]:
+        rows = []
+        for recommendation in recommendations:
+            metadata = recommendation_context[recommendation.security_id]
+            risk = market_risk_estimates.get(recommendation.security_id)
+            rows.append(
+                AllocationCandidate(
+                    security_id=recommendation.security_id,
+                    ticker=metadata["security"].ticker,
+                    cohort=metadata["security"].cohort,
+                    correlation_group=correlation_group_by_security.get(
+                        recommendation.security_id
+                    ),
+                    action=recommendation.action,
+                    percentile=metadata["result"].percentile or 0,
+                    direction=metadata["gate_context"].direction,
+                    requested_trade_chf=Decimal(
+                        recommendation.suggested_trade_chf or "0"
+                    ),
+                    current_weight_pct=Decimal(
+                        recommendation.current_weight_pct or "0"
+                    ),
+                    estimated_cost_chf=metadata["estimated_cost_chf"],
+                    volatility_60d=(
+                        risk.volatility_60d
+                        if risk_aware and risk is not None
+                        else None
+                    ),
+                    average_daily_value_chf=(
+                        risk.average_daily_value_chf
+                        if risk_aware and risk is not None
+                        else None
+                    ),
+                )
+            )
+        return rows
+
+    shared_cash_constraints = AllocationConstraints(
+        cash_chf=cash_chf,
+        cash_reserve_chf=thresholds.buy_min_cash_after_trade_chf,
+        total_value_chf=total_portfolio_value_chf,
+        max_position_pct=Decimal("100"),
+        max_cohort_pct=Decimal("100"),
+        max_correlated_group_pct=Decimal("100"),
+        max_buy_turnover_pct=Decimal("100"),
+        max_daily_volume_participation=Decimal("1"),
+        min_trade_chf=thresholds.buy_min_trade_chf,
+        # The promoted v4.2 allocator fixes joint cash feasibility only. Full
+        # liquidity/volatility/correlation limits remain in the risk-aware
+        # shadow arm below until the registered promotion gate passes.
+    )
+    production_allocations = allocate_candidates(
+        candidates(risk_aware=False),
+        shared_cash_constraints,
+    )
+    settings_horizon = (
+        user_settings.investment_horizon
+        if user_settings is not None
+        else InvestmentHorizon.OVER_SEVEN_YEARS
+    )
+    settings_objective = (
+        user_settings.investment_objective
+        if user_settings is not None
+        else InvestmentObjective.CAPITAL_GROWTH
+    )
+    allocation_config = ctx.config["policy"].get("allocation", {})
+    shadow_constraints = preference_constraints(
+        horizon=settings_horizon,
+        objective=settings_objective,
+        policy_max_position_pct=thresholds.target_weight_max_pct,
+        cash_chf=cash_chf,
+        cash_reserve_chf=thresholds.buy_min_cash_after_trade_chf,
+        total_value_chf=total_portfolio_value_chf,
+        min_trade_chf=thresholds.buy_min_trade_chf,
+        current_cohort_weights_pct=current_cohort_weights_pct,
+        current_correlated_group_weights_pct=(
+            current_correlated_group_weights_pct
+        ),
+        max_daily_volume_participation=Decimal(
+            str(
+                allocation_config.get(
+                    "max_daily_volume_participation",
+                    "0.01",
+                )
+            )
+        ),
+        allocation_config=allocation_config,
+    )
+    shadow_allocations = allocate_candidates(
+        candidates(risk_aware=True),
+        shadow_constraints,
+    )
+
+    for recommendation in recommendations:
+        metadata = recommendation_context[recommendation.security_id]
+        decision = production_allocations[recommendation.security_id]
+        shadow = shadow_allocations[recommendation.security_id]
+        recommendation.allocation_mode = "JOINT_CASH"
+        recommendation.shadow_suggested_trade_chf = str(
+            shadow.allocated_trade_chf
+        )
+        recommendation.allocation_trace = allocation_gate_trace(decision)
+        recommendation.gate_trace.extend(recommendation.allocation_trace)
+        preliminary_action = metadata["preliminary_action"]
+        if preliminary_action in {Action.BUY, Action.ADD}:
+            if decision.allocated_trade_chf <= 0:
+                recommendation.action = Action.HOLD_NO_ACTION
+                recommendation.suggested_trade_chf = "0"
+                recommendation.suggested_quantity = None
+                eligible_but_no_cash_count += 1
+            else:
+                quantity = _suggested_trade_quantity(
+                    preliminary_action,
+                    decision.allocated_trade_chf,
+                    metadata["latest_price_usd"],
+                    fx_rate,
+                    (
+                        metadata["position"].quantity
+                        if metadata["position"] is not None
+                        else None
+                    ),
+                )
+                if quantity is None:
+                    recommendation.action = Action.HOLD_NO_ACTION
+                    recommendation.suggested_trade_chf = "0"
+                    recommendation.suggested_quantity = None
+                    eligible_but_no_cash_count += 1
+                else:
+                    recommendation.suggested_quantity = str(quantity)
+                    recommendation.suggested_trade_chf = str(
+                        quantity
+                        * metadata["latest_price_usd"]
+                        * fx_rate
+                    )
+
+        recommendation.decision_signature = compute_decision_signature(
+            action=recommendation.action,
+            security_id=recommendation.security_id,
+            suggested_quantity=recommendation.suggested_quantity,
+            suggested_trade_chf=recommendation.suggested_trade_chf,
+            target_weight_pct=recommendation.target_weight_pct,
+            gate_trace=recommendation.gate_trace,
             evidence=evidence_fingerprint(
-                percentile=res.percentile,
-                cohort_confidence=gate_ctx.cohort_confidence,
-                direction=current_direction,
-                coverage=res.coverage,
+                percentile=metadata["result"].percentile,
+                cohort_confidence=metadata["gate_context"].cohort_confidence,
+                direction=metadata["gate_context"].direction,
+                coverage=metadata["result"].coverage,
             ),
         )
-        # A REJECTED or unexpired DEFERRED disposition on this exact decision
-        # means the user has already answered this question. The row is still
-        # written (the run stays auditable and the suppression explainable),
-        # but the API withholds it until the signature materially changes.
-        disposition = dispositions.get(sec.id)
+        disposition = dispositions.get(recommendation.security_id)
         if disposition is not None and disposition.suppresses(
-            rec.decision_signature, now=evaluated_at
+            recommendation.decision_signature,
+            now=evaluated_at,
         ):
-            rec.suppressed = True
-            rec.disposition = disposition.disposition
-            rec.suppression_reason = (
+            recommendation.suppressed = True
+            recommendation.disposition = disposition.disposition
+            recommendation.suppression_reason = (
                 f"{disposition.disposition.value} on an identical decision signature"
             )
             suppressed_count += 1
-        recommendations.append(rec)
+        actions.append(recommendation.action)
         if ctx.repos.recommendation_repo is not None:
-            await ctx.repos.recommendation_repo.upsert(rec)
+            await ctx.repos.recommendation_repo.upsert(recommendation)
 
     ctx.__dict__["_actions"] = actions
     ctx.__dict__["_eligible_but_no_cash_count"] = eligible_but_no_cash_count

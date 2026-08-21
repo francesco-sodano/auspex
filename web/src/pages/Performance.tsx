@@ -9,6 +9,10 @@ const correlationTone = (value: string | null) => {
   return { opacity: Math.max(.16, Math.min(1, parsed)) }
 }
 const coefficient = (value: string | null | undefined) => value === null || value === undefined ? '—' : formatNumber(value, 3)
+const confidence = (low: string | null | undefined, high: string | null | undefined) =>
+  low === null || low === undefined || high === null || high === undefined
+    ? 'Not yet available'
+    : `${coefficient(low)} to ${coefficient(high)}`
 
 export function Performance() {
   const api = useApi()
@@ -48,9 +52,32 @@ export function Performance() {
           <h2>Composite information coefficient</h2>
           <p>Cross-sectional Spearman correlation with forward USD returns.</p>
           <div className="ic-grid">
-            {(['21', '63', '126'] as const).map((horizon) => <div className="ic-cell" key={horizon}><strong>{coefficient(report.composite_ic[horizon])}</strong><small>{horizon} sessions</small></div>)}
+            {(['21', '63', '126'] as const).map((horizon) => {
+              const diagnostic = report.diagnostics?.[horizon]
+              return <div className="ic-cell" key={horizon}>
+                <strong>{coefficient(report.composite_ic[horizon])}</strong>
+                <small>{horizon} sessions</small>
+                {diagnostic && <small title={diagnostic.confidence_method ?? undefined}>
+                  {diagnostic.confidence_level ? `${(Number(diagnostic.confidence_level) * 100).toFixed(0)}%` : 'Confidence'} interval {confidence(diagnostic.confidence_low, diagnostic.confidence_high)}
+                  {' · '}effective n {coefficient(diagnostic.effective_sample_size)}
+                </small>}
+              </div>
+            })}
           </div>
         </section>
+        {mode === 'technical' && <section className="chart-panel">
+          <h2>Robust outcome diagnostics</h2>
+          <p>Spread and uncertainty are shown separately from the headline score so a noisy backtest cannot look precise.</p>
+          {(['21', '63', '126'] as const).map((horizon) => {
+            const diagnostic = report.diagnostics?.[horizon]
+            return <div className="performance-value-row" key={horizon}>
+              <span>{horizon} sessions</span>
+              <strong>{diagnostic
+                ? `${percentage(diagnostic.cost_adjusted_spread)} net · ICIR ${coefficient(diagnostic.icir)} · effective n ${coefficient(diagnostic.effective_sample_size)}`
+                : '—'}</strong>
+            </div>
+          })}
+        </section>}
         <section className="chart-panel">
           <h2>Per-leg IC</h2>
           <p>Contribution is earned, not assumed.</p>

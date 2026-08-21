@@ -36,6 +36,7 @@ from auspex.cli.bootstrap import (
     _AsOfPriceSink,
     _forward_return_usd,
     _ReplayScoreRepository,
+    _trailing_return_usd,
     extraction_backfill_start,
     raw_backfill_start,
 )
@@ -200,6 +201,27 @@ class TestForwardReturnUsd:
         }
         result = _forward_return_usd(bars, "sec-nvda", date(2026, 1, 1), horizon_days=2)
         assert result == pytest.approx(Decimal("0.1"))  # (110 - 100) / 100
+
+
+class TestTrailingReturnUsd:
+    def test_uses_only_bars_on_or_before_as_of(self):
+        bars = {
+            "sec-nvda": [
+                make_bar("sec-nvda", date(2026, 1, 1), "100"),
+                make_bar("sec-nvda", date(2026, 1, 2), "105"),
+                make_bar("sec-nvda", date(2026, 1, 3), "110"),
+                make_bar("sec-nvda", date(2026, 1, 4), "999"),
+            ]
+        }
+
+        result = _trailing_return_usd(
+            bars,
+            "sec-nvda",
+            date(2026, 1, 3),
+            2,
+        )
+
+        assert result == Decimal("0.1")
 
 
 class TestAsOfPriceSink:

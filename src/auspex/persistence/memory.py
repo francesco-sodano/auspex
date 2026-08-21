@@ -12,7 +12,9 @@ from typing import Generic, TypeVar
 
 from pydantic import BaseModel
 
+from auspex.marketdata.quarantine import exclude_quarantined
 from auspex.models.document import Document
+from auspex.models.market_integrity import MarketDataRepairManifest
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -68,14 +70,62 @@ class InMemoryDocumentSink:
 
 
 class InMemoryPriceSink:
+    """Quarantine-aware price sink.
+
+    ``all()`` mirrors :class:`auspex.persistence.repositories.CosmosPriceSink`
+    and hides quarantined bars from scoring/performance; ``raw_all()`` is the
+    unfiltered view the integrity pass needs.
+    """
+
     def __init__(self) -> None:
         self._bars: dict[str, object] = {}
 
     async def upsert_price_bar(self, bar) -> None:  # noqa: ANN001
         self._bars[bar.id] = bar
 
-    def all(self) -> list:
+    def raw_all(self) -> list:
         return list(self._bars.values())
+
+    def all(self) -> list:
+        return exclude_quarantined(self._bars.values())
+
+
+class InMemoryPriceIntegrityStore:
+    """Unfiltered, partition-style view over an :class:`InMemoryPriceSink`.
+
+    Satisfies :class:`auspex.marketdata.service.PriceIntegrityStore`.
+    """
+
+    def __init__(self, sink: InMemoryPriceSink) -> None:
+        self._sink = sink
+
+    async def security_ids(self) -> list[str]:
+        return sorted({str(bar.security_id) for bar in self._sink.raw_all()})
+
+    async def bars_for_security(self, security_id: str) -> list:
+        rows = [bar for bar in self._sink.raw_all() if bar.security_id == security_id]
+        return sorted(rows, key=lambda bar: (bar.session_date, bar.id))
+
+    async def upsert_bar(self, bar) -> None:  # noqa: ANN001
+        await self._sink.upsert_price_bar(bar)
+
+
+class InMemoryRepairManifestStore:
+    """Append-only manifest store standing in for ``config_versions``."""
+
+    def __init__(self) -> None:
+        self._items: dict[str, MarketDataRepairManifest] = {}
+
+    async def latest(self) -> MarketDataRepairManifest | None:
+        rows = await self.history(limit=1)
+        return rows[0] if rows else None
+
+    async def history(self, limit: int = 20) -> list[MarketDataRepairManifest]:
+        rows = sorted(self._items.values(), key=lambda item: item.revision, reverse=True)
+        return rows[: max(1, limit)]
+
+    async def upsert(self, manifest: MarketDataRepairManifest) -> None:
+        self._items[manifest.id] = manifest
 
 
 class InMemoryFxSink:

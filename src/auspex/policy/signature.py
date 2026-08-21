@@ -42,7 +42,11 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from auspex.models.common import sha256_hex
 from auspex.models.enums import Action
 
-SIGNATURE_VERSION = "v1"
+# v2 intentionally invalidates v1 dispositions because a decision now includes
+# the joint-allocation gate shape and executable quantity after shared cash
+# budgeting; the same preliminary ticker action can therefore mean a materially
+# different portfolio ask.
+SIGNATURE_VERSION = "v2"
 
 #: Actions the user can actually act on. Everything else is a hold.
 ACTIONABLE = frozenset({Action.BUY, Action.ADD, Action.TRIM, Action.SELL})

@@ -212,12 +212,23 @@ The six legs are:
 6. Valuation Brake
 
 Domestic filers use all six. Foreign private issuers exclude Smart Money and
-redistribute its weight. Native-currency IFRS facts can produce ratio-based
-fundamental health, while cross-currency valuation remains unavailable unless
-the accounting currency is USD.
+redistribute its weight. Fundamental-health sub-metrics are standardized in
+peer scope before equal-weight combination. Attention emits one event per
+source document, with extraction materiality enriching rather than duplicating
+that event.
 
-Scores are winsorized, weighted and percentile-ranked inside the active cohort
-or fallback scope. A score is relative research strength, not expected return.
+Applicable-but-missing legs contribute neutral standardized value zero while
+coverage/confidence remain separate. Structurally inapplicable legs leave both
+the numerator and denominator. Native-currency valuation is converted only
+using authoritative point-in-time FX at each fact period end; an unavailable
+rate makes valuation structurally inapplicable rather than penalizing the
+issuer.
+
+Scores are winsorized, weighted and midpoint-percentile-ranked. Cohort,
+parent, and universe statistics are continuously shrinkage-blended while the
+cohort label/confidence remains auditable. Direction and weakening streaks use
+observed trading sessions and reject gaps. A score is relative research
+strength, not expected return.
 
 ### 5.6 Policy
 
@@ -232,8 +243,15 @@ The policy engine evaluates deterministic gates in priority order:
 - estimated cost;
 - CHF cash reserve.
 
-Risk profile selects policy thresholds. Horizon and objective are retained for
-profile completeness and future suitability policy.
+Risk profile selects entry/exit thresholds. Horizon and objective set
+portfolio turnover, position and cohort risk limits.
+
+Policy first produces per-security candidates. A second deterministic
+allocation pass applies one shared CHF cash budget, minimum executable size,
+position/cohort limits and stable priority. A risk-aware shadow allocation adds
+60-session volatility, daily-value participation, correlation groups, and
+objective/horizon turnover limits. The shadow notional is persisted for
+measurement but is not presented as executable until promotion gates pass.
 
 Only BUY, ADD, TRIM and SELL are treated as actionable. No-action states are
 not recorded as followed recommendations.
@@ -338,6 +356,14 @@ The weekly job computes:
 - recommendation outcomes;
 - followed/not-followed attribution;
 - cohort dispersion and sample sizes.
+- IC distribution and ICIR;
+- effective non-overlapping sample size;
+- Newey-West and seeded moving-block-bootstrap intervals;
+- per-date, available-population leg IC/correlation;
+- robust and cost-adjusted top-minus-bottom spread;
+- turnover and maximum drawdown;
+- equal-weight, momentum, and seeded-random benchmarks;
+- coverage bias and multiple-testing-adjusted results.
 
 Population score metrics are stored in the shared `performance` container.
 Suggestion hit rate and disposition outcomes are stored in
@@ -347,6 +373,12 @@ caller's recommendations and ledger.
 
 This measures whether Auspex is informative; it does not rewrite history or
 train on owner outcomes automatically.
+
+`auspex shadow` evaluates a fingerprinted pre-registration against immutable
+stored leg z-scores and returns promotion verdicts without changing production
+weights. Publishing shadow metrics is opt-in. A challenger may be promoted
+only when held-out, benchmark-relative, post-cost intervals exclude zero and
+the result does not depend on one ticker, cohort, or regime.
 
 ### 5.9 Grounded conversation
 
@@ -372,7 +404,8 @@ The run is one shared research pass plus a bounded per-user fan-out.
 Shared, once per night:
 
 1. Load versioned configuration.
-2. Collect prices, FX, filings, facts, insider data and news.
+2. Collect prices, point-in-time FX pairs, filings, facts, insider data and
+   news. Structurally invalid price bars are quarantined at ingest.
 3. Extract uncached qualitative evidence.
 4. Compute raw legs.
 5. Assign peer scopes and normalize.
@@ -383,8 +416,17 @@ Shared, once per night:
 Per `ACTIVE` user, against that user's own ledger binding:
 
 9. Project the live portfolio.
-10. Apply policy, stamp decision signatures, apply any active suppression,
-    and write recommendations.
+10. Apply candidate policy.
+11. Allocate BUY/ADD candidates jointly under one CHF budget; compute and store
+    the risk-aware shadow allocation; stamp decision signatures; apply active
+    suppression; write recommendations.
+
+An operator runs `market-data-diagnose` and the idempotent
+`market-data-repair` before a corrected historical replay. Raw provider fields
+are immutable. Repairs rebuild only justified derived adjustments, quarantine
+unexplained scale breaks, append a fingerprinted manifest, and emit targeted
+recomputation ranges. `engine-baseline-export` preserves the prior score and
+performance champion in Blob Storage before replay.
 
 Steps 1–8 are identical for everyone and are the expensive parts (provider
 quota, LLM tokens), so running them per user would multiply cost for no
@@ -544,7 +586,9 @@ registration and user-flow configuration.
 6. Prompts, model deployments and config are pinned and versioned.
 7. Annual filing recaps prefer substantive 10-K/20-F digests and never arbitrary
    evidence fragments.
-8. Native-currency ratios are allowed; cross-currency valuation is not inferred.
+8. Native-currency ratios are allowed; cross-currency valuation requires an
+   authoritative point-in-time FX rate and is never inferred or carried back
+   from today.
 9. The default deployment is tenant-local and reproducible with AZD.
 
 ## 10. Quality requirements
@@ -564,7 +608,14 @@ registration and user-flow configuration.
 - Approval-gated multi-user, not open retail self-service.
 - Fixed research universe, not arbitrary instruments.
 - Provider coverage and licensing constrain news history.
-- No corporate-action workflow beyond provider-adjusted prices.
+- Corporate-action repair is bounded by authoritative provider split/dividend
+  evidence. Uncorroborated discontinuities are quarantined and reported rather
+  than converted into an invented split.
+- The published allocator enforces joint cash feasibility and trade costs; the
+  fuller horizon/objective, volatility, liquidity, concentration, correlation
+  and turnover policy remains shadow-only until promotion gates pass.
+- The current scored history is too short to claim a validated predictive edge
+  for a learned challenger.
 - No suitability determination or broker execution.
 - Single-region data plane.
 - Model and provider quotas can extend bootstrap duration.

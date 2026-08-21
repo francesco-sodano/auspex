@@ -47,6 +47,15 @@ class PipelineRunner:
         manifest = existing_manifest or new_manifest(self._ctx.as_of_date)
         start_index = resume_step_index(manifest)
         deadline_seconds = self._ctx.hard_timeout_minutes * 60
+        if (
+            PIPELINE_STEPS.index("RUN_POLICY") >= start_index
+            and self._ctx.config.get("policy", {})
+            .get("allocation", {})
+            .get("shadow_risk_aware", False)
+        ):
+            from auspex.pipeline.fanout import prepare_market_risk_context
+
+            await prepare_market_risk_context(self._ctx)
 
         for i in range(start_index, len(PIPELINE_STEPS)):
             step_name = PIPELINE_STEPS[i]

@@ -104,8 +104,24 @@ class AlphaVantageProvider:
         )
 
     async def get_usd_chf(self, since: date) -> list[FxRateDTO]:
+        return await self.get_daily_fx("USDCHF", since)
+
+    async def get_daily_fx(
+        self,
+        pair: str,
+        since: date,
+    ) -> list[FxRateDTO]:
+        normalized = pair.strip().upper()
+        if len(normalized) != 6 or not normalized.isalpha():
+            raise ValueError("FX pair must contain two three-letter currencies")
+        base, quote = normalized[:3], normalized[3:]
         payload = await self._get(
-            {"function": "FX_DAILY", "from_symbol": "USD", "to_symbol": "CHF", "outputsize": "full"}
+            {
+                "function": "FX_DAILY",
+                "from_symbol": base,
+                "to_symbol": quote,
+                "outputsize": "full",
+            }
         )
         series = payload.get("Time Series FX (Daily)", {})
         rates = []
@@ -113,5 +129,11 @@ class AlphaVantageProvider:
             session_date = datetime.strptime(day_str, "%Y-%m-%d").date()
             if session_date < since:
                 continue
-            rates.append(FxRateDTO(pair="USDCHF", session_date=session_date, close_rate=to_decimal(row["4. close"])))
+            rates.append(
+                FxRateDTO(
+                    pair=normalized,
+                    session_date=session_date,
+                    close_rate=to_decimal(row["4. close"]),
+                )
+            )
         return sorted(rates, key=lambda r: r.session_date)

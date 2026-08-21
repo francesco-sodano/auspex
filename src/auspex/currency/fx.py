@@ -1,7 +1,8 @@
-"""Explicit dated USD -> CHF conversion (arc42 §8.2).
+"""Explicit dated currency conversion (arc42 §8.2).
 
-FX never enters the scoring engine. This module is used exclusively by the
-ledger (`auspex.ledger`) and reporting layers, never by `auspex.scoring`.
+Ledger settlement remains USD/CHF. The scoring pipeline may also consume a
+point-in-time currency table solely to put non-USD reported fundamentals on a
+comparable USD valuation basis.
 """
 
 from __future__ import annotations
@@ -21,21 +22,20 @@ def convert_usd_to_chf(amount_usd: Decimal | str, rate_chf_per_usd: Decimal | st
 
 def fx_effect_chf(
     quantity: Decimal | str,
-    price_change_usd: Decimal | str,
+    base_price_usd: Decimal | str,
     rate_then: Decimal | str,
     rate_now: Decimal | str,
 ) -> Decimal:
     """Isolate the FX-attributable portion of a CHF value change.
 
-    ``fx_effect_chf`` separates the CHF-denominated move due purely to the
-    USD/CHF rate shifting since a lot opened, from the move due to the
-    underlying USD price itself (arc42 §5.7 realised P&L).
+    ``base_price_usd`` is the lot's USD cost per share. The result isolates
+    ``quantity * base_price * (rate_now - rate_then)``; price movement and the
+    price/FX cross term remain outside this component.
     """
 
     qty = to_decimal(quantity)
-    delta_price = to_decimal(price_change_usd)
+    base_price = to_decimal(base_price_usd)
     rate_then_d = to_decimal(rate_then)
     rate_now_d = to_decimal(rate_now)
-    # value at cost in USD, revalued at both rates, isolates the FX-only delta
-    base_value_usd = qty * delta_price
+    base_value_usd = qty * base_price
     return quantize_money(base_value_usd * (rate_now_d - rate_then_d))

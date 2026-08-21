@@ -50,6 +50,7 @@ class CollectorResult:
     items_seen: int = 0
     items_written: int = 0
     items_skipped_duplicate: int = 0
+    items_quarantined: int = 0
     degraded: bool = False
     error: str | None = None
     new_document_ids: list[str] = field(default_factory=list)

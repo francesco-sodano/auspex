@@ -11,6 +11,7 @@ exports/{user_id}/{upload_id}.{ext}               broker statements
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import BinaryIO
 
 from azure.identity.aio import DefaultAzureCredential
 from azure.storage.blob.aio import BlobServiceClient
@@ -41,6 +42,24 @@ class BlobContext:
         path = f"{user_id}/{upload_id}.{ext}"
         container = self._client.get_container_client(self._settings.blob_container_exports)
         await container.upload_blob(name=path, data=content, overwrite=True)
+        return f"{self._settings.blob_container_exports}/{path}"
+
+    async def upload_export_stream(
+        self,
+        user_id: str,
+        upload_id: str,
+        ext: str,
+        stream: BinaryIO,
+    ) -> str:
+        path = f"{user_id}/{upload_id}.{ext}"
+        container = self._client.get_container_client(
+            self._settings.blob_container_exports
+        )
+        await container.upload_blob(
+            name=path,
+            data=stream,
+            overwrite=True,
+        )
         return f"{self._settings.blob_container_exports}/{path}"
 
     async def download_text(self, container_name: str, path: str) -> str:

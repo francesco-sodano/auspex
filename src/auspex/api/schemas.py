@@ -69,6 +69,8 @@ class RecommendationOut(AuspexModel):
     current_weight: str | None = None
     suggested_trade_chf: str | None = None
     suggested_quantity: str | None = None
+    allocation_mode: str = "LEGACY_INDEPENDENT"
+    allocation_trace: list[GateTraceOut] = Field(default_factory=list)
     estimated_cost_chf: str | None = None
     auspex_score: int | None = None
     buy_ready: bool = False
@@ -389,6 +391,25 @@ class AttributionStatus(AuspexModel):
     not_followed_mature: int = 0
 
 
+class HorizonDiagnostics(AuspexModel):
+    mean_ic: str | None = None
+    icir: str | None = None
+    effective_sample_size: str | None = None
+    confidence_low: str | None = None
+    confidence_high: str | None = None
+    confidence_method: str | None = None
+    confidence_level: str | None = None
+    excludes_zero: bool | None = None
+    robust_spread: str | None = None
+    cost_adjusted_spread: str | None = None
+    mean_turnover: str | None = None
+    max_drawdown: str | None = None
+    outlier_count: int = 0
+    equal_weight_return: str | None = None
+    momentum_ic: str | None = None
+    random_p95_absolute: str | None = None
+
+
 class PerformanceReport(AuspexModel):
     """`GET /api/performance` — arc42 §11, §12 Performance page.
 
@@ -407,5 +428,9 @@ class PerformanceReport(AuspexModel):
     dispositions: DispositionOutcomes
     attribution: AttributionStatus = Field(default_factory=AttributionStatus)
     cohort_dispersion: dict[str, str | None] = Field(default_factory=dict, description="keyed by cohort name")
+    diagnostics: dict[str, HorizonDiagnostics] = Field(
+        default_factory=dict,
+        description="uncertainty, robust spread and benchmark context by horizon",
+    )
     sample_size: int
     backfilled_sample_size: int

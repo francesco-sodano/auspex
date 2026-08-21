@@ -143,7 +143,11 @@ async def _current_projection(
         for bar in latest_prices
         if bar.security_id in ticker_by_id
     }
-    fx_rows = [row for row in await fx_sink.all() if row.session_date <= effective_date]
+    fx_rows = [
+        row
+        for row in await fx_sink.all()
+        if row.pair == "USDCHF" and row.session_date <= effective_date
+    ]
     fx_rate = Decimal(max(fx_rows, key=lambda row: row.session_date).close_rate) if fx_rows else Decimal(1)
     snapshot = await adapter.read_snapshot(
         effective_date,

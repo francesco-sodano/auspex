@@ -86,6 +86,96 @@ def test_requires_no_query_parameter_and_returns_200_on_an_empty_container():
     }
     assert body["sample_size"] == 0
     assert body["backfilled_sample_size"] == 0
+    assert body["diagnostics"]["63"]["confidence_low"] is None
+
+
+def test_surfaces_uncertainty_spread_and_benchmark_diagnostics():
+    rows = [
+        _metric(
+            "ic_distribution",
+            date(2026, 8, 20),
+            "0.04",
+            horizon_days=63,
+            detail={
+                "icir": "0.5",
+                "effective_sample_size": "5.2",
+            },
+        ),
+        _metric(
+            "ic_interval",
+            date(2026, 8, 20),
+            "0.04",
+            horizon_days=63,
+            scope="moving_block_bootstrap",
+            detail={
+                "low": "0.01",
+                "high": "0.07",
+                "method": "moving_block_bootstrap",
+                "confidence": "0.95",
+                "excludes_zero": "true",
+            },
+        ),
+        _metric(
+            "spread",
+            date(2026, 8, 20),
+            "0.03",
+            horizon_days=63,
+            scope="top_minus_bottom",
+            detail={
+                "robust_spread": "0.025",
+                "cost_adjusted_spread": "0.02",
+                "mean_turnover": "0.1",
+                "max_drawdown": "0.08",
+                "outlier_count": "3",
+            },
+        ),
+        _metric(
+            "benchmark",
+            date(2026, 8, 20),
+            "0.015",
+            horizon_days=63,
+            scope="equal_weight",
+        ),
+        _metric(
+            "benchmark",
+            date(2026, 8, 20),
+            "0.02",
+            horizon_days=63,
+            scope="momentum",
+        ),
+        _metric(
+            "benchmark",
+            date(2026, 8, 20),
+            "0",
+            horizon_days=63,
+            scope="random_ranking",
+            detail={"p95_absolute": "0.03"},
+        ),
+    ]
+    client = _make_client(FakeCosmosRepository(rows))
+
+    response = client.get("/api/performance")
+
+    assert response.status_code == 200
+    diagnostic = response.json()["diagnostics"]["63"]
+    assert diagnostic == {
+        "mean_ic": "0.04",
+        "icir": "0.5",
+        "effective_sample_size": "5.2",
+        "confidence_low": "0.01",
+        "confidence_high": "0.07",
+        "confidence_method": "moving_block_bootstrap",
+        "confidence_level": "0.95",
+        "excludes_zero": True,
+        "robust_spread": "0.025",
+        "cost_adjusted_spread": "0.02",
+        "mean_turnover": "0.1",
+        "max_drawdown": "0.08",
+        "outlier_count": 3,
+        "equal_weight_return": "0.015",
+        "momentum_ic": "0.02",
+        "random_p95_absolute": "0.03",
+    }
 
 
 def test_assembles_composite_ic_across_all_three_horizons():

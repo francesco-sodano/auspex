@@ -43,7 +43,7 @@ import asyncio
 import dataclasses
 import json
 import logging
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -52,16 +52,16 @@ from typing import Protocol
 from auspex.collectors.base import watermark_key
 from auspex.collectors.filing_collector import INTERESTING_FORMS
 from auspex.collectors.fx_collector import COLLECTOR_NAME as _FX_COLLECTOR_NAME
-from auspex.collectors.fx_collector import FX_WATERMARK_KEY
 from auspex.config.loader import Universe
+from auspex.marketdata.quarantine import exclude_quarantined
 from auspex.models.enums import Action, FilerProfile, LegName
 from auspex.models.performance import PerformanceMetric
 from auspex.performance.engine import (
     HORIZONS,
     DateCrossSection,
     compute_composite_ic_metrics,
+    compute_detailed_metrics,
     compute_disposition_outcome_metric,
-    compute_leg_correlation_metrics,
     compute_leg_ic_metrics,
     compute_suggestion_hit_rate_metric,
 )
@@ -195,6 +195,32 @@ def _forward_return_usd(
     if end_idx >= len(bars):
         return None
 
+    start_close = Decimal(bars[start_idx].close_adjusted)
+    end_close = Decimal(bars[end_idx].close_adjusted)
+    if start_close == 0:
+        return None
+    return (end_close - start_close) / start_close
+
+
+def _trailing_return_usd(
+    bars_by_security: dict,
+    security_id: str,
+    as_of: date,
+    window_sessions: int,
+    dates_by_security: dict[str, list[date]] | None = None,
+) -> Decimal | None:
+    bars = bars_by_security.get(security_id)
+    if not bars or window_sessions <= 0:
+        return None
+    dates = (
+        dates_by_security[security_id]
+        if dates_by_security is not None
+        else [bar.session_date for bar in bars]
+    )
+    end_idx = bisect_right(dates, as_of) - 1
+    start_idx = end_idx - window_sessions
+    if end_idx < 0 or start_idx < 0:
+        return None
     start_close = Decimal(bars[start_idx].close_adjusted)
     end_close = Decimal(bars[end_idx].close_adjusted)
     if start_close == 0:
@@ -434,9 +460,18 @@ class BootstrapRunner:
             key = watermark_key("price", sec.id)
             if await ctx.repos.watermarks.get_watermark(key) is None:
                 await ctx.repos.watermarks.set_watermark(key, seed)
-        fx_key = watermark_key(_FX_COLLECTOR_NAME, FX_WATERMARK_KEY)
-        if await ctx.repos.watermarks.get_watermark(fx_key) is None:
-            await ctx.repos.watermarks.set_watermark(fx_key, seed)
+        from auspex.collectors.fx_collector import fx_watermark_key
+
+        for pair in ctx.config["weights"].get(
+            "valuation_fx_pairs",
+            ["USDCHF"],
+        ):
+            fx_key = watermark_key(
+                _FX_COLLECTOR_NAME,
+                fx_watermark_key(pair),
+            )
+            if await ctx.repos.watermarks.get_watermark(fx_key) is None:
+                await ctx.repos.watermarks.set_watermark(fx_key, seed)
 
         manifest = new_manifest(ctx.as_of_date, run_type="bootstrap")
         await step_collect_prices(ctx, manifest)
@@ -586,6 +621,11 @@ class BootstrapRunner:
             else []
         )
         preloaded_fundamentals = await fetch_all(preload_ctx.repos.fundamental_sink)
+        from auspex.currency.table import PointInTimeFxTable
+
+        fx_converter = PointInTimeFxTable(
+            await fetch_all(preload_ctx.repos.fx_sink)
+        )
         replay_dates = {
             item
             for item in _each_day(start_date, end_date)
@@ -626,6 +666,7 @@ class BootstrapRunner:
                 day_ctx.__dict__["_preloaded_documents"] = preloaded_documents
                 day_ctx.__dict__["_preloaded_extractions"] = preloaded_extractions
                 day_ctx.__dict__["_preloaded_fundamentals"] = preloaded_fundamentals
+                day_ctx.__dict__["_fx_converter"] = fx_converter
                 manifest = new_manifest(current, run_type="bootstrap")
                 await step_compute_raw_legs(day_ctx, manifest)
                 await step_assign_cohorts(day_ctx, manifest)
@@ -777,7 +818,7 @@ class BootstrapRunner:
         unchanged (single-owner deployments and bootstrap replay).
         """
 
-        all_bars = await fetch_all(ctx.repos.price_sink)
+        all_bars = exclude_quarantined(await fetch_all(ctx.repos.price_sink))
         bars_by_security: dict[str, list] = {}
         for bar in all_bars:
             bars_by_security.setdefault(bar.security_id, []).append(bar)
@@ -824,8 +865,16 @@ class BootstrapRunner:
                     continue
                 snaps = [pair[0] for pair in pairs]
                 leg_z_by_leg: dict[LegName, list[Decimal]] = {}
+                leg_z_by_security: dict[LegName, dict[str, Decimal]] = {}
                 for leg in LegName:
                     leg_results = [snapshot.legs.get(leg) for snapshot in snaps]
+                    available = {
+                        snapshot.security_id: Decimal(result.z)
+                        for snapshot, result in zip(snaps, leg_results, strict=True)
+                        if result is not None and result.z is not None
+                    }
+                    if available:
+                        leg_z_by_security[leg] = available
                     if all(result is not None and result.z is not None for result in leg_results):
                         leg_z_by_leg[leg] = [
                             Decimal(result.z) for result in leg_results if result is not None
@@ -839,6 +888,26 @@ class BootstrapRunner:
                         forward_returns_usd_by_horizon={
                             horizon: [pair[1] for pair in pairs]
                         },
+                        leg_z_by_security=leg_z_by_security,
+                        coverage_by_security={
+                            snapshot.security_id: Decimal(snapshot.coverage) for snapshot in snaps
+                        },
+                        trailing_returns_usd_by_window={
+                            63: {
+                                snapshot.security_id: trailing
+                                for snapshot in snaps
+                                if (
+                                    trailing := _trailing_return_usd(
+                                        bars_by_security,
+                                        snapshot.security_id,
+                                        as_of,
+                                        63,
+                                        dates_by_security,
+                                    )
+                                )
+                                is not None
+                            }
+                        },
                     )
                 )
 
@@ -846,25 +915,21 @@ class BootstrapRunner:
             logger.warning("bootstrap performance produced no eligible forward-return cross-sections")
             return []
 
-        metrics = compute_composite_ic_metrics(cross_sections) + compute_leg_ic_metrics(cross_sections)
-        complete_leg_rows = [
-            snapshot
-            for snapshots in snapshots_by_date.values()
-            for snapshot in snapshots
-            if all(
-                snapshot.legs.get(leg) is not None
-                and snapshot.legs[leg].z is not None
-                for leg in LegName
+        metrics = (
+            compute_composite_ic_metrics(cross_sections)
+            + compute_leg_ic_metrics(cross_sections)
+            + compute_detailed_metrics(
+                cross_sections,
+                cost_per_unit_turnover=Decimal(
+                    str(
+                        ctx.config.get("fees", {}).get(
+                            "performance_round_trip_cost_rate",
+                            "0.0050",
+                        )
+                    )
+                ),
             )
-        ]
-        if complete_leg_rows:
-            metrics += compute_leg_correlation_metrics(
-                max(snapshot.as_of_date for snapshot in complete_leg_rows),
-                {
-                    leg: [Decimal(snapshot.legs[leg].z) for snapshot in complete_leg_rows]
-                    for leg in LegName
-                },
-            )
+        )
         if include_recommendation_metrics and ctx.repos.recommendation_repo is not None:
             if attribution_user_id is not None:
                 if hasattr(ctx.repos.recommendation_repo, "raw_query"):

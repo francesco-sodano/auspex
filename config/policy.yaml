@@ -1,5 +1,5 @@
 # Policy gate thresholds - arc42 5.6
-schema_version: "4.0"
+schema_version: "5.0"
 config_type: policy
 
 coverage:
@@ -39,6 +39,45 @@ sell:
 target_weight:
   max_pct: "15"
   floor_pct: "4"
+
+allocation:
+  production_mode: JOINT_CASH
+  shadow_risk_aware: true
+  risk_window_sessions: 60
+  correlation_threshold: "0.85"
+  correlation_min_observations: 20
+  max_daily_volume_participation: "0.01"
+  objective_limits:
+    CAPITAL_PRESERVATION:
+      max_position_pct: "8"
+      max_cohort_pct: "20"
+      max_correlated_group_pct: "18"
+      max_buy_turnover_pct: "4"
+      target_volatility_60d: "0.15"
+    INCOME:
+      max_position_pct: "10"
+      max_cohort_pct: "25"
+      max_correlated_group_pct: "20"
+      max_buy_turnover_pct: "5"
+      target_volatility_60d: "0.20"
+    BALANCED_GROWTH:
+      max_position_pct: "12.5"
+      max_cohort_pct: "30"
+      max_correlated_group_pct: "22.5"
+      max_buy_turnover_pct: "7.5"
+      target_volatility_60d: "0.30"
+    CAPITAL_GROWTH:
+      max_position_pct: "20"
+      max_cohort_pct: "35"
+      max_correlated_group_pct: "25"
+      max_buy_turnover_pct: "10"
+      target_volatility_60d: "0.40"
+  horizon_turnover_multiplier:
+    SIX_MONTHS: "1.00"
+    ONE_YEAR: "0.90"
+    ONE_TO_THREE_YEARS: "0.75"
+    THREE_TO_SEVEN_YEARS: "0.60"
+    OVER_SEVEN_YEARS: "0.50"
 
 risk_profiles:
   CONSERVATIVE:

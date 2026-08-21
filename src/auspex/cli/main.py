@@ -63,6 +63,53 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     perf_parser.add_argument("--date", type=str, default=None)
 
+    shadow_parser = subparsers.add_parser(
+        "shadow",
+        help="run the pre-registered champion/challenger shadow study (arc42 §5.8, measurement only)",
+    )
+    shadow_parser.add_argument("--date", type=str, default=None)
+    shadow_parser.add_argument(
+        "--publish",
+        action="store_true",
+        help="write shadow_comparison metrics to the performance container (default: dry run)",
+    )
+    baseline_parser = subparsers.add_parser(
+        "engine-baseline-export",
+        help="export immutable score/performance baseline before replay",
+    )
+    baseline_parser.add_argument(
+        "--label",
+        required=True,
+        help="safe release/config label, e.g. v4.1.0",
+    )
+
+    diagnose_parser = subparsers.add_parser(
+        "market-data-diagnose",
+        help="report market-data integrity findings, read-only (arc42 §5.3)",
+    )
+    diagnose_parser.add_argument(
+        "--ticker",
+        action="append",
+        default=[],
+        help="limit to this ticker; repeatable, defaults to the whole universe",
+    )
+    diagnose_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+
+    repair_parser = subparsers.add_parser(
+        "market-data-repair",
+        help="idempotently repair adjusted series and quarantine bad bars (arc42 §5.3)",
+    )
+    repair_parser.add_argument(
+        "--ticker",
+        action="append",
+        default=[],
+        help="limit to this ticker; repeatable, defaults to the whole universe",
+    )
+    repair_parser.add_argument(
+        "--dry-run", action="store_true", help="plan only; write no bars and no manifest revision"
+    )
+    repair_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+
     serve_parser = subparsers.add_parser("serve", help="run the FastAPI app (app-auspex-api)")
     serve_parser.add_argument("--host", type=str, default="0.0.0.0")
     serve_parser.add_argument("--port", type=int, default=8080)
@@ -655,6 +702,83 @@ async def _performance_command(as_of_date: date) -> int:
         "performance: complete — metrics_computed=%d (arc42 §5.8, job-auspex-performance)",
         len(metrics),
     )
+    await _aclose_unique(source_ledger, blob, cosmos)
+    return 0
+
+
+async def _shadow_command(as_of_date: date, *, publish: bool = False) -> int:
+    """Run the pre-registered champion/challenger shadow study (arc42 §5.8).
+
+    This is measurement, not production scoring: no weight, formula or portfolio
+    policy is touched, and nothing is written unless ``--publish`` is given. The
+    study exists to answer whether a named challenger — notably the
+    ``corrected_fixed`` denominator variant — would have out-predicted the
+    champion on the history we already have, before anybody argues about
+    promoting it.
+    """
+
+    from decimal import Decimal
+
+    from auspex.cli.bootstrap import _forward_return_usd
+    from auspex.cli.shadow_cli import run_shadow_study
+    from auspex.config import load_weights
+    from auspex.models.enums import LegName
+    from auspex.models.performance import PerformanceMetric
+    from auspex.models.scoring import ScoreSnapshot
+    from auspex.performance.shadow import assert_matches_production_weights
+    from auspex.persistence.cosmos_client import get_cosmos_context
+    from auspex.persistence.repositories import CosmosPriceSink
+    from auspex.pipeline.repo_access import fetch_all
+
+    logger.info("shadow: pre-registered comparison invoked for %s (publish=%s)", as_of_date, publish)
+
+    domestic = load_weights().get("domestic", {})
+    try:
+        assert_matches_production_weights(
+            {leg: Decimal(str(domestic[leg.value])) for leg in LegName if leg.value in domestic}
+        )
+    except ValueError:
+        logger.error(
+            "shadow: aborting — the champion weight snapshot no longer matches config/weights.yaml, "
+            "so a comparison against it would be measuring the wrong champion",
+            exc_info=True,
+        )
+        return 1
+
+    cosmos = get_cosmos_context()
+    score_repo = CosmosRepository(cosmos, "scores", ScoreSnapshot)
+
+    snapshots = await fetch_all(score_repo)
+    all_bars = await fetch_all(CosmosPriceSink(cosmos))
+
+    bars_by_security: dict[str, list] = {}
+    for bar in all_bars:
+        bars_by_security.setdefault(bar.security_id, []).append(bar)
+    for bars in bars_by_security.values():
+        bars.sort(key=lambda item: item.session_date)
+    dates_by_security = {
+        security_id: [bar.session_date for bar in bars] for security_id, bars in bars_by_security.items()
+    }
+
+    def forward_return(security_id: str, as_of: date, horizon_days: int):
+        return _forward_return_usd(bars_by_security, security_id, as_of, horizon_days, dates_by_security)
+
+    performance_repo = CosmosRepository(cosmos, "performance", PerformanceMetric) if publish else None
+    report, metrics = await run_shadow_study(
+        snapshots,
+        forward_return,
+        as_of_date=as_of_date,
+        publish=publish,
+        performance_repo=performance_repo,
+    )
+
+    logger.info(
+        "shadow: complete — dates_evaluated=%d metrics=%d published=%s (arc42 §5.8)",
+        report.dates_evaluated,
+        len(metrics),
+        publish,
+    )
+    await _aclose_unique(cosmos)
     return 0
 
 
@@ -1237,6 +1361,22 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_migrate_multi_user_command())
     if args.command == "performance":
         return asyncio.run(_performance_command(_parse_date(args.date)))
+    if args.command == "shadow":
+        return asyncio.run(_shadow_command(_parse_date(args.date), publish=args.publish))
+    if args.command == "engine-baseline-export":
+        from auspex.cli.engine_baseline import export_engine_baseline_command
+
+        return asyncio.run(export_engine_baseline_command(args.label))
+    if args.command == "market-data-diagnose":
+        from auspex.cli.market_data import market_data_diagnose_command
+
+        return asyncio.run(market_data_diagnose_command(args.ticker, as_json=args.json))
+    if args.command == "market-data-repair":
+        from auspex.cli.market_data import market_data_repair_command
+
+        return asyncio.run(
+            market_data_repair_command(args.ticker, dry_run=args.dry_run, as_json=args.json)
+        )
     if args.command == "serve":
         return _serve_command(args.host, args.port)
 

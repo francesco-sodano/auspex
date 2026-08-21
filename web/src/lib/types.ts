@@ -17,6 +17,8 @@ export type Recommendation = {
   current_weight?: string
   suggested_trade_chf?: string
   suggested_quantity?: string
+  allocation_mode?: 'LEGACY_INDEPENDENT' | 'JOINT_CASH' | 'RISK_AWARE'
+  allocation_trace?: GateTrace[]
   estimated_cost_chf?: string
   auspex_score?: number | null
   buy_ready: boolean
@@ -263,6 +265,24 @@ export type PerformanceReport = {
     not_followed_mature: number
   }
   cohort_dispersion: Record<string, string | null>
+  diagnostics: Record<string, {
+    mean_ic: string | null
+    icir: string | null
+    effective_sample_size: string | null
+    confidence_low: string | null
+    confidence_high: string | null
+    confidence_method: string | null
+    confidence_level: string | null
+    excludes_zero: boolean | null
+    robust_spread: string | null
+    cost_adjusted_spread: string | null
+    mean_turnover: string | null
+    max_drawdown: string | null
+    outlier_count: number
+    equal_weight_return: string | null
+    momentum_ic: string | null
+    random_p95_absolute: string | null
+  }>
   sample_size: number
   backfilled_sample_size: number
 }

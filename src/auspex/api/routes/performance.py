@@ -38,6 +38,7 @@ from auspex.api.deps import (
 from auspex.api.schemas import (
     AttributionStatus,
     DispositionOutcomes,
+    HorizonDiagnostics,
     LegCorrelationMatrix,
     PerformanceReport,
 )
@@ -123,6 +124,10 @@ async def get_performance(
         partition_key=user.user_id,
     )
     cohort_rows = await _metrics_of_type(repo, "cohort_quality")
+    distribution_rows = await _metrics_of_type(repo, "ic_distribution")
+    interval_rows = await _metrics_of_type(repo, "ic_interval")
+    spread_rows = await _metrics_of_type(repo, "spread")
+    benchmark_rows = await _metrics_of_type(repo, "benchmark")
 
     all_rows = [
         *composite_ic_rows,
@@ -131,6 +136,10 @@ async def get_performance(
         *hit_rate_rows,
         *disposition_rows,
         *cohort_rows,
+        *distribution_rows,
+        *interval_rows,
+        *spread_rows,
+        *benchmark_rows,
     ]
     as_of_date = _latest_as_of_date(all_rows) or date.today()
 
@@ -185,6 +194,69 @@ async def get_performance(
     cohort_dispersion = {
         scope.removeprefix("cohort:"): metric.value for scope, metric in latest_cohort_by_scope.items()
     }
+    latest_distribution = _latest_by_horizon(distribution_rows)
+    latest_spread = _latest_by_horizon(spread_rows)
+    latest_intervals: dict[int | None, PerformanceMetric] = {}
+    for metric in interval_rows:
+        if metric.scope != "moving_block_bootstrap":
+            continue
+        current = latest_intervals.get(metric.horizon_days)
+        if current is None or metric.as_of_date > current.as_of_date:
+            latest_intervals[metric.horizon_days] = metric
+    latest_benchmarks: dict[tuple[int | None, str], PerformanceMetric] = {}
+    for metric in benchmark_rows:
+        key = (metric.horizon_days, metric.scope)
+        current = latest_benchmarks.get(key)
+        if current is None or metric.as_of_date > current.as_of_date:
+            latest_benchmarks[key] = metric
+
+    def detail(metric: PerformanceMetric | None, key: str) -> str | None:
+        return metric.detail.get(key) if metric is not None else None
+
+    diagnostics = {}
+    for horizon in (21, 63, 126):
+        distribution = latest_distribution.get(horizon)
+        interval = latest_intervals.get(horizon)
+        spread = latest_spread.get(horizon)
+        equal_weight = latest_benchmarks.get((horizon, "equal_weight"))
+        momentum = latest_benchmarks.get((horizon, "momentum"))
+        random_ranking = latest_benchmarks.get((horizon, "random_ranking"))
+        excludes_zero_raw = detail(interval, "excludes_zero")
+        diagnostics[str(horizon)] = HorizonDiagnostics(
+            mean_ic=distribution.value if distribution is not None else None,
+            icir=detail(distribution, "icir"),
+            effective_sample_size=detail(
+                distribution,
+                "effective_sample_size",
+            ),
+            confidence_low=detail(interval, "low"),
+            confidence_high=detail(interval, "high"),
+            confidence_method=detail(interval, "method"),
+            confidence_level=detail(interval, "confidence"),
+            excludes_zero=(
+                excludes_zero_raw.lower() == "true"
+                if excludes_zero_raw is not None
+                else None
+            ),
+            robust_spread=detail(spread, "robust_spread"),
+            cost_adjusted_spread=detail(
+                spread,
+                "cost_adjusted_spread",
+            ),
+            mean_turnover=detail(spread, "mean_turnover"),
+            max_drawdown=detail(spread, "max_drawdown"),
+            outlier_count=int(detail(spread, "outlier_count") or "0"),
+            equal_weight_return=(
+                equal_weight.value if equal_weight is not None else None
+            ),
+            momentum_ic=(
+                momentum.value if momentum is not None else None
+            ),
+            random_p95_absolute=detail(
+                random_ranking,
+                "p95_absolute",
+            ),
+        )
     recommendations = await recommendation_repo.query(
         query="SELECT * FROM c WHERE c.user_id=@user_id",
         parameters=[{"name": "@user_id", "value": user.user_id}],
@@ -230,6 +302,7 @@ async def get_performance(
         dispositions=dispositions,
         attribution=attribution,
         cohort_dispersion=cohort_dispersion,
+        diagnostics=diagnostics,
         sample_size=sample_size,
         backfilled_sample_size=backfilled_sample_size,
     )

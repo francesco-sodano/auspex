@@ -31,6 +31,8 @@ the decision authority.
 
 - Maintains a configured research universe of 104 securities and peer cohorts.
 - Ingests prices, SEC filings, XBRL/IFRS facts, Form 4 transactions and news.
+- Validates corporate actions and quarantines unjustified adjusted-price
+  discontinuities before they can enter scores or performance labels.
 - Stores 36 months of raw history and extracts/scores an 18-month window.
 - Computes a peer-relative Auspex Score from six deterministic legs.
 - Applies investor, portfolio, coverage, valuation, cost and cash-reserve gates.
@@ -40,6 +42,8 @@ the decision authority.
   events.
 - Provides grounded company analysis, evidence, filings, news and conversation.
 - Measures score and recommendation performance over time.
+- Reports confidence intervals, effective sample size, robust/cost-adjusted
+  spreads, turnover, drawdown, and benchmark comparisons.
 
 ## Research logic
 
@@ -54,8 +58,15 @@ the decision authority.
 | Fundamental Health | Growth, margin, cash generation, balance sheet and ROIC |
 | Valuation Brake | Relative EV/Sales, EV/EBITDA and FCF yield pressure |
 
-The **Auspex Score (0–100)** is a percentile rank inside the active peer scope.
-It is not a probability and it is not an absolute valuation.
+Fundamental sub-metrics are normalized before combination, attention counts one
+event per source document, missing applicable legs contribute a neutral zero
+with confidence reported separately, and small cohorts shrink continuously
+toward their parent/universe rather than switching populations abruptly.
+Non-USD valuation uses only authoritative point-in-time FX; when a rate is
+unavailable the leg is structurally excluded instead of penalizing coverage.
+
+The **Auspex Score (0–100)** is a midpoint percentile rank inside the blended
+peer scope. It is not a probability and it is not an absolute valuation.
 
 ### Score versus action
 
@@ -67,10 +78,37 @@ deterministic gates check:
 - valuation and score direction;
 - investor risk profile;
 - current position and target weight;
+- one shared executable cash budget across every BUY/ADD candidate;
 - CHF cash reserve;
 - minimum executable trade and estimated costs.
 
 `HOLD_NO_ACTION` is not presented as a trade recommendation.
+
+Candidate actions are evaluated first, then BUY/ADD candidates share one CHF
+cash budget so the published set is jointly executable. A fuller risk-aware
+allocation evaluates horizon, objective, position/cohort concentration,
+date-aligned correlation, volatility, liquidity and turnover limits. That
+allocation is stored privately as a shadow challenger; it cannot replace the
+production allocation until held-out, point-in-time, post-cost promotion gates
+pass.
+
+### Market-data repair and shadow validation
+
+Before replaying a new scoring version:
+
+```powershell
+python -m auspex engine-baseline-export --label v4.1.0
+python -m auspex market-data-diagnose --json
+python -m auspex market-data-repair --dry-run --json
+python -m auspex market-data-repair --json
+python -m auspex bootstrap-recover --replay-all
+python -m auspex shadow
+```
+
+Repair manifests are append-only in `config_versions`. Raw provider OHLCV,
+split and dividend observations are not rewritten; only derived adjustment
+fields and quarantine metadata can change. `shadow` is read-only unless
+`--publish` is explicitly supplied.
 
 ## Architecture
 

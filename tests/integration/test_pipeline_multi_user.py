@@ -156,6 +156,13 @@ def test_two_users_share_research_but_not_portfolio_state(universe, config_bundl
     assert alice and bob
     assert set(alice) == set(bob)
     assert alice[nvda.id].current_weight_pct != bob[nvda.id].current_weight_pct
+    assert all(row.allocation_mode == "JOINT_CASH" for row in alice.values())
+    alice_buy_notional = sum(
+        Decimal(row.suggested_trade_chf or "0")
+        for row in alice.values()
+        if row.action in {Action.BUY, Action.ADD}
+    )
+    assert alice_buy_notional <= Decimal("17000")
     assert readers[ALICE].reads >= 1
     assert readers[BOB].reads >= 1
 
@@ -178,7 +185,7 @@ def test_every_recommendation_carries_a_decision_signature(universe, config_bund
 
     alice = recommendations_for(repos, ALICE)
     assert all(row.decision_signature for row in alice.values())
-    assert all(row.decision_signature.startswith("v1:") for row in alice.values())
+    assert all(row.decision_signature.startswith("v2:") for row in alice.values())
 
     # Identical portfolios and identical shared research produce identical
     # signatures — the signature is a property of the decision, not the user.

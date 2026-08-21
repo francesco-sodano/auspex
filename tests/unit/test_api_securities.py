@@ -273,6 +273,8 @@ class TestGetSecurity:
             "current_weight",
             "suggested_trade_chf",
             "suggested_quantity",
+            "allocation_mode",
+            "allocation_trace",
             "estimated_cost_chf",
             "auspex_score",
             "buy_ready",

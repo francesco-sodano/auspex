@@ -41,13 +41,16 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
+from decimal import Decimal
 
 from auspex.models.common import utc_now
 from auspex.models.enums import RunStatus
 from auspex.models.run import PIPELINE_STEPS, RunManifest
 from auspex.pipeline.context import PipelineContext
 from auspex.pipeline.manifest import complete_step, fail_step, new_manifest, resume_step_index
+from auspex.pipeline.repo_access import fetch_all
 from auspex.pipeline.runner import STEP_FUNCTIONS
+from auspex.policy.risk import correlation_groups, estimate_market_risk
 from auspex.portfolio.port import PortfolioPort
 
 logger = logging.getLogger("auspex.pipeline.fanout")
@@ -184,6 +187,7 @@ async def run_multi_user_pipeline(
     manifest = await run_shared_stage(shared_ctx, manifest, SHARED_PRE_STEPS)
     if manifest.status in (RunStatus.FAILED, RunStatus.TIMEOUT):
         return MultiUserRunResult(manifest=manifest)
+    await prepare_market_risk_context(shared_ctx)
 
     semaphore = asyncio.Semaphore(max(1, concurrency))
 
@@ -228,6 +232,81 @@ async def run_multi_user_pipeline(
     if shared_ctx.repos.run_repo is not None:
         await shared_ctx.repos.run_repo.upsert(manifest)
     return MultiUserRunResult(manifest=manifest, user_results=results)
+
+
+async def prepare_market_risk_context(ctx: PipelineContext) -> None:
+    """Compute one shared 60-session risk panel for every per-user allocation."""
+
+    if "_market_risk_estimates" in ctx.__dict__:
+        return
+    fx_rows = [
+        row
+        for row in await fetch_all(ctx.repos.fx_sink)
+        if row.pair == "USDCHF" and row.session_date <= ctx.as_of_date
+    ]
+    fx_rate = (
+        Decimal(
+            max(fx_rows, key=lambda row: row.session_date).close_rate
+        )
+        if fx_rows
+        else Decimal(1)
+    )
+    allocation_config = ctx.config.get("policy", {}).get("allocation", {})
+    sessions = int(allocation_config.get("risk_window_sessions", 60))
+    history_as_of = getattr(ctx.repos.price_sink, "history_as_of", None)
+    if history_as_of is not None:
+        semaphore = asyncio.Semaphore(12)
+
+        async def load_history(security_id: str):
+            async with semaphore:
+                return await history_as_of(
+                    security_id,
+                    ctx.as_of_date,
+                    sessions + 1,
+                )
+
+        histories = await asyncio.gather(
+            *(
+                load_history(security.id)
+                for security in ctx.universe.securities
+            )
+        )
+        by_security = {
+            security.id: history
+            for security, history in zip(
+                ctx.universe.securities,
+                histories,
+                strict=True,
+            )
+            if history
+        }
+    else:
+        bars = [
+            bar
+            for bar in await fetch_all(ctx.repos.price_sink)
+            if bar.session_date <= ctx.as_of_date
+        ]
+        by_security: dict[str, list] = {}
+        for bar in bars:
+            by_security.setdefault(bar.security_id, []).append(bar)
+    estimates = {
+        security_id: estimate_market_risk(
+            security_bars,
+            fx_rate_to_chf=fx_rate,
+            sessions=sessions,
+        )
+        for security_id, security_bars in by_security.items()
+    }
+    ctx.__dict__["_market_risk_estimates"] = estimates
+    ctx.__dict__["_correlation_groups"] = correlation_groups(
+        estimates,
+        threshold=Decimal(
+            str(allocation_config.get("correlation_threshold", "0.85"))
+        ),
+        min_observations=int(
+            allocation_config.get("correlation_min_observations", 20)
+        ),
+    )
 
 
 def _adopt_representative_scratch(

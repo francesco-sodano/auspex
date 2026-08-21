@@ -32,10 +32,12 @@ from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFo
 from pydantic import BaseModel
 
 from auspex.extraction.cache import channel_a_cache_key
+from auspex.marketdata.quarantine import QUARANTINE_SQL_PREDICATE
 from auspex.models.document import Document
 from auspex.models.extraction import ChannelAExtraction, ChannelBDigest
 from auspex.models.fundamentals import FundamentalSnapshot
 from auspex.models.market import FxRate, PriceBar
+from auspex.models.market_integrity import MANIFEST_CONFIG_TYPE, MarketDataRepairManifest
 from auspex.persistence.cosmos_client import CosmosContext
 
 T = TypeVar("T", bound=BaseModel)
@@ -245,7 +247,14 @@ class CosmosDocumentSink:
 
 class CosmosPriceSink:
     """Backs :class:`auspex.collectors.base.PriceSink` over the
-    ``market_daily`` container (arc42 §5.3, §5.11)."""
+    ``market_daily`` container (arc42 §5.3, §5.11).
+
+    Every read excludes quarantined bars: a bar the market-data integrity pass
+    could not justify must not reach scoring, performance or the API until it
+    is repaired or released. Writes are unfiltered — the raw observation is
+    always preserved. Use :class:`CosmosPriceIntegrityStore` for the
+    unfiltered read surface the repair pass needs.
+    """
 
     def __init__(self, context: CosmosContext, container_name: str = "market_daily") -> None:
         self._repo: CosmosRepository[PriceBar] = CosmosRepository(context, container_name, PriceBar)
@@ -254,14 +263,17 @@ class CosmosPriceSink:
         await self._repo.upsert(bar)
 
     async def all(self) -> list[PriceBar]:
-        return await self._repo.query("SELECT * FROM c WHERE IS_DEFINED(c.security_id)")
+        return await self._repo.query(
+            f"SELECT * FROM c WHERE IS_DEFINED(c.security_id) AND {QUARANTINE_SQL_PREDICATE}"
+        )
 
     async def latest_as_of(self, as_of: date, security_ids: list[str]) -> list[PriceBar]:
         async def latest(security_id: str) -> PriceBar | None:
             rows = await self._repo.query(
                 (
                     "SELECT TOP 1 * FROM c WHERE c.security_id=@security_id "
-                    "AND c.session_date<=@as_of ORDER BY c.session_date DESC"
+                    f"AND c.session_date<=@as_of AND {QUARANTINE_SQL_PREDICATE} "
+                    "ORDER BY c.session_date DESC"
                 ),
                 [
                     {"name": "@security_id", "value": security_id},
@@ -275,11 +287,12 @@ class CosmosPriceSink:
         return [row for row in rows if row is not None]
 
     async def history_as_of(self, security_id: str, as_of: date, days: int = 7) -> list[PriceBar]:
-        limit = max(1, min(days, 30))
+        limit = max(1, min(days, 130))
         rows = await self._repo.query(
             (
                 f"SELECT TOP {limit} * FROM c WHERE c.security_id=@security_id "
-                "AND c.session_date<=@as_of ORDER BY c.session_date DESC"
+                f"AND c.session_date<=@as_of AND {QUARANTINE_SQL_PREDICATE} "
+                "ORDER BY c.session_date DESC"
             ),
             [
                 {"name": "@security_id", "value": security_id},
@@ -288,6 +301,71 @@ class CosmosPriceSink:
             partition_key=security_id,
         )
         return list(reversed(rows))
+
+
+class CosmosPriceIntegrityStore:
+    """Unfiltered ``market_daily`` access for the integrity/repair pass.
+
+    Satisfies :class:`auspex.marketdata.service.PriceIntegrityStore`. Reads are
+    partition-scoped (``/security_id``) so a repair pass never fans out across
+    partitions, and they deliberately include quarantined bars — those must be
+    re-examined on every pass so they can be released once repaired.
+    """
+
+    def __init__(self, context: CosmosContext, container_name: str = "market_daily") -> None:
+        self._repo: CosmosRepository[PriceBar] = CosmosRepository(context, container_name, PriceBar)
+
+    async def security_ids(self) -> list[str]:
+        rows = await self._repo.raw_query(
+            "SELECT DISTINCT VALUE c.security_id FROM c WHERE IS_DEFINED(c.security_id)"
+        )
+        return sorted({str(row) for row in rows if row})
+
+    async def bars_for_security(self, security_id: str) -> list[PriceBar]:
+        return await self._repo.query(
+            (
+                "SELECT * FROM c WHERE c.security_id=@security_id "
+                "AND IS_DEFINED(c.session_date) ORDER BY c.session_date ASC"
+            ),
+            [{"name": "@security_id", "value": security_id}],
+            partition_key=security_id,
+        )
+
+    async def upsert_bar(self, bar: PriceBar) -> None:
+        await self._repo.upsert(bar)
+
+
+class CosmosRepairManifestStore:
+    """Append-only market-data repair manifests in ``config_versions``.
+
+    The manifest shares the existing ``config_versions`` container (partition
+    key ``/config_type``) under its own ``config_type`` discriminator, so every
+    read is an explicit single-partition query and no infrastructure change is
+    required.
+    """
+
+    def __init__(self, context: CosmosContext, container_name: str = "config_versions") -> None:
+        self._repo: CosmosRepository[MarketDataRepairManifest] = CosmosRepository(
+            context, container_name, MarketDataRepairManifest
+        )
+
+    async def latest(self) -> MarketDataRepairManifest | None:
+        rows = await self.history(limit=1)
+        return rows[0] if rows else None
+
+    async def history(self, limit: int = 20) -> list[MarketDataRepairManifest]:
+        top = max(1, min(limit, 100))
+        return await self._repo.query(
+            (
+                f"SELECT TOP {top} * FROM c WHERE c.config_type=@config_type "
+                "ORDER BY c.revision DESC"
+            ),
+            [{"name": "@config_type", "value": MANIFEST_CONFIG_TYPE}],
+            partition_key=MANIFEST_CONFIG_TYPE,
+        )
+
+    async def upsert(self, manifest: MarketDataRepairManifest) -> None:
+        await self._repo.upsert(manifest)
 
 
 class CosmosFxSink:

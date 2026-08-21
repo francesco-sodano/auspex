@@ -130,6 +130,17 @@ class TestGetUsdChf:
         assert capture["params"]["from_symbol"] == "USD"
         assert capture["params"]["to_symbol"] == "CHF"
 
+    @pytest.mark.asyncio
+    async def test_generic_fx_pair_is_requested_and_labelled(self):
+        capture: dict = {}
+        provider = make_provider(FX_DAILY_FIXTURE, capture=capture)
+
+        rates = await provider.get_daily_fx("EURUSD", since=date(2026, 1, 1))
+
+        assert capture["params"]["from_symbol"] == "EUR"
+        assert capture["params"]["to_symbol"] == "USD"
+        assert all(rate.pair == "EURUSD" for rate in rates)
+
 
 class TestErrorHandling:
     @pytest.mark.asyncio
