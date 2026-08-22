@@ -47,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/CLI@v2
+      - uses: azure/CLI@v3
         with:
           inlineScript: |
             az bicep build --file infra/main.bicep --outfile /tmp/auspex-main.json
