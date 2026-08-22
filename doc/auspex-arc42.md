@@ -949,7 +949,7 @@ environment variable when an operator actually set it (read from
 `Settings.model_fields_set`, so setting it *to* the default still wins), then
 `config/policy.yaml`'s `pipeline.hard_timeout_minutes` /
 `pipeline.step_timeout_minutes` (versioned and fingerprinted with the rest of
-the bundle), then the `Settings` default — 45 and 15 minutes respectively.
+the bundle), then the `Settings` default — 60 and 30 minutes respectively.
 
 `PipelineContext.step_budget_seconds(elapsed)` returns
 `max(0, min(step_ceiling, run_remaining))`, and `run_step_bounded` wraps each
@@ -972,7 +972,7 @@ the seven scoring-bundle YAMLs plus `universe.yaml`; `load_universe` also reads
 | `config/universe.yaml` | 104 securities: `ticker`, `cik`, `name`, `cohort`, `filer_profile`, `investable` |
 | `config/cohorts.yaml` | 8 cohorts under 4 super-cohorts (`semiconductors`, `ai-infrastructure`, `ai-software-and-emerging`, `digital-platforms`) |
 | `config/weights.yaml` | domestic 0.20/0.15/0.10/0.20/0.20/0.15; FPI 0.25/0.1875/0.125/0.25/0.1875; `recency_half_life_days: 90`; `roic_tax_rate: 0.21`; `winsorize_sigma: 2.5`; document authority 10-K/20-F 1.0, 10-Q 0.9, S-1 0.8, 8-K/6-K 0.7, news 0.4; `valuation_fx_pairs: [USDCHF, EURUSD]` |
-| `config/policy.yaml` | gate thresholds, three risk profiles, allocation objective limits, horizon multipliers, assertions, pipeline timings (`hard_timeout_minutes: 45`, `step_timeout_minutes: 15`, `target_minutes: 25`, crons) |
+| `config/policy.yaml` | gate thresholds, three risk profiles, allocation objective limits, horizon multipliers, assertions, pipeline timings (`hard_timeout_minutes: 60`, `step_timeout_minutes: 30`, `target_minutes: 25`, crons) |
 | `config/label_mappings.yaml` | enum → numeric mappings the model never touches |
 | `config/taxonomy.yaml` | `taxonomy_version: themes-2026-08`, 15 themes, risk categories, narrative claim types |
 | `config/xbrl_concepts.yaml` | ranked alias lists per concept (first present wins) |

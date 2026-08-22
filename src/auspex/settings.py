@@ -215,12 +215,12 @@ class Settings(BaseSettings):
     news_api_key_secret: str = "FINNHUB-API-KEY"
 
     # --- pipeline tuning ---------------------------------------------------------------
-    pipeline_hard_timeout_minutes: int = 45
+    pipeline_hard_timeout_minutes: int = 60
     pipeline_target_minutes: int = 25
     #: Ceiling on any *single* pipeline step. Bounds a step that hangs on a
     #: provider or model call well inside the whole-run deadline, instead of
     #: letting one step consume the entire budget on its own.
-    pipeline_step_timeout_minutes: int = 15
+    pipeline_step_timeout_minutes: int = 30
 
     # --- reporting currency ------------------------------------------------------------
     book_currency: str = "USD"

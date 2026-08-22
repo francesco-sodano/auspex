@@ -145,8 +145,8 @@ pipeline:
   cron_nightly_utc: "0 2 * * *"
   cron_performance_utc: "0 3 * * 0"
   target_minutes: 25
-  hard_timeout_minutes: 45
+  hard_timeout_minutes: 60
   # Ceiling on any single step. Enforced *inside* each step, not merely between
   # steps, so one hung provider/model call cannot consume the whole run budget
   # (let alone reach the container job's own replica timeout).
-  step_timeout_minutes: 15
+  step_timeout_minutes: 30
