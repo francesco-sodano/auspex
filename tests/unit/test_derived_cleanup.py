@@ -11,19 +11,27 @@ from auspex.cli.derived_cleanup import (
 class _Container:
     def __init__(self, rows: list[dict]) -> None:
         self.rows = rows
-        self.deleted: list[tuple[str, str]] = []
+        self.deleted: list[str] = []
         self.queries: list[str] = []
 
-    async def _iterate(self) -> AsyncIterator[dict]:
-        for row in self.rows:
-            yield row
+    async def _iterate(self, query: str) -> AsyncIterator[object]:
+        if "COUNT(1)" in query:
+            yield len(self.rows)
+            return
+        field = query.split("c.", 1)[1].split(" ", 1)[0]
+        for value in dict.fromkeys(row.get(field) for row in self.rows):
+            yield value
 
-    def query_items(self, *, query: str) -> AsyncIterator[dict]:
+    def query_items(self, *, query: str) -> AsyncIterator[object]:
         self.queries.append(query)
-        return self._iterate()
+        return self._iterate(query)
 
-    async def delete_item(self, *, item: str, partition_key: str) -> None:
-        self.deleted.append((item, partition_key))
+    async def delete_all_items_by_partition_key(
+        self,
+        *,
+        partition_key: str,
+    ) -> None:
+        self.deleted.append(partition_key)
 
 
 class _Database:
@@ -85,9 +93,7 @@ async def test_apply_deletes_each_row_with_its_partition_key():
 
     assert sum(counts.values()) == len(DERIVED_CLEANUP_TARGETS)
     for target in DERIVED_CLEANUP_TARGETS:
-        assert database.containers[target.container].deleted == [
-            (f"{target.container}-1", "partition")
-        ]
+        assert database.containers[target.container].deleted == ["partition"]
 
 
 @pytest.mark.asyncio

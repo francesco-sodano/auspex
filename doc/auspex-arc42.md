@@ -583,10 +583,13 @@ append-only audit record. Everything else is untouched by construction:
 | the external `portfolio_transactions` ledger | a different Cosmos account entirely, never in scope |
 
 The command is two-phase and read-only by default. Without `--apply` it plans
-and reports per-container counts and deletes nothing. Both phases enumerate
-first and delete second, and a row missing an `id` or its partition-key field
-aborts the whole pass before any delete is issued, so a malformed document
-cannot leave the database half-cleaned.
+and reports per-container counts and deletes nothing. Both phases first resolve
+and validate every affected logical partition, then `--apply` uses Cosmos
+`delete_all_items_by_partition_key` for each planned partition. A missing
+partition-key value or malformed count result aborts the whole pass before any
+delete is issued, so malformed state cannot leave the database half-cleaned.
+Partition-level deletion keeps the one-time cleanup bounded even when a
+container holds hundreds of thousands of derived rows.
 
 The intended sequence around a replay is:
 

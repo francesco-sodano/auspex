@@ -22,7 +22,18 @@ from auspex.models.market_integrity import MANIFEST_CONFIG_TYPE
 class CleanupTarget:
     container: str
     partition_key_field: str
-    query: str = "SELECT * FROM c"
+    where_clause: str = ""
+
+    @property
+    def count_query(self) -> str:
+        return f"SELECT VALUE COUNT(1) FROM c{self.where_clause}"
+
+    @property
+    def partition_query(self) -> str:
+        return (
+            f"SELECT DISTINCT VALUE c.{self.partition_key_field} "
+            f"FROM c{self.where_clause}"
+        )
 
 
 DERIVED_CLEANUP_TARGETS = (
@@ -36,10 +47,7 @@ DERIVED_CLEANUP_TARGETS = (
     CleanupTarget(
         "config_versions",
         "config_type",
-        (
-            "SELECT * FROM c WHERE c.config_type != "
-            f"'{MANIFEST_CONFIG_TYPE}'"
-        ),
+        f" WHERE c.config_type != '{MANIFEST_CONFIG_TYPE}'",
     ),
 )
 
@@ -47,7 +55,10 @@ DERIVED_CLEANUP_TARGETS = (
 class Container(Protocol):
     def query_items(self, *, query: str): ...
 
-    async def delete_item(self, *, item: str, partition_key: str) -> None: ...
+    async def delete_all_items_by_partition_key(
+        self,
+        partition_key: str,
+    ) -> None: ...
 
 
 class Database(Protocol):
@@ -60,29 +71,35 @@ async def cleanup_database(
     apply: bool,
 ) -> dict[str, int]:
     counts: dict[str, int] = {}
-    planned: list[tuple[Container, str, str]] = []
+    planned: list[tuple[Container, str]] = []
     for target in DERIVED_CLEANUP_TARGETS:
         container = database.get_container_client(target.container)
-        rows = [
+        count_rows = [
             row
-            async for row in container.query_items(query=target.query)
+            async for row in container.query_items(query=target.count_query)
         ]
-        counts[target.container] = len(rows)
-        for row in rows:
-            partition_key = row.get(target.partition_key_field)
-            document_id = row.get("id")
-            if not document_id or partition_key is None:
+        if len(count_rows) != 1 or not isinstance(count_rows[0], int):
+            raise RuntimeError(
+                f"{target.container} count query returned an invalid shape; "
+                "refusing cleanup"
+            )
+        counts[target.container] = count_rows[0]
+        partition_keys = [
+            value
+            async for value in container.query_items(
+                query=target.partition_query
+            )
+        ]
+        for partition_key in partition_keys:
+            if partition_key is None:
                 raise RuntimeError(
-                    f"{target.container} row lacks id or "
+                    f"{target.container} row lacks "
                     f"{target.partition_key_field}; refusing partial cleanup"
                 )
-            planned.append(
-                (container, str(document_id), str(partition_key))
-            )
+            planned.append((container, str(partition_key)))
     if apply:
-        for container, document_id, partition_key in planned:
-            await container.delete_item(
-                item=document_id,
+        for container, partition_key in planned:
+            await container.delete_all_items_by_partition_key(
                 partition_key=partition_key,
             )
     return counts
