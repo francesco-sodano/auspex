@@ -318,13 +318,10 @@ async def step_extract_channel_b(ctx: PipelineContext, manifest: RunManifest) ->
     )
     all_docs = await fetch_all(ctx.repos.document_sink)
     documents_by_id = {d.id: d for d in all_docs}
-    count = 0
-    failures = 0
-    for sec in ctx.universe.securities:
-        for doc_id in ctx.new_document_ids_by_security.get(sec.id, []):
-            doc = documents_by_id.get(doc_id)
-            if doc is None or doc.form_type is None:
-                continue
+    semaphore = asyncio.Semaphore(max(settings.extraction_concurrency, 1))
+
+    async def extract_one(sec, doc):
+        async with semaphore:
             cache_key = channel_b_cache_key(
                 security_id=sec.id,
                 content_hash=doc.content_hash,
@@ -332,14 +329,14 @@ async def step_extract_channel_b(ctx: PipelineContext, manifest: RunManifest) ->
                 prompt_version=extractor.prompt_version,
             )
             if await ctx.repos.channel_b_sink.find_by_cache_key(cache_key):
-                continue
+                return False, None
             raw_text = await read_blob_text(ctx.repos.blob_sink, doc.blob_path)
             if doc.form_type in WHOLE_DOCUMENT_FORMS:
                 sections = [_whole_document_section(raw_text)]
             else:
                 sections = target_sections(doc.form_type, raw_text)
             if not sections:
-                continue
+                return False, None
 
             prior_sections = None
             prior_doc = _find_prior_comparable_document(
@@ -362,21 +359,37 @@ async def step_extract_channel_b(ctx: PipelineContext, manifest: RunManifest) ->
                     sections=sections,
                     prior_sections=prior_sections,
                 )
-                count += 1
+                return True, None
             except Exception as exc:  # noqa: BLE001 - one malformed model response must not abort the universe
-                failures += 1
                 # Deliberately *not* ctx.degraded_securities: Channel B feeds
                 # narratives, digests and plain summaries, never one of the six
                 # legs. Marking the security degraded here excluded it from
                 # scoring entirely — the user lost their score because the
                 # explanation failed, which inverts the dependency.
-                ctx.explanation_degraded_securities.add(sec.id)
                 logger.error(
                     "Channel B extraction failed for %s document %s: %s",
                     sec.ticker,
                     doc.id,
                     exc,
                 )
+                return False, sec.id
+
+    work = [
+        (sec, doc)
+        for sec in ctx.universe.securities
+        for doc_id in ctx.new_document_ids_by_security.get(sec.id, [])
+        if (doc := documents_by_id.get(doc_id)) is not None
+        and doc.form_type is not None
+    ]
+    results = await asyncio.gather(
+        *(extract_one(sec, doc) for sec, doc in work)
+    )
+    count = sum(1 for extracted, _failed in results if extracted)
+    failed_security_ids = {
+        failed for _extracted, failed in results if failed is not None
+    }
+    ctx.explanation_degraded_securities.update(failed_security_ids)
+    failures = sum(1 for _extracted, failed in results if failed is not None)
     complete_step(
         manifest,
         "EXTRACT_CHANNEL_B",

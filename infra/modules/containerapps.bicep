@@ -92,6 +92,10 @@ var commonEnvironment = [
     value: '30000'
   }
   {
+    name: 'AUSPEX_EXTRACTION_CONCURRENCY'
+    value: '8'
+  }
+  {
     name: 'AUSPEX_ENTRA_AUDIENCE'
     value: authClientId
   }

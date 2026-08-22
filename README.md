@@ -140,9 +140,10 @@ fields and quarantine metadata can change.
 `derived-cleanup` clears only state the engine deterministically rebuilds —
 digests, narratives, scores, leg changes, portfolio projections, performance
 metrics, run manifests, and scoring config versions (never repair manifests).
-It is read-only without `--apply`, enumerates before it deletes, and aborts the
-whole pass if any row is missing its id or partition key rather than leaving the
-database half-cleaned. Raw documents, extractions, market data, fundamentals and
+It is read-only without `--apply`, validates every target id and partition
+before it deletes, and then uses atomic partition-local batches of at most 100
+deletes. A missing id or partition key aborts before the first batch; an Azure
+interruption is safely resumable. Raw documents, extractions, market data, fundamentals and
 watermarks are kept because a replay reads them; users, settings, onboarding,
 conversations, audit records and the external ledger are kept because they are
 not derived; and recommendations, dispositions and private performance
@@ -461,8 +462,11 @@ finally {
 }
 ```
 
-The bootstrap is idempotent and resumable. At a 200K TPM extraction quota it
-normally takes several hours.
+The bootstrap is idempotent and resumable. Channel B runs with bounded
+`AUSPEX_EXTRACTION_CONCURRENCY` (8 in the Azure deployment) behind the shared
+token bucket, so concurrency fills the available model quota without exceeding
+it. At a 200K TPM extraction quota the complete bootstrap still normally takes
+several hours.
 
 ### Reusing existing resources
 

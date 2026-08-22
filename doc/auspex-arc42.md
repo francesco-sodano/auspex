@@ -1742,6 +1742,13 @@ prose digest, key quotes and a comparative diff against the prior comparable
 filing; every list element missing a required key is dropped and every
 out-of-enum shift is coerced to `UNCHANGED`.
 
+`step_extract_channel_b` runs up to
+`AUSPEX_EXTRACTION_CONCURRENCY` documents concurrently (8 in the deployed
+Container Apps environment). All calls share the same token-based
+`AzureOpenAIClient` bucket, so concurrency fills but cannot exceed the
+configured TPM budget. Cache probes remain partition-local before source blobs
+are read, and an interrupted refresh resumes from the completed v2 digests.
+
 `_verify_source_grounding` then checks every quotation against the exact section
 text the model was given. `_source_contains` collapses runs of whitespace on
 both sides and requires the excerpt to be a substring of the source; anything

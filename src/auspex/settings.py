@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     # answer calls must be paced against it rather than the mini deployment's
     # larger extraction budget.
     aoai_narrative_tokens_per_minute: float = 30_000.0
+    extraction_concurrency: int = 8
 
     # --- Entra External ID (federated auth, arc42 F-16) --------------------------------
     #
