@@ -463,7 +463,7 @@ finally {
 ```
 
 The bootstrap is idempotent and resumable. Channel B runs with bounded
-`AUSPEX_EXTRACTION_CONCURRENCY` (8 in the Azure deployment) behind the shared
+`AUSPEX_EXTRACTION_CONCURRENCY` (16 in the Azure deployment) behind the shared
 token bucket, so concurrency fills the available model quota without exceeding
 it. The deployed 450K TPM extraction quota is passed from the model-capacity
 parameter into every workload so the client-side limiter always matches the

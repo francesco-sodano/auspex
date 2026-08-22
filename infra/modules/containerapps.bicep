@@ -95,7 +95,7 @@ var commonEnvironment = [
   }
   {
     name: 'AUSPEX_EXTRACTION_CONCURRENCY'
-    value: '8'
+    value: '16'
   }
   {
     name: 'AUSPEX_ENTRA_AUDIENCE'

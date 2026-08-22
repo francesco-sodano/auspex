@@ -1743,7 +1743,7 @@ filing; every list element missing a required key is dropped and every
 out-of-enum shift is coerced to `UNCHANGED`.
 
 `step_extract_channel_b` runs up to
-`AUSPEX_EXTRACTION_CONCURRENCY` documents concurrently (8 in the deployed
+`AUSPEX_EXTRACTION_CONCURRENCY` documents concurrently (16 in the deployed
 Container Apps environment). All calls share the same token-based
 `AzureOpenAIClient` bucket, so concurrency fills but cannot exceed the
 configured TPM budget. Cache probes remain partition-local before source blobs
