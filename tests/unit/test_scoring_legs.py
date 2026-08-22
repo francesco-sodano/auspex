@@ -31,8 +31,16 @@ from auspex.scoring.legs import (
 
 
 class TestThesisLinkage:
-    def test_zero_when_no_claims(self):
-        assert thesis_linkage([]) == Decimal(0)
+    def test_none_when_no_claims(self):
+        """No evidence is not a measurement of zero linkage.
+
+        Returning ``Decimal(0)`` made "this issuer published nothing we could
+        link to a theme" indistinguishable from "published material that links
+        to no theme", and let the leg count towards coverage on a security that
+        had evidenced nothing at all.
+        """
+
+        assert thesis_linkage([]) is None
 
     def test_sums_and_clips_at_one(self):
         events = [
@@ -41,6 +49,12 @@ class TestThesisLinkage:
         result = thesis_linkage(events)
         assert result == Decimal(1)  # clipped, since 5 * 1.0 * 1.0 = 5 > 1
 
+    def test_zero_strength_evidence_is_still_evidence(self):
+        events = [
+            ThemeClaimEvent(theme_strength_value=Decimal("0"), document_authority=Decimal("1.0"), age_days=0)
+        ]
+        assert thesis_linkage(events) == Decimal(0)
+
     def test_recency_decay_reduces_older_claims(self):
         recent = thesis_linkage(
             [ThemeClaimEvent(theme_strength_value=Decimal("0.6"), document_authority=Decimal("1.0"), age_days=0)]
@@ -48,12 +62,13 @@ class TestThesisLinkage:
         old = thesis_linkage(
             [ThemeClaimEvent(theme_strength_value=Decimal("0.6"), document_authority=Decimal("1.0"), age_days=180)]
         )
+        assert recent is not None and old is not None
         assert recent > old
 
 
 class TestAttentionAcceleration:
-    def test_zero_when_no_events(self):
-        assert attention_acceleration([]) == Decimal(0)
+    def test_none_when_no_events(self):
+        assert attention_acceleration([]) is None
 
     def test_more_recent_activity_is_positive(self):
         events = [
@@ -61,6 +76,7 @@ class TestAttentionAcceleration:
             for d in range(10)
         ]
         result = attention_acceleration(events)
+        assert result is not None
         assert result > 0
 
     def test_clipped_at_plus_1_5(self):
@@ -70,8 +86,25 @@ class TestAttentionAcceleration:
         ]
         assert attention_acceleration(events) == Decimal("1.5")
 
-    def test_no_recent_no_prior_activity_gives_zero(self):
+    def test_none_when_nothing_falls_in_the_observation_window(self):
+        """An event 90 days back says nothing about the last 60 days."""
+
         events = [AttentionEvent(materiality_weight=Decimal("1.0"), document_authority=Decimal("1.0"), days_ago=90)]
+        assert attention_acceleration(events) is None
+
+    def test_prior_window_only_is_a_real_deceleration(self):
+        """Evidence exists, it simply all sits in the earlier window."""
+
+        events = [AttentionEvent(materiality_weight=Decimal("1.0"), document_authority=Decimal("1.0"), days_ago=45)]
+        result = attention_acceleration(events)
+        assert result is not None
+        assert result < 0
+
+    def test_equal_activity_in_both_windows_is_flat_not_missing(self):
+        events = [
+            AttentionEvent(materiality_weight=Decimal("1.0"), document_authority=Decimal("1.0"), days_ago=days_ago)
+            for days_ago in (5, 40)
+        ]
         assert attention_acceleration(events) == Decimal(0)
 
 

@@ -34,6 +34,19 @@ class TestArgParser:
         ns = parser.parse_args(["performance"])
         assert ns.command == "performance"
 
+    def test_derived_cleanup_is_dry_run_by_default(self):
+        parser = _build_arg_parser()
+        ns = parser.parse_args(["derived-cleanup"])
+
+        assert ns.command == "derived-cleanup"
+        assert ns.apply is False
+
+    def test_derived_cleanup_requires_explicit_apply_flag(self):
+        parser = _build_arg_parser()
+        ns = parser.parse_args(["derived-cleanup", "--apply"])
+
+        assert ns.apply is True
+
     def test_bootstrap_command_parses_with_defaults(self):
         parser = _build_arg_parser()
         ns = parser.parse_args(["bootstrap"])

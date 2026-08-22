@@ -31,7 +31,18 @@ def thesis_linkage(events: list[ThemeClaimEvent], half_life_days: Decimal = Deci
 
     Events must already be pre-filtered to trailing 180 days and to approved
     theme claims by the caller (arc42 §5.5 leg 1).
+
+    Returns ``None`` — not ``0`` — when there is no evidence at all. An empty
+    sum is not a measurement: "this issuer published nothing we could link to a
+    theme" and "this issuer published material that links to no theme" would
+    otherwise be the same number, and the composite would treat an unevidenced
+    security as if it had been evidenced at the bottom of its cohort. ``None``
+    routes the leg down the ``raw_value_missing`` path, where it contributes a
+    neutral z and is correctly excluded from coverage.
     """
+
+    if not events:
+        return None
 
     total = sum(
         (e.theme_strength_value * e.document_authority * exponential_decay(e.age_days, half_life_days) for e in events),
@@ -52,15 +63,42 @@ class AttentionEvent:
     days_ago: int  # 0 = today
 
 
+#: Attention acceleration compares the trailing 30 days against the 30 before
+#: them; anything outside that 60-day window carries no information about
+#: whether attention is accelerating.
+ATTENTION_RECENT_WINDOW_DAYS = 30
+ATTENTION_OBSERVATION_WINDOW_DAYS = 60
+
+
 def attention_acceleration(events: list[AttentionEvent]) -> Decimal | None:
-    """ln((weighted events last 30d + 1) / (weighted events prior 30d + 1)), clipped +-1.5."""
+    """ln((weighted events last 30d + 1) / (weighted events prior 30d + 1)), clipped +-1.5.
+
+    Returns ``None`` when nothing at all was published inside the 60-day
+    observation window. ``ln(1/1) == 0`` is what an *unaccelerating* stream of
+    disclosure looks like; it is not what silence looks like, and reporting the
+    two identically hid missing evidence behind a plausible neutral reading.
+    Events only in the prior window still count as evidence — that is a genuine
+    deceleration, and it is reported as one.
+    """
+
+    observed = [e for e in events if 0 <= e.days_ago < ATTENTION_OBSERVATION_WINDOW_DAYS]
+    if not observed:
+        return None
 
     recent = sum(
-        (e.materiality_weight * e.document_authority for e in events if 0 <= e.days_ago < 30),
+        (
+            e.materiality_weight * e.document_authority
+            for e in observed
+            if e.days_ago < ATTENTION_RECENT_WINDOW_DAYS
+        ),
         Decimal(0),
     )
     prior = sum(
-        (e.materiality_weight * e.document_authority for e in events if 30 <= e.days_ago < 60),
+        (
+            e.materiality_weight * e.document_authority
+            for e in observed
+            if e.days_ago >= ATTENTION_RECENT_WINDOW_DAYS
+        ),
         Decimal(0),
     )
     import math

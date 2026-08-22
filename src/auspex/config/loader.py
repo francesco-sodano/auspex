@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
 from pathlib import Path
 
@@ -27,20 +27,6 @@ from auspex.settings import get_settings
 def _load_yaml(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f)
-
-
-def _to_decimal_tree(node):
-    """Recursively convert YAML string leaves that look numeric-config into Decimal.
-
-    We keep everything as strings on disk (git-diff friendly, no float leakage)
-    and only decimalise on load, immediately before use in arithmetic.
-    """
-
-    if isinstance(node, dict):
-        return {k: _to_decimal_tree(v) for k, v in node.items()}
-    if isinstance(node, list):
-        return [_to_decimal_tree(v) for v in node]
-    return node
 
 
 @dataclass(frozen=True)
@@ -100,11 +86,73 @@ def load_cohorts(config_dir: Path | None = None) -> dict:
     return _load_yaml(config_dir / "cohorts.yaml")
 
 
+class ConfigValidationError(ValueError):
+    """A committed config file violates an invariant the engine depends on."""
+
+
+#: The one leg a foreign private issuer structurally cannot evidence: FPIs do
+#: not file Form 4 (arc42 §5.2), so ``smart_money`` has no source.
+FPI_EXCLUDED_LEG = "smart_money"
+
+
+def _validate_fpi_redistribution(weights: dict) -> None:
+    """FPI weights must be a proportional redistribution of the domestic weights.
+
+    Dropping ``smart_money`` for an FPI leaves 0.80 of the domestic weight mass;
+    the documented rule is that each surviving leg keeps its *relative* share,
+    i.e. ``fpi[leg] == domestic[leg] / (1 - domestic[smart_money])``. Enforcing
+    it here rather than in a comment is what stops an FPI from being scored on a
+    quietly different model to its domestic peers while both rows still claim
+    the same ``config_version_id``.
+
+    The committed values are rounded to 4 dp for determinism, so the expected
+    value is compared at the precision each configured value is actually written
+    to — exact equality at that precision, not a tolerance band.
+    """
+
+    domestic = weights.get("domestic")
+    fpi = weights.get("fpi")
+    if not isinstance(domestic, dict) or not isinstance(fpi, dict):
+        raise ConfigValidationError("weights.yaml must define both `domestic` and `fpi` leg weights")
+
+    if FPI_EXCLUDED_LEG in fpi:
+        raise ConfigValidationError(
+            f"weights.yaml: `fpi` must not carry a `{FPI_EXCLUDED_LEG}` weight — "
+            "foreign private issuers do not file Form 4"
+        )
+
+    expected_legs = {leg for leg in domestic if leg != FPI_EXCLUDED_LEG}
+    if set(fpi) != expected_legs:
+        missing = sorted(expected_legs - set(fpi))
+        extra = sorted(set(fpi) - expected_legs)
+        raise ConfigValidationError(
+            f"weights.yaml: `fpi` legs do not mirror `domestic` (missing={missing}, unexpected={extra})"
+        )
+
+    excluded_weight = Decimal(domestic.get(FPI_EXCLUDED_LEG, "0"))
+    surviving = Decimal(1) - excluded_weight
+    if surviving <= 0:
+        raise ConfigValidationError(
+            f"weights.yaml: `domestic.{FPI_EXCLUDED_LEG}` leaves no weight to redistribute"
+        )
+
+    for leg in sorted(expected_legs):
+        configured = Decimal(fpi[leg])
+        expected = (Decimal(domestic[leg]) / surviving).quantize(configured, rounding=ROUND_HALF_UP)
+        if configured != expected:
+            raise ConfigValidationError(
+                f"weights.yaml: `fpi.{leg}` is {configured}, but a proportional redistribution of "
+                f"`domestic.{leg}` after removing `{FPI_EXCLUDED_LEG}` is {expected}"
+            )
+
+
 @lru_cache
 def load_weights(config_dir: Path | None = None) -> dict:
     settings = get_settings()
     config_dir = config_dir or settings.config_dir
-    return _load_yaml(config_dir / "weights.yaml")
+    weights = _load_yaml(config_dir / "weights.yaml")
+    _validate_fpi_redistribution(weights)
+    return weights
 
 
 @lru_cache

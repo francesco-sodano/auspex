@@ -50,7 +50,7 @@ from auspex.performance.matching import (
     matched_leg_ic,
     matched_pairs,
 )
-from auspex.performance.multiple_testing import TestResult, benjamini_hochberg, holm_bonferroni
+from auspex.performance.multiple_testing import TestResult, benjamini_hochberg
 from auspex.performance.shadow import (
     CHAMPION,
     CORRECTED_FIXED,
@@ -110,7 +110,6 @@ __all__ = [
     "newey_west_interval",
     "TestResult",
     "benjamini_hochberg",
-    "holm_bonferroni",
     "PairedComparison",
     "equal_weight_return",
     "momentum_ic",

@@ -68,7 +68,22 @@ class TestStepPartition:
         assert not set(SHARED_STEPS) & set(PER_USER_STEPS)
 
     def test_only_portfolio_dependent_steps_are_per_user(self):
-        assert set(PER_USER_STEPS) == {"RUN_POLICY", "ASSERT", "PROJECT_PORTFOLIO"}
+        assert set(PER_USER_STEPS) == {"PROJECT_PORTFOLIO", "RUN_POLICY", "ASSERT"}
+
+    def test_projection_is_named_before_the_cascade_that_consumes_it(self):
+        """The projection is an input to every gate, not an output of them.
+
+        The policy step computes and caches the projection through
+        ``_get_portfolio_projection``; naming ``PROJECT_PORTFOLIO`` afterwards
+        made the manifest read as though the book were valued after the trades
+        had been decided. The effects were always in this order — now the step
+        names are too, and ``PROJECT_PORTFOLIO`` populates the cache the policy
+        cascade then reuses.
+        """
+
+        assert PER_USER_STEPS == ("PROJECT_PORTFOLIO", "RUN_POLICY", "ASSERT")
+        assert PIPELINE_STEPS.index("PROJECT_PORTFOLIO") < PIPELINE_STEPS.index("RUN_POLICY")
+        assert PIPELINE_STEPS.index("RUN_POLICY") < PIPELINE_STEPS.index("ASSERT")
 
     def test_phases_preserve_the_documented_step_order(self):
         assert list(SHARED_PRE_STEPS) + list(PER_USER_STEPS) + list(SHARED_POST_STEPS) == PIPELINE_STEPS
@@ -163,7 +178,7 @@ class TestFanOut:
 
         for step_name in PIPELINE_STEPS:
             monkeypatch.setitem(
-                __import__("auspex.pipeline.fanout", fromlist=["STEP_FUNCTIONS"]).STEP_FUNCTIONS,
+                __import__("auspex.pipeline.runner", fromlist=["STEP_FUNCTIONS"]).STEP_FUNCTIONS,
                 step_name,
                 record(step_name),
             )
@@ -185,7 +200,7 @@ class TestFanOut:
         self,
         monkeypatch,
     ):
-        module = __import__("auspex.pipeline.fanout", fromlist=["STEP_FUNCTIONS"])
+        module = __import__("auspex.pipeline.runner", fromlist=["STEP_FUNCTIONS"])
         held: list[str] = []
         released: list[str] = []
 
@@ -221,7 +236,7 @@ class TestFanOut:
     async def test_closing_steps_observe_the_fan_outs_results(self, monkeypatch):
         """`VALIDATE`/`END_RUN` must see a user's policy outcome, not an empty one."""
 
-        module = __import__("auspex.pipeline.fanout", fromlist=["STEP_FUNCTIONS"])
+        module = __import__("auspex.pipeline.runner", fromlist=["STEP_FUNCTIONS"])
         observed: dict[str, object] = {}
 
         async def noop(ctx, manifest):
@@ -246,7 +261,7 @@ class TestFanOut:
 
     @pytest.mark.asyncio
     async def test_closing_steps_fall_back_to_a_surviving_user(self, monkeypatch):
-        module = __import__("auspex.pipeline.fanout", fromlist=["STEP_FUNCTIONS"])
+        module = __import__("auspex.pipeline.runner", fromlist=["STEP_FUNCTIONS"])
         observed: dict[str, object] = {}
 
         async def noop(ctx, manifest):
@@ -281,7 +296,7 @@ class TestFanOut:
                 raise RuntimeError("bob's ledger is unreadable")
             served.append(ctx.user_id)
 
-        module = __import__("auspex.pipeline.fanout", fromlist=["STEP_FUNCTIONS"])
+        module = __import__("auspex.pipeline.runner", fromlist=["STEP_FUNCTIONS"])
         for step_name in PIPELINE_STEPS:
             monkeypatch.setitem(module.STEP_FUNCTIONS, step_name, shared_noop)
         monkeypatch.setitem(module.STEP_FUNCTIONS, "RUN_POLICY", policy)
@@ -304,7 +319,7 @@ class TestFanOut:
 
     @pytest.mark.asyncio
     async def test_shared_failure_aborts_before_any_user_work(self, monkeypatch):
-        module = __import__("auspex.pipeline.fanout", fromlist=["STEP_FUNCTIONS"])
+        module = __import__("auspex.pipeline.runner", fromlist=["STEP_FUNCTIONS"])
         touched: list[str] = []
 
         async def ok(ctx, manifest):
@@ -329,7 +344,7 @@ class TestFanOut:
 
     @pytest.mark.asyncio
     async def test_user_stage_failure_is_reported_not_raised(self, monkeypatch):
-        module = __import__("auspex.pipeline.fanout", fromlist=["STEP_FUNCTIONS"])
+        module = __import__("auspex.pipeline.runner", fromlist=["STEP_FUNCTIONS"])
 
         async def boom(ctx, manifest):
             raise RuntimeError("no settings")

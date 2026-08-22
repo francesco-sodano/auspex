@@ -568,10 +568,11 @@ class TestDeletionRoutes:
             "auspex.api.repos.get_conversation_repo", lambda: InMemoryAppUserRepository()
         )
 
-        assert client.get("/api/account/deletion-status").json()["status"] == "NOT_REQUESTED"
+        assert client.get("/api/account/deletion").json()["status"] == "NOT_REQUESTED"
 
         response = client.post(
-            "/api/account/deletion-request", json={"confirmation": CONFIRMATION_PHRASE}
+            "/api/account/deletion",
+            json={"confirmation": CONFIRMATION_PHRASE},
         )
 
         assert response.status_code == 202
@@ -581,14 +582,17 @@ class TestDeletionRoutes:
         assert body["remaining_items"] == 0
         assert body["error"] is None
 
-    def test_alias_still_enforces_the_typed_phrase(self, monkeypatch):
+    def test_canonical_route_enforces_the_typed_phrase(self, monkeypatch):
         user = make_app_user(USER_ID, status=UserStatus.ACTIVE)
         client, _ = make_client(user)
         monkeypatch.setattr(
             "auspex.api.repos.get_conversation_repo", lambda: InMemoryAppUserRepository()
         )
 
-        response = client.post("/api/account/deletion-request", json={"confirmation": "oops"})
+        response = client.post(
+            "/api/account/deletion",
+            json={"confirmation": "oops"},
+        )
 
         assert response.status_code == 422
 

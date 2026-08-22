@@ -9,6 +9,13 @@ from pydantic import Field
 from auspex.models.common import AuspexModel
 from auspex.models.enums import RunStatus
 
+#: The 20 nightly steps, in execution order.
+#:
+#: The per-user block is ``PROJECT_PORTFOLIO -> RUN_POLICY -> ASSERT``: the
+#: projection is a *precondition* of the policy cascade, not a consequence of
+#: it, so the step that produces and persists it runs first and the policy step
+#: consumes the cached result. Naming the steps in the order their effects
+#: actually occur is what makes the manifest readable as a record of the night.
 PIPELINE_STEPS: list[str] = [
     "START_RUN",
     "COLLECT_PRICES",
@@ -24,9 +31,9 @@ PIPELINE_STEPS: list[str] = [
     "NORMALISE",
     "DIFF",
     "WRITE_SNAPSHOT",
+    "PROJECT_PORTFOLIO",
     "RUN_POLICY",
     "ASSERT",
-    "PROJECT_PORTFOLIO",
     "NARRATE",
     "VALIDATE",
     "END_RUN",

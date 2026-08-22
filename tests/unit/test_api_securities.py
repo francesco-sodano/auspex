@@ -194,7 +194,10 @@ class TestGetSecurity:
             document_id="doc-1",
             content_hash="sha256:abc",
             model_version="test",
+            prompt_version="digest-b-v2",
             headline="Q2 beat",
+            plain_summary="Strong quarter.",
+            plain_summary_evidence=["Strong quarter."],
             digest="Strong quarter.",
         )
         client = _make_client(
@@ -245,8 +248,7 @@ class TestGetSecurity:
         assert body["security"]["filer_profile"] == "DOMESTIC"
         assert body["security"]["action"] == "BUY"
         assert body["narrative"] == "Strong quarter driven by cloud demand."
-        assert body["business_summary"].startswith("Alpha Corp is tracked by Auspex")
-        assert "Strong quarter driven by cloud demand." in body["business_summary"]
+        assert body["business_summary"] == "Latest 10-K filing: Strong quarter."
 
         leg = body["legs"]["thesis_linkage"]
         assert set(leg) == {
@@ -335,7 +337,7 @@ class TestGetSecurity:
         history = response.json()["history"]
         assert history == [{"as_of_date": "2026-08-08", "composite": "1.5", "percentile": 80}]
 
-    def test_form4_digest_is_never_used_as_the_company_recap(self):
+    def test_form4_is_included_in_the_latest_research_recap(self):
         score = _score("sec-a", date(2026, 8, 8))
         form4 = Document(
             id="form4-1",
@@ -355,7 +357,12 @@ class TestGetSecurity:
             document_id="form4-1",
             content_hash="sha256:form4",
             model_version="test",
+            prompt_version="digest-b-v2",
             headline="Insider sale",
+            plain_summary="Open-market sale of 10,000 shares by a company officer.",
+            plain_summary_evidence=[
+                "Open-market sale of 10,000 shares by a company officer."
+            ],
             digest="Open-market sale of 10,000 shares by a company officer.",
         )
         client = _make_client(
@@ -370,8 +377,207 @@ class TestGetSecurity:
 
         assert response.status_code == 200
         recap = response.json()["business_summary"]
-        assert recap.startswith("Alpha Corp is tracked by Auspex")
-        assert "open-market sale" not in recap.lower()
+        assert recap.startswith("Latest insider filing")
+        assert "open-market sale" in recap.lower()
+
+    def test_plain_summary_is_preferred_for_the_company_recap_and_document(self):
+        score = _score("sec-a", date(2026, 8, 8))
+        annual = _document()
+        digest = ChannelBDigest(
+            id="digest-plain",
+            security_id="sec-a",
+            document_id=annual.id,
+            content_hash=annual.content_hash,
+            model_version="test",
+            prompt_version="digest-b-v2",
+            headline="Annual update",
+            plain_summary=(
+                "Alpha's latest annual filing says demand grew while management "
+                "continued investing in capacity."
+            ),
+            plain_summary_evidence=["Demand grew."],
+            digest=(
+                "Detailed research language that should remain available for "
+                "retrieval but should not lead the beginner-facing page."
+            ),
+        )
+        client = _make_client(
+            {
+                get_score_repo: lambda: FakeCosmosRepository([score]),
+                get_document_repo: lambda: FakeCosmosRepository([annual]),
+                get_digest_repo: lambda: FakeCosmosRepository([digest]),
+            }
+        )
+
+        body = client.get("/api/securities/sec-a").json()
+
+        assert body["business_summary"] == (
+            f"Latest 10-K filing: {digest.plain_summary}"
+        )
+        assert body["documents"][0]["digest"] == digest.plain_summary
+
+    def test_v2_digest_is_preferred_deterministically_for_the_same_document(self):
+        score = _score("sec-a", date(2026, 8, 8))
+        annual = _document()
+        old = ChannelBDigest(
+            id="z-old",
+            security_id="sec-a",
+            document_id=annual.id,
+            content_hash=annual.content_hash,
+            model_version="test",
+            prompt_version="digest-b-v1",
+            headline="Old",
+            digest="Older technical digest.",
+        )
+        new = ChannelBDigest(
+            id="a-new",
+            security_id="sec-a",
+            document_id=annual.id,
+            content_hash=annual.content_hash,
+            model_version="test",
+            prompt_version="digest-b-v2",
+            headline="New",
+            plain_summary="A short but useful plain summary.",
+            plain_summary_evidence=["Useful source excerpt."],
+            digest="New detailed digest.",
+        )
+        client = _make_client(
+            {
+                get_score_repo: lambda: FakeCosmosRepository([score]),
+                get_document_repo: lambda: FakeCosmosRepository([annual]),
+                get_digest_repo: lambda: FakeCosmosRepository([new, old]),
+            }
+        )
+
+        body = client.get("/api/securities/sec-a").json()
+        documents = client.get("/api/securities/sec-a/documents").json()
+
+        assert "A short but useful plain summary." in body["business_summary"]
+        assert body["documents"][0]["headline"] == "New"
+        assert documents[0]["headline"] == "New"
+
+    def test_plain_summary_is_bounded_by_the_model(self):
+        digest = ChannelBDigest(
+            id="digest-bounded",
+            security_id="sec-a",
+            document_id="doc-1",
+            content_hash="hash",
+            model_version="test",
+            plain_summary="x" * 600,
+            headline="Update",
+            digest="Detailed evidence.",
+        )
+
+        assert len(digest.plain_summary or "") == 420
+        assert digest.plain_summary.endswith("...")
+
+    def test_company_recap_combines_latest_filing_annual_form4_and_news(self):
+        score = _score("sec-a", date(2026, 8, 8))
+        annual = _document("annual")
+        annual.filed_date = date(2026, 2, 1)
+        annual.knowledge_date = date(2026, 2, 1)
+        quarterly = Document(
+            id="quarterly",
+            security_id="sec-a",
+            source="edgar",
+            source_record_id="quarterly",
+            document_type=DocumentType.FORM_10Q,
+            form_type="10-Q",
+            content_hash="q",
+            filed_date=date(2026, 8, 1),
+            retrieved_at=datetime.now(UTC),
+            knowledge_date=date(2026, 8, 1),
+        )
+        form4 = Document(
+            id="form4",
+            security_id="sec-a",
+            source="edgar",
+            source_record_id="form4",
+            document_type=DocumentType.FORM_4,
+            form_type="4",
+            content_hash="f4",
+            filed_date=date(2026, 8, 5),
+            retrieved_at=datetime.now(UTC),
+            knowledge_date=date(2026, 8, 5),
+        )
+        news = Document(
+            id="news",
+            security_id="sec-a",
+            source="news",
+            source_record_id="news",
+            document_type=DocumentType.NEWS,
+            title="AAA launches a new product",
+            content_hash="news",
+            published_at=datetime(2026, 8, 6, tzinfo=UTC),
+            retrieved_at=datetime.now(UTC),
+            knowledge_date=date(2026, 8, 6),
+        )
+        digests = [
+            ChannelBDigest(
+                id="annual-digest",
+                security_id="sec-a",
+                document_id="annual",
+                content_hash="sha256:abc",
+                model_version="test",
+                prompt_version="digest-b-v2",
+                headline="Annual filing",
+                plain_summary="The annual filing describes steady long-term demand.",
+                plain_summary_evidence=["Steady long-term demand."],
+                digest="Annual detail.",
+            ),
+            ChannelBDigest(
+                id="quarterly-digest",
+                security_id="sec-a",
+                document_id="quarterly",
+                content_hash="q",
+                model_version="test",
+                prompt_version="digest-b-v2",
+                headline="Quarterly filing",
+                plain_summary="The latest quarter reports stronger customer demand.",
+                plain_summary_evidence=["Stronger customer demand."],
+                digest="Quarterly detail.",
+            ),
+            ChannelBDigest(
+                id="form4-digest",
+                security_id="sec-a",
+                document_id="form4",
+                content_hash="f4",
+                model_version="test",
+                prompt_version="digest-b-v2",
+                headline="Insider filing",
+                plain_summary="A company director reported an open-market purchase.",
+                plain_summary_evidence=["Open-market purchase."],
+                digest="Insider detail.",
+            ),
+            ChannelBDigest(
+                id="news-digest",
+                security_id="sec-a",
+                document_id="news",
+                content_hash="news",
+                model_version="test",
+                prompt_version="digest-b-v2",
+                headline="Product launch",
+                plain_summary="The company announced a new product for enterprise customers.",
+                plain_summary_evidence=["New product for enterprise customers."],
+                digest="News detail.",
+            ),
+        ]
+        client = _make_client(
+            {
+                get_score_repo: lambda: FakeCosmosRepository([score]),
+                get_document_repo: lambda: FakeCosmosRepository(
+                    [news, form4, quarterly, annual]
+                ),
+                get_digest_repo: lambda: FakeCosmosRepository(digests),
+            }
+        )
+
+        recap = client.get("/api/securities/sec-a").json()["business_summary"]
+
+        assert "Latest 10-Q filing" in recap
+        assert "Latest annual filing" in recap
+        assert "Latest insider filing" in recap
+        assert "Latest news" in recap
 
     def test_no_recommendation_yields_a_null_recommendation_and_null_action(self):
         score_a = _score("sec-a", date(2026, 8, 8))
@@ -481,7 +687,7 @@ def test_smart_money_zero_variance_is_explained_as_neutral() -> None:
     assert details["smart_money"].score is None
     assert details["smart_money"].neutral is True
     assert details["smart_money"].status_explanation is not None
-    assert "Neutral, not missing" in details["smart_money"].status_explanation
+    assert "neutral rather than missing" in details["smart_money"].status_explanation
 
 
 def test_form4_without_url_gets_meaningful_text_and_sec_link() -> None:

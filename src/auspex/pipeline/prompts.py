@@ -28,10 +28,10 @@ from auspex.settings import get_settings
 # is explicit rather than derived from the version string.
 _PROMPT_FILES: dict[str, str] = {
     "extract-a-v1": "extract_channel_a_v1.md",
-    "digest-b-v1": "extract_channel_b_v1.md",
-    "narrative-v1": "narrative_v1.md",
+    "digest-b-v2": "extract_channel_b_v2.md",
+    "narrative-v2": "narrative_v2.md",
     "planner-v1": "planner_v1.md",
-    "answer-v1": "answer_v1.md",
+    "answer-v2": "answer_v2.md",
 }
 
 

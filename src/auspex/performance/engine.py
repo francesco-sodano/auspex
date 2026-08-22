@@ -28,7 +28,13 @@ from auspex.performance.hit_rate import (
 from auspex.performance.intervals import block_bootstrap_interval, newey_west_interval
 from auspex.performance.matching import aggregate_pair_correlations, matched_leg_ic
 from auspex.performance.multiple_testing import benjamini_hochberg
-from auspex.performance.spread import cost_adjusted_return, max_drawdown, top_minus_bottom, turnover
+from auspex.performance.spread import (
+    DEFAULT_QUANTILE,
+    cost_adjusted_return,
+    max_drawdown,
+    top_minus_bottom,
+    turnover,
+)
 from auspex.performance.stats import ZERO, mean, sample_std, seed_from_text
 
 HORIZONS = (21, 63, 126)
@@ -416,6 +422,7 @@ def compute_spread_metrics(
     cross_sections: list[DateCrossSection],
     *,
     cost_per_unit_turnover: Decimal | None = None,
+    quantile_fraction: Decimal = DEFAULT_QUANTILE,
 ) -> list[PerformanceMetric]:
     """Top-minus-bottom spread with robustness, turnover, cost and drawdown.
 
@@ -449,7 +456,11 @@ def compute_spread_metrics(
             returns = cs.returns_by_security(horizon)
             if not returns:
                 continue
-            result = top_minus_bottom(cs.percentile_by_security, returns)
+            result = top_minus_bottom(
+                cs.percentile_by_security,
+                returns,
+                quantile_fraction=quantile_fraction,
+            )
             if result is None:
                 continue
             spreads.append(result.spread)
@@ -511,6 +522,7 @@ def compute_spread_metrics(
                     ),
                     max_drawdown=max_drawdown(non_overlapping_spreads),
                     path_sampling="non_overlapping",
+                    quantile_fraction=quantile_fraction,
                 ),
                 metrics_version=DETAILED_METRICS_VERSION,
             )
@@ -522,6 +534,7 @@ def compute_benchmark_metrics(
     cross_sections: list[DateCrossSection],
     *,
     seed_text: str = DEFAULT_SEED_TEXT,
+    momentum_window_sessions: int = 63,
 ) -> list[PerformanceMetric]:
     """Equal-weight, random-ranking and momentum reference points.
 
@@ -596,7 +609,7 @@ def compute_benchmark_metrics(
             )
 
         momentum_series: dict[date, Decimal] = {}
-        window_used = 63
+        window_used = momentum_window_sessions
         for cs in ordered:
             if window_used not in cs.trailing_returns_usd_by_window:
                 continue
@@ -760,6 +773,8 @@ def compute_detailed_metrics(
     *,
     seed_text: str = DEFAULT_SEED_TEXT,
     cost_per_unit_turnover: Decimal | None = None,
+    momentum_window_sessions: int = 63,
+    spread_quantile: Decimal = DEFAULT_QUANTILE,
 ) -> list[PerformanceMetric]:
     """Every versioned statistic, in a stable order, for one measurement run."""
 
@@ -769,8 +784,16 @@ def compute_detailed_metrics(
         *compute_ic_distribution_metrics(cross_sections),
         *compute_ic_interval_metrics(cross_sections, seed_text=seed_text),
         *compute_leg_correlation_metrics_per_date(cross_sections),
-        *compute_spread_metrics(cross_sections, cost_per_unit_turnover=cost_per_unit_turnover),
-        *compute_benchmark_metrics(cross_sections, seed_text=seed_text),
+        *compute_spread_metrics(
+            cross_sections,
+            cost_per_unit_turnover=cost_per_unit_turnover,
+            quantile_fraction=spread_quantile,
+        ),
+        *compute_benchmark_metrics(
+            cross_sections,
+            seed_text=seed_text,
+            momentum_window_sessions=momentum_window_sessions,
+        ),
         *compute_coverage_bias_metrics(cross_sections),
         *compute_multiple_testing_metrics(cross_sections),
     ]

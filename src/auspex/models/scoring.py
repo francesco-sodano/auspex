@@ -51,7 +51,13 @@ class ScoreSnapshot(AuspexModel):
 
 
 class LegChange(AuspexModel):
-    """`leg_changes` container row — one per (security, date, leg)."""
+    """`leg_changes` container row — one per (security, date, leg).
+
+    ``own_evidence_effect`` and ``cohort_distribution_effect`` are an exact
+    decomposition of ``delta_z``: they sum to it, or both are ``null`` and
+    ``attribution_unavailable_reason`` says why. There is no partial state in
+    which one carries the whole move.
+    """
 
     id: str = Field(description="{security_id}:{as_of_date}:{leg}")
     security_id: str
@@ -61,10 +67,16 @@ class LegChange(AuspexModel):
     current_z: str | None = None
     delta_z: str | None = None
     own_evidence_effect: str | None = Field(
-        default=None, description="delta attributable to this security's own raw value moving"
+        default=None,
+        description="delta attributable to this security's own raw value moving, peers held at today's distribution",
     )
     cohort_distribution_effect: str | None = Field(
-        default=None, description="delta attributable to the cohort's mean/std shifting"
+        default=None,
+        description="delta attributable to the peer distribution moving, this security's raw value held at its prior",
+    )
+    attribution_unavailable_reason: str | None = Field(
+        default=None,
+        description="why the two effects are null (no prior leg value, or prior value not rankable today)",
     )
 
     @property

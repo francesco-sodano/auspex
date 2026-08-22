@@ -21,6 +21,7 @@ Route surface:
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from auspex.api.access import require_active_user
 from auspex.api.auth import get_current_user
@@ -44,14 +45,24 @@ from auspex.api.routes import (
     session,
 )
 from auspex.api.static import mount_spa
+from auspex.settings import get_settings
 
 
 def create_app() -> FastAPI:
+    settings = get_settings()
     app = FastAPI(
         title="Auspex API",
         version="4.2.0",
         description="Personal AI financial research assistant — backend API",
     )
+    if settings.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origins,
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type"],
+        )
 
     # Unauthenticated liveness-only probe (arc42 §7 Container Apps probes).
     app.include_router(healthz.router)
@@ -61,10 +72,8 @@ def create_app() -> FastAPI:
     # needs in order to *become* active (or to leave).
     lifecycle_router = APIRouter(prefix="/api", dependencies=[Depends(get_current_user)])
     lifecycle_router.include_router(session.router)
-    lifecycle_router.include_router(session.compat_router)
     lifecycle_router.include_router(onboarding.router)
     lifecycle_router.include_router(account_deletion.router)
-    lifecycle_router.include_router(account_deletion.compat_router)
     app.include_router(lifecycle_router)
 
     # The product surface: validated token *and* an ACTIVE application user.

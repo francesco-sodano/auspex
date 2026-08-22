@@ -160,18 +160,6 @@ async def set_initial_portfolio(
     return OnboardingStateOut.from_state(state, current)
 
 
-@router.post("/portfolio", response_model=OnboardingStateOut)
-async def set_initial_portfolio_compat(
-    request: InitialPortfolio,
-    current: CurrentUser = Depends(require_onboarding_user),
-    onboarding_repo=Depends(get_onboarding_repo),
-    settings_repo=Depends(get_user_settings_repo),
-) -> OnboardingStateOut:
-    """``POST /api/onboarding/portfolio`` — alias of :func:`set_initial_portfolio`."""
-
-    return await set_initial_portfolio(request, current, onboarding_repo, settings_repo)
-
-
 @router.post("/complete", response_model=OnboardingStateOut)
 async def complete_onboarding(
     current: CurrentUser = Depends(require_onboarding_user),

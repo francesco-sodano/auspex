@@ -10,7 +10,7 @@ from auspex.models.common import AuspexModel
 
 
 class PerformanceMetric(AuspexModel):
-    """`performance` container row, partitioned by `/metric_type`."""
+    """Shared metrics partition by type; private metrics partition by user."""
 
     id: str = Field(description="{metric_type}:{as_of_date}:{scope}")
     metric_type: str = Field(
@@ -36,4 +36,4 @@ class PerformanceMetric(AuspexModel):
 
     @property
     def partition_key(self) -> str:
-        return self.metric_type
+        return self.user_id or self.metric_type

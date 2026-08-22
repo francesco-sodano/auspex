@@ -2,9 +2,8 @@
 
 Six legs x three horizons is eighteen simultaneous tests before the first
 challenger is considered; at alpha = 0.05 roughly one spurious "significant"
-leg is expected by construction. Benjamini-Hochberg controls the false
-discovery rate across the family, and Holm-Bonferroni is published alongside as
-the conservative family-wise alternative.
+leg is expected by construction. Benjamini-Hochberg is the single published
+method and controls the false discovery rate across the family.
 """
 
 from __future__ import annotations
@@ -62,32 +61,3 @@ def benjamini_hochberg(p_values: dict[str, Decimal], alpha: Decimal = DEFAULT_AL
         )
         for index, (label, p_value) in enumerate(ordered, start=1)
     ]
-
-
-def holm_bonferroni(p_values: dict[str, Decimal], alpha: Decimal = DEFAULT_ALPHA) -> list[TestResult]:
-    """Holm-Bonferroni step-down family-wise error control."""
-
-    if not p_values:
-        return []
-    ordered = sorted(p_values.items(), key=lambda item: (item[1], item[0]))
-    total = len(ordered)
-
-    results: list[TestResult] = []
-    still_rejecting = True
-    running = Decimal(0)
-    for index, (label, p_value) in enumerate(ordered, start=1):
-        threshold = alpha / Decimal(total - index + 1)
-        if still_rejecting and p_value > threshold:
-            still_rejecting = False
-        adjusted = min(Decimal(1), max(running, p_value * Decimal(total - index + 1)))
-        running = adjusted
-        results.append(
-            TestResult(
-                label=label,
-                p_value=p_value,
-                q_value=adjusted,
-                rejected=still_rejecting,
-                rank=index,
-            )
-        )
-    return results

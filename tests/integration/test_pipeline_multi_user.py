@@ -32,6 +32,7 @@ from tests.integration.conftest import (
     seed_fx,
     seed_insider_form4,
     seed_prices,
+    seed_universe_prices,
 )
 
 ALICE = "user-alice"
@@ -78,6 +79,8 @@ class DispositionRepo:
 def seed_evidence(repos, universe):
     nvda = universe.by_ticker()["NVDA"]
     amd = universe.by_ticker()["AMD"]
+
+    seed_universe_prices(repos, universe, AS_OF)
 
     seed_fundamentals(repos, nvda.id, AS_OF)
     seed_channel_a_extraction(repos, nvda.id, AS_OF)

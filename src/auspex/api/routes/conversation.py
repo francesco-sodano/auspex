@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from auspex.api.auth import AuthenticatedUser, get_current_user
 from auspex.api.chat_grounding import get_chat_fetcher
 from auspex.api.deps import get_app_user_service, get_universe
+from auspex.api.rate_limit import SlidingWindowRateLimiter, get_rate_limiter
 from auspex.api.repos import get_conversation_repo
 from auspex.assistant.answer import AnswerGenerator
 from auspex.assistant.grounding import (
@@ -276,7 +277,15 @@ async def converse(
     universe: Universe = Depends(get_universe),
     conversation_repo: CosmosRepository = Depends(get_conversation_repo),
     users: AppUserService = Depends(get_app_user_service),
+    limiter: SlidingWindowRateLimiter = Depends(get_rate_limiter),
 ) -> StreamingResponse:
+    settings = get_settings()
+    await limiter.check(
+        scope="chat",
+        key=user.user_id,
+        limit=settings.chat_rate_limit,
+        window_seconds=settings.rate_limit_window_seconds,
+    )
     return StreamingResponse(
         _stream_answer(
             request,

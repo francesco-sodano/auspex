@@ -3,10 +3,15 @@
 Runs the 20 steps in order, checkpointing to the run manifest after each
 step. A failed run resumes from the last successful step on the next
 invocation for the same ``as_of_date``. Hard timeout terminates the run with
-``status=TIMEOUT`` and does not commit watermarks.
+``status=TIMEOUT`` and does not commit watermarks — and is enforced *within*
+each step, not merely between them, so a step that hangs on a provider call
+cannot outlive the configured budget.
 """
 
 from __future__ import annotations
+
+import asyncio
+from datetime import datetime
 
 from auspex.models.common import utc_now
 from auspex.models.enums import RunStatus
@@ -30,13 +35,46 @@ STEP_FUNCTIONS = {
     "NORMALISE": step_fns.step_normalise,
     "DIFF": step_fns.step_diff,
     "WRITE_SNAPSHOT": step_fns.step_write_snapshot,
+    "PROJECT_PORTFOLIO": step_fns.step_project_portfolio,
     "RUN_POLICY": step_fns.step_run_policy,
     "ASSERT": step_fns.step_assert,
-    "PROJECT_PORTFOLIO": step_fns.step_project_portfolio,
     "NARRATE": step_fns.step_narrate,
     "VALIDATE": step_fns.step_validate,
     "END_RUN": step_fns.step_end_run,
 }
+
+
+async def run_step_bounded(
+    ctx: PipelineContext,
+    manifest: RunManifest,
+    step_name: str,
+    *,
+    deadline_from: datetime | None = None,
+) -> None:
+    """Run one step under the context's per-step budget.
+
+    ``deadline_from`` anchors the *whole-run* half of that budget. It exists for
+    the per-user fan-out, which checkpoints onto a throwaway scratch manifest
+    created fresh for each user: measuring elapsed time against that manifest
+    would restart the run clock per user, so the last user of a long night would
+    be handed a full budget the night no longer has. Callers pass the shared
+    run's ``started_at`` instead; everything else defaults to the manifest it is
+    checkpointing onto.
+
+    Raises :class:`TimeoutError` when the step exceeds its budget; callers
+    translate that into ``status=TIMEOUT`` with watermarks uncommitted.
+    """
+
+    anchor = deadline_from if deadline_from is not None else manifest.started_at
+    budget = ctx.step_budget_seconds((utc_now() - anchor).total_seconds())
+    await asyncio.wait_for(STEP_FUNCTIONS[step_name](ctx, manifest), timeout=budget)
+
+
+def _mark_timed_out(manifest: RunManifest) -> RunManifest:
+    manifest.status = RunStatus.TIMEOUT
+    manifest.finished_at = utc_now()
+    manifest.watermarks_committed = False
+    return manifest
 
 
 class PipelineRunner:
@@ -61,16 +99,18 @@ class PipelineRunner:
             step_name = PIPELINE_STEPS[i]
             elapsed = (utc_now() - manifest.started_at).total_seconds()
             if elapsed > deadline_seconds:
-                manifest.status = RunStatus.TIMEOUT
-                manifest.finished_at = utc_now()
-                manifest.watermarks_committed = False
-                return manifest
+                return _mark_timed_out(manifest)
 
-            fn = STEP_FUNCTIONS[step_name]
             try:
-                await fn(self._ctx, manifest)
+                await run_step_bounded(self._ctx, manifest, step_name)
                 if self._ctx.repos.run_repo is not None:
                     await self._ctx.repos.run_repo.upsert(manifest)
+            except TimeoutError:
+                fail_step(manifest, step_name, detail="step exceeded the pipeline timeout budget")
+                _mark_timed_out(manifest)
+                if self._ctx.repos.run_repo is not None:
+                    await self._ctx.repos.run_repo.upsert(manifest)
+                return manifest
             except Exception as exc:  # noqa: BLE001 - checkpoint the failure, do not corrupt state
                 fail_step(manifest, step_name, detail=str(exc))
                 manifest.status = RunStatus.FAILED

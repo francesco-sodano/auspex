@@ -15,6 +15,27 @@ const suggestedAction = (recommendation: Recommendation) => {
 
 function Movers({ movers, direction }: { movers: ScoreMover[]; direction: 'up' | 'down' }) {
   const Icon = direction === 'up' ? ArrowUpRight : ArrowDownRight
+  const storageKey = `auspex:expanded-movers:${direction}`
+  const [expanded, setExpanded] = useState<Set<string>>(() => {
+    try {
+      return new Set(JSON.parse(sessionStorage.getItem(storageKey) ?? '[]') as string[])
+    } catch {
+      return new Set()
+    }
+  })
+  const setMoverExpanded = (securityId: string, open: boolean) => {
+    setExpanded((current) => {
+      const next = new Set(current)
+      if (open) next.add(securityId)
+      else next.delete(securityId)
+      try {
+        sessionStorage.setItem(storageKey, JSON.stringify([...next]))
+      } catch {
+        // Keep the explanation usable in memory when browser storage is blocked.
+      }
+      return next
+    })
+  }
   return (
     <div className="mover-column">
       <header>
@@ -37,10 +58,28 @@ function Movers({ movers, direction }: { movers: ScoreMover[]; direction: 'up' |
                 {mover.score_change > 0 ? '+' : ''}{mover.score_change}
               </span>
             </div>
-            {mover.narrative && <p>{mover.narrative}</p>}
-            <small className={`buy-readiness ${mover.buy_ready ? 'ready' : 'blocked'}`}>
-              {mover.buy_ready ? 'Buy ready' : mover.buy_blockers[0] ? `Buy candidate · ${mover.buy_blockers[0]}` : 'Research candidate'}
-            </small>
+            <p className="mover-summary">{mover.summary}</p>
+            {mover.narrative && (
+              <details
+                className="mover-explanation"
+                open={expanded.has(mover.security_id)}
+                onToggle={(event) => setMoverExpanded(mover.security_id, event.currentTarget.open)}
+              >
+                <summary>Read the full daily explanation</summary>
+                <p>{mover.narrative}</p>
+              </details>
+            )}
+            <footer>
+              <small className={`buy-readiness ${mover.buy_ready ? 'ready' : 'blocked'}`}>
+                {mover.buy_ready ? 'Buy ready' : mover.buy_blockers[0] ? `Buy candidate · ${mover.buy_blockers[0]}` : 'Research candidate'}
+              </small>
+              <a
+                href={`#/analysis?security=${encodeURIComponent(mover.security_id)}`}
+                aria-label={`Open full analysis for ${mover.ticker}`}
+              >
+                Open full analysis <span aria-hidden="true">→</span>
+              </a>
+            </footer>
           </article>
         ))}
       </div>

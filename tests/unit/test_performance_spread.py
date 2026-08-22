@@ -14,7 +14,7 @@ from auspex.performance.benchmarks import (
 )
 from auspex.performance.coverage_bias import coverage_bias
 from auspex.performance.detail import DETAILED_METRICS_VERSION, decimal_str, detail_payload
-from auspex.performance.multiple_testing import benjamini_hochberg, holm_bonferroni
+from auspex.performance.multiple_testing import benjamini_hochberg
 from auspex.performance.spread import (
     cost_adjusted_return,
     max_drawdown,
@@ -174,8 +174,6 @@ class TestMultipleTesting:
             "e": Decimal("0.900"),
         }
         bh = {result.label: result.rejected for result in benjamini_hochberg(p_values)}
-        holm = {result.label: result.rejected for result in holm_bonferroni(p_values)}
-        assert sum(bh.values()) >= sum(holm.values())
         assert bh["a"] is True
         assert bh["e"] is False
 
@@ -186,7 +184,6 @@ class TestMultipleTesting:
 
     def test_no_tests_means_no_results(self) -> None:
         assert benjamini_hochberg({}) == []
-        assert holm_bonferroni({}) == []
 
 
 class TestCoverageBias:

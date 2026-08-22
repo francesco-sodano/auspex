@@ -170,13 +170,13 @@ export function ApiProvider({ getToken, children }: PropsWithChildren<{ getToken
       }
     },
     getSession: () => request('/api/session'),
-    register: (input) => request('/api/registration', {
+    register: (input) => request('/api/session/register', {
       method: 'POST',
       body: JSON.stringify(input),
     }),
-    getRegistrationStatus: () => request('/api/registration/status'),
-    initializePortfolio: (input) => request('/api/onboarding/portfolio', {
-      method: 'POST',
+    getRegistrationStatus: () => request('/api/session/status'),
+    initializePortfolio: (input) => request('/api/onboarding/initial-portfolio', {
+      method: 'PUT',
       body: JSON.stringify(input),
     }),
     completeOnboarding: () => request('/api/onboarding/complete', { method: 'POST' }),
@@ -189,11 +189,11 @@ export function ApiProvider({ getToken, children }: PropsWithChildren<{ getToken
       method: 'PUT',
       body: JSON.stringify({ role }),
     }),
-    deleteAccount: (confirmation) => request('/api/account/deletion-request', {
+    deleteAccount: (confirmation) => request('/api/account/deletion', {
       method: 'POST',
       body: JSON.stringify({ confirmation }),
     }),
-    getDeletionStatus: () => request('/api/account/deletion-status'),
+    getDeletionStatus: () => request('/api/account/deletion'),
     streamChat: async (question, conversationId, onChunk) => {
       const token = await getToken()
       const response = await fetch(`${baseUrl}/api/chat`, {

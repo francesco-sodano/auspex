@@ -50,11 +50,6 @@ from auspex.users.service import AppUserService, LastAdminError, UserLifecycleEr
 
 router = APIRouter(prefix="/account/deletion", tags=["account"])
 
-#: The SPA addresses deletion as two verbs rather than one resource; serving
-#: both spellings keeps either naming valid without the two halves of the
-#: product having to agree on a coin flip.
-compat_router = APIRouter(prefix="/account", tags=["account"])
-
 
 class DeletionRequest(BaseModel):
     """Typed confirmation contract.
@@ -396,48 +391,3 @@ async def resume_deletion(
         job = await _run_and_finalize(service, users, current)
     account_status = UserStatus.DELETED if job.status is DeletionJobStatus.COMPLETED else current.status
     return DeletionStatusOut.from_job(job, account_status, current.user_id)
-
-
-@compat_router.get("/deletion-status", response_model=DeletionStatusOut)
-async def get_deletion_status_compat(
-    current: CurrentUser = Depends(require_registered_user),
-    deletion_repo=Depends(get_deletion_job_repo),
-) -> DeletionStatusOut:
-    """``GET /api/account/deletion-status`` — alias of :func:`get_deletion_status`."""
-
-    return await get_deletion_status(current, deletion_repo)
-
-
-@compat_router.post(
-    "/deletion-request", response_model=DeletionStatusOut, status_code=status.HTTP_202_ACCEPTED
-)
-async def request_deletion_compat(
-    request: DeletionRequest,
-    current: CurrentUser = Depends(require_registered_user),
-    users: AppUserService = Depends(get_app_user_service),
-    deletion_repo=Depends(get_deletion_job_repo),
-    ledger: PortfolioLedgerService = Depends(get_portfolio_ledger_service),
-    settings_repo=Depends(get_user_settings_repo),
-    recommendation_repo=Depends(get_recommendation_repo),
-    disposition_repo=Depends(get_recommendation_disposition_repo),
-    projection_repo=Depends(get_portfolio_projection_repo),
-    onboarding_repo=Depends(get_onboarding_repo),
-    audit_repo=Depends(get_audit_repo),
-    user_performance_repo=Depends(get_user_performance_repo),
-) -> DeletionStatusOut:
-    """``POST /api/account/deletion-request`` — alias of :func:`request_deletion`."""
-
-    return await request_deletion(
-        request,
-        current,
-        users,
-        deletion_repo,
-        ledger,
-        settings_repo,
-        recommendation_repo,
-        disposition_repo,
-        projection_repo,
-        onboarding_repo,
-        audit_repo,
-        user_performance_repo,
-    )

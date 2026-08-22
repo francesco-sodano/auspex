@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from auspex.config.loader import (
+    ConfigValidationError,
     Universe,
     build_config_version,
     load_cohorts,
@@ -17,6 +18,7 @@ from auspex.config.loader import (
 )
 
 __all__ = [
+    "ConfigValidationError",
     "Universe",
     "build_config_version",
     "load_cohorts",

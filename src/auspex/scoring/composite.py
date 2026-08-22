@@ -29,7 +29,7 @@ longer silently encodes missingness by renormalising weights.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 
 from auspex.models.enums import Direction, LegName
 from auspex.scoring.normalize import (
@@ -50,6 +50,46 @@ REASON_NOT_APPLICABLE = "not_applicable"
 
 
 @dataclass(frozen=True)
+class LegCrossSection:
+    """The exact peer cross-section one leg's z-score was computed against.
+
+    Retained so a later step can re-evaluate *a different raw value* against the
+    very same distribution. That counterfactual is what makes the leg-change
+    attribution in ``leg_changes`` an identity rather than an assertion: holding
+    this cross-section fixed and moving only the security's own raw value
+    isolates the own-evidence half of ``delta_z`` exactly (see
+    :func:`auspex.scoring.composite.decompose_leg_delta`).
+    """
+
+    cohort_values: tuple[Decimal, ...] = ()
+    parent_values: tuple[Decimal, ...] = ()
+    universe_values: tuple[Decimal, ...] = ()
+    lambda_cohort: Decimal = Decimal(1)
+    lambda_parent: Decimal = Decimal(1)
+    winsor_sigma: Decimal = Decimal("2.5")
+
+    def z_for(self, raw: Decimal) -> Decimal | None:
+        """Winsorised blended z of ``raw`` against this fixed cross-section.
+
+        Winsorised because the reported ``z`` on every score row is winsorised;
+        the counterfactual has to live on the same scale or the decomposition
+        would not add up to the reported delta.
+        """
+
+        z = blended_zscore(
+            raw,
+            cohort_values=list(self.cohort_values),
+            parent_values=list(self.parent_values),
+            universe_values=list(self.universe_values),
+            lambda_cohort=self.lambda_cohort,
+            lambda_parent=self.lambda_parent,
+        )
+        if z is None:
+            return None
+        return winsorise(z, self.winsor_sigma)
+
+
+@dataclass(frozen=True)
 class LegCompositeResult:
     raw: Decimal | None
     z: Decimal | None
@@ -58,6 +98,141 @@ class LegCompositeResult:
     computable: bool
     applicable: bool = True
     reason_not_computable: str | None = None
+    #: The cross-section ``z`` was computed against; ``None`` for a leg that is
+    #: structurally not applicable and therefore never had one.
+    cross_section: LegCrossSection | None = None
+
+
+@dataclass(frozen=True)
+class LegDeltaDecomposition:
+    """Exact two-term split of ``delta_z`` (arc42 §5.5 "Leg change").
+
+    ``own_evidence_effect + cohort_distribution_effect == delta_z`` by
+    construction, or every field is ``None``. There is deliberately no third
+    "residual" term and no partial answer: an attribution that cannot be
+    computed is reported as unavailable rather than silently collapsed onto the
+    own-evidence term, which would tell a user their issuer moved when in fact
+    the peer group did.
+    """
+
+    delta_z: Decimal | None
+    own_evidence_effect: Decimal | None
+    cohort_distribution_effect: Decimal | None
+    reason_unavailable: str | None = None
+
+
+REASON_DECOMPOSITION_NO_PRIOR = "no_prior_leg_value"
+REASON_DECOMPOSITION_NO_CURRENT = "no_current_leg_value"
+REASON_DECOMPOSITION_NO_CROSS_SECTION = "prior_value_not_rankable_in_current_cross_section"
+
+#: Attribution is reported in fixed point to this many decimal places.
+#:
+#: ``Decimal`` arithmetic is *floating* — every operation rounds to 28
+#: significant digits — so two independently computed differences can disagree
+#: with their own total in the last unit in the last place. These three numbers
+#: are persisted and read together, and a reader who adds the two published
+#: effects must get the published total rather than the total plus a residue.
+#: Rounding to a fixed scale first makes the identity hold exactly as stored.
+#: z-scores are winsorised to a couple of sigma, so twelve decimal places is
+#: several orders of magnitude finer than the signal.
+ATTRIBUTION_QUANTUM = Decimal("1E-12")
+
+
+def decompose_leg_delta(
+    *,
+    prior_z: Decimal | None,
+    current_z: Decimal | None,
+    prior_raw: Decimal | None,
+    current_cross_section: LegCrossSection | None,
+) -> LegDeltaDecomposition:
+    """Split ``current_z - prior_z`` into own-evidence and peer-distribution halves.
+
+    Writing ``z(x; D)`` for the winsorised blended z of raw value ``x`` against
+    peer distribution ``D``, the reported endpoints are ``z_prior = z(x_p; D_p)``
+    and ``z_current = z(x_c; D_c)``. Inserting the counterfactual
+    ``z† = z(x_p; D_c)`` — this security's *prior* raw value ranked against
+    *today's* peers — gives
+
+    ```
+    cohort_distribution_effect = z†        - z_prior     (peers moved, issuer held)
+    own_evidence_effect        = z_current - z†          (issuer moved, peers held)
+    ```
+
+    which telescopes to ``z_current - z_prior = delta_z`` because the middle term
+    cancels. Reported in fixed point (:data:`ATTRIBUTION_QUANTUM`) so the
+    identity survives ``Decimal``'s floating rounding and the three published
+    numbers reconcile exactly as stored.
+
+    The order matters. Anchoring on the *reported* prior z and re-ranking
+    against the *current* cross-section means every difference between
+    yesterday's and today's peer group — peer values moving, members joining or
+    leaving, the shrinkage lambdas shifting as a result — lands in the
+    distribution term, where it belongs. Building the counterfactual the other
+    way round (today's raw against a reconstructed prior cross-section) would
+    charge all of that reconstruction error to the issuer's own evidence.
+
+    Returns an all-``None`` decomposition with a reason when the leg is not
+    computable today, when there is no prior value to move from, or when the
+    prior value cannot be ranked against today's cross-section. Those three are
+    reported distinctly: "the leg lost its evidence today", "this is the leg's
+    first observation" and "today's peer group cannot rank anything" are
+    different facts about the row, and collapsing them into one reason forces a
+    reader to guess which happened.
+    """
+
+    if current_z is None:
+        # Checked first: when the leg is non-computable today there is nothing
+        # to decompose regardless of history, and ``LegResult`` already carries
+        # the specific reason the current value is missing.
+        return LegDeltaDecomposition(
+            delta_z=None,
+            own_evidence_effect=None,
+            cohort_distribution_effect=None,
+            reason_unavailable=REASON_DECOMPOSITION_NO_CURRENT,
+        )
+
+    if prior_z is None:
+        return LegDeltaDecomposition(
+            delta_z=None,
+            own_evidence_effect=None,
+            cohort_distribution_effect=None,
+            reason_unavailable=REASON_DECOMPOSITION_NO_PRIOR,
+        )
+
+    delta = (current_z - prior_z).quantize(ATTRIBUTION_QUANTUM, rounding=ROUND_HALF_EVEN)
+
+    if prior_raw is None:
+        return LegDeltaDecomposition(
+            delta_z=delta,
+            own_evidence_effect=None,
+            cohort_distribution_effect=None,
+            reason_unavailable=REASON_DECOMPOSITION_NO_PRIOR,
+        )
+
+    counterfactual = current_cross_section.z_for(prior_raw) if current_cross_section is not None else None
+    if counterfactual is None:
+        return LegDeltaDecomposition(
+            delta_z=delta,
+            own_evidence_effect=None,
+            cohort_distribution_effect=None,
+            reason_unavailable=REASON_DECOMPOSITION_NO_CROSS_SECTION,
+        )
+
+    # ``cohort_distribution_effect`` is algebraically ``counterfactual - prior_z``
+    # and is computed as the residual of the fixed-point delta instead, so the
+    # three published numbers add up exactly rather than to within a last-digit
+    # rounding artefact. Both degenerate cases stay exactly degenerate: peers
+    # unchanged gives ``counterfactual == prior_z`` and therefore a distribution
+    # effect of exactly zero, and an unchanged raw value gives
+    # ``counterfactual == current_z`` and an own-evidence effect of exactly zero.
+    own_evidence_effect = (current_z - counterfactual).quantize(
+        ATTRIBUTION_QUANTUM, rounding=ROUND_HALF_EVEN
+    )
+    return LegDeltaDecomposition(
+        delta_z=delta,
+        own_evidence_effect=own_evidence_effect,
+        cohort_distribution_effect=delta - own_evidence_effect,
+    )
 
 
 @dataclass(frozen=True)
@@ -134,6 +309,15 @@ def compute_security_composite(
 
         applicable_weight += weight
 
+        cross_section = LegCrossSection(
+            cohort_values=tuple(_tier_values(cohort_raw_by_leg, leg)),
+            parent_values=tuple(_tier_values(parent_raw_by_leg, leg)),
+            universe_values=tuple(_tier_values(universe_raw_by_leg, leg)),
+            lambda_cohort=lambda_cohort,
+            lambda_parent=lambda_parent,
+            winsor_sigma=winsor_sigma,
+        )
+
         if raw is None:
             leg_results[leg] = LegCompositeResult(
                 raw=None,
@@ -142,14 +326,15 @@ def compute_security_composite(
                 contribution=Decimal(0),
                 computable=False,
                 reason_not_computable=REASON_RAW_MISSING,
+                cross_section=cross_section,
             )
             continue
 
         z = blended_zscore(
             raw,
-            cohort_values=_tier_values(cohort_raw_by_leg, leg),
-            parent_values=_tier_values(parent_raw_by_leg, leg),
-            universe_values=_tier_values(universe_raw_by_leg, leg),
+            cohort_values=list(cross_section.cohort_values),
+            parent_values=list(cross_section.parent_values),
+            universe_values=list(cross_section.universe_values),
             lambda_cohort=lambda_cohort,
             lambda_parent=lambda_parent,
         )
@@ -162,13 +347,19 @@ def compute_security_composite(
                 contribution=Decimal(0),
                 computable=False,
                 reason_not_computable=REASON_DEGENERATE_CROSS_SECTION,
+                cross_section=cross_section,
             )
             continue
 
         z_w = winsorise(z, winsor_sigma)
         contribution = weight * z_w
         leg_results[leg] = LegCompositeResult(
-            raw=raw, z=z_w, weight=weight, contribution=contribution, computable=True
+            raw=raw,
+            z=z_w,
+            weight=weight,
+            contribution=contribution,
+            computable=True,
+            cross_section=cross_section,
         )
         weighted_sum += contribution
         computable_weight += weight

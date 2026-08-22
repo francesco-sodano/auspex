@@ -167,6 +167,26 @@ var commonEnvironment = [
     value: secEdgarUserAgent
   }
   {
+    name: 'AUSPEX_CORS_ALLOWED_ORIGINS'
+    value: ''
+  }
+  {
+    name: 'AUSPEX_JWT_CLOCK_SKEW_SECONDS'
+    value: '60'
+  }
+  {
+    name: 'AUSPEX_RATE_LIMIT_WINDOW_SECONDS'
+    value: '60'
+  }
+  {
+    name: 'AUSPEX_REGISTRATION_RATE_LIMIT'
+    value: '10'
+  }
+  {
+    name: 'AUSPEX_CHAT_RATE_LIMIT'
+    value: '30'
+  }
+  {
     name: 'AUSPEX_PRICE_API_KEY_SECRET'
     value: 'ALPHAVANTAGE-API-KEY'
   }
@@ -277,7 +297,11 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = {
       ]
       scale: {
         minReplicas: 0
-        maxReplicas: 2
+        // The in-process per-user abuse limiter is exact only with one API
+        // replica. This pre-production MVP prefers deterministic limits over
+        // horizontal scale; move the limiter to a distributed store before
+        // raising this ceiling.
+        maxReplicas: 1
         rules: [
           {
             name: 'http'

@@ -220,6 +220,7 @@ class BriefingScoreMover(AuspexModel):
     score: int
     prior_score: int
     score_change: int
+    summary: str
     narrative: str = ""
     buy_ready: bool = False
     buy_blockers: list[str] = Field(default_factory=list)

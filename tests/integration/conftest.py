@@ -414,6 +414,24 @@ def seed_prices(repos: PipelineRepos, security_id: str, as_of_date: date, close:
     repos.price_sink._bars[bar.id] = bar  # type: ignore[attr-defined]
 
 
+def seed_universe_prices(repos: PipelineRepos, universe, as_of_date: date) -> None:
+    """One current bar for every universe member, as a live night always has.
+
+    arc42 §5.5's staleness rule excludes a security whose latest observed price
+    is more than two trading sessions old, and a security with no observed bar
+    at all on a day the market demonstrably traded is the limiting case of
+    that. Production collects prices for the whole universe every night, so a
+    fixture that priced two names and left 102 unpriced was not a thin day — it
+    was a shape production never takes. Seeding the universe keeps these tests
+    exercising the scoring path rather than the exclusion path.
+
+    Prices vary per member so no cross-section is accidentally constant.
+    """
+
+    for index, security in enumerate(universe.securities):
+        seed_prices(repos, security.id, as_of_date, str(50 + index))
+
+
 def seed_fx(repos: PipelineRepos, as_of_date: date, rate: str = "0.88") -> None:
     from auspex.models.market import FxRate
 

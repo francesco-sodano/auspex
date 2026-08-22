@@ -181,6 +181,19 @@ class Settings(BaseSettings):
     # explicit typed-confirmation contract.
     fresh_auth_max_age_seconds: int = 600
 
+    # --- HTTP boundary --------------------------------------------------------------
+    # Same-origin production needs no CORS entry. Local Vite development is allowed
+    # by default; deployments may replace this comma-separated list.
+    cors_allowed_origins: str = (
+        "http://localhost:5173,http://127.0.0.1:5173"
+    )
+    jwt_clock_skew_seconds: int = 60
+    rate_limit_window_seconds: int = 60
+    # Disabled by default for local/tests; infrastructure sets bounded production
+    # values explicitly.
+    registration_rate_limit: int = 0
+    chat_rate_limit: int = 0
+
     # --- Provider endpoints (API keys resolved from Key Vault at call time) ----------
     # Alpha Vantage is the default price/FX provider. Tiingo remains available
     # behind the same interfaces when configured.
@@ -203,10 +216,22 @@ class Settings(BaseSettings):
     # --- pipeline tuning ---------------------------------------------------------------
     pipeline_hard_timeout_minutes: int = 45
     pipeline_target_minutes: int = 25
+    #: Ceiling on any *single* pipeline step. Bounds a step that hangs on a
+    #: provider or model call well inside the whole-run deadline, instead of
+    #: letting one step consume the entire budget on its own.
+    pipeline_step_timeout_minutes: int = 15
 
     # --- reporting currency ------------------------------------------------------------
     book_currency: str = "USD"
     reporting_currency: str = "CHF"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [
+            value.strip()
+            for value in self.cors_allowed_origins.split(",")
+            if value.strip()
+        ]
 
 
 @lru_cache

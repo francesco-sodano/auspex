@@ -74,6 +74,7 @@ export type ScoreMover = {
   score: number
   prior_score: number
   score_change: number
+  summary: string
   narrative: string
   buy_ready: boolean
   buy_blockers: string[]

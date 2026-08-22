@@ -98,7 +98,9 @@ def score_universe(
     Cross-sections are built for all three tiers (own cohort, parent, universe)
     and blended by the scope's shrinkage lambdas, so a cohort gaining or losing
     a member shifts scores continuously rather than snapping to a different
-    scope's statistics.
+    scope's statistics. The same blend governs the *composite percentile*: a
+    rank taken only inside the reported scope's population would reintroduce
+    the very ladder cliff the leg z-scores were written to remove, one level up.
     """
 
     by_id = {i.security_id: i for i in inputs}
@@ -108,7 +110,8 @@ def score_universe(
     active_ids = {i.security_id for i in active}
 
     # Scope-label members preserve the historical "same reported scope" grouping,
-    # used for the percentile population and as the cohort tier fallback.
+    # used as the cohort tier fallback when a scope carries no explicit cohort
+    # membership (hand-built scopes in tests and replay fixtures).
     scope_members: dict[str, list[str]] = {}
     for sid in sorted(active_ids):
         scope = cohort_scope_by_security.get(sid)
@@ -165,48 +168,41 @@ def score_universe(
             percentile=None,  # filled in below once all composites are known
         )
 
-    # second pass: percentile rank within each scope's composite population
-    composites_by_scope: dict[str, dict[str, Decimal | None]] = {}
+    # second pass: percentile rank within the security's own shrinkage-blended
+    # tier populations. The composite percentile is blended for exactly the same
+    # reason the leg z-scores are: a cohort crossing a ladder threshold must move
+    # a user's reported rank continuously, not step it.
+    composites_by_id: dict[str, Decimal | None] = {}
     for sid, res in results.items():
         if res.excluded_stale or res.cohort_scope is None:
             continue
-        composites_by_scope.setdefault(res.cohort_scope.scope, {})[sid] = (
-            res.composite_result.composite if res.composite_result else None
-        )
+        composites_by_id[sid] = res.composite_result.composite if res.composite_result else None
+
+    def _tier_composites(ids: tuple[str, ...]) -> dict[str, Decimal | None]:
+        return {i: composites_by_id[i] for i in ids if i in composites_by_id}
 
     final: dict[str, SecurityScoreResult] = {}
     for sid, res in results.items():
         if res.excluded_stale or res.cohort_scope is None:
             final[sid] = res
             continue
-        population = composites_by_scope[res.cohort_scope.scope]
-        percentile = compute_percentile(sid, population)
-        final[sid] = SecurityScoreResult(
-            security_id=res.security_id,
-            excluded_stale=res.excluded_stale,
-            cohort_scope=res.cohort_scope,
-            composite_result=res.composite_result,
-            coverage=res.coverage,
-            percentile=percentile,
+        scope = res.cohort_scope
+        # Mirror the leg cross-section fallback exactly: a scope built without
+        # explicit tier membership (replay fixtures, hand-built scopes) ranks
+        # against everything sharing its reported label, as it always did.
+        cohort_ids = scope.cohort_member_ids or tuple(scope_members.get(scope.scope, ()))
+        cohort_population = _tier_composites(cohort_ids)
+        # The blend ranks the security inside its own cohort tier, so it must be
+        # present there even when the scope label fell back to a wider tier.
+        cohort_population.setdefault(sid, composites_by_id.get(sid))
+        percentile = compute_percentile(
+            sid,
+            cohort_population,
+            parent_composites=_tier_composites(scope.parent_member_ids),
+            universe_composites=_tier_composites(scope.universe_member_ids),
+            lambda_cohort=scope.lambda_cohort,
+            lambda_parent=scope.lambda_parent,
         )
-    return final
-
-    # second pass: percentile rank within each scope's composite population
-    composites_by_scope: dict[str, dict[str, Decimal | None]] = {}
-    for sid, res in results.items():
-        if res.excluded_stale or res.cohort_scope is None:
-            continue
-        composites_by_scope.setdefault(res.cohort_scope.scope, {})[sid] = (
-            res.composite_result.composite if res.composite_result else None
-        )
-
-    final: dict[str, SecurityScoreResult] = {}
-    for sid, res in results.items():
-        if res.excluded_stale or res.cohort_scope is None:
-            final[sid] = res
-            continue
-        population = composites_by_scope[res.cohort_scope.scope]
-        percentile = compute_percentile(sid, population)
         final[sid] = SecurityScoreResult(
             security_id=res.security_id,
             excluded_stale=res.excluded_stale,

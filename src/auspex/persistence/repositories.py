@@ -402,8 +402,9 @@ class CosmosChannelAExtractionSink:
     """Backs :class:`auspex.extraction.channel_a.ChannelAExtractionSink` over
     the ``extractions`` container (arc42 §5.4).
 
-    ``cache_key`` (``content_hash|model_version|prompt_version|schema_version|
-    taxonomy_version``, :func:`auspex.extraction.cache.channel_a_cache_key`)
+    ``cache_key`` (``security_id|content_hash|model_version|prompt_version|
+    schema_version|taxonomy_version``,
+    :func:`auspex.extraction.cache.channel_a_cache_key`)
     is a derived property on :class:`~auspex.models.extraction.ChannelAExtraction`,
     not a stored field, so ``find_by_cache_key`` splits it back into its
     component filters rather than querying on the joined string.
@@ -416,9 +417,16 @@ class CosmosChannelAExtractionSink:
 
     async def find_by_cache_key(self, cache_key: str) -> ChannelAExtraction | None:
         parts = cache_key.split("|")
-        if len(parts) != 5:
+        if len(parts) != 6:
             return None
-        content_hash, model_version, prompt_version, schema_version, taxonomy_version = parts
+        (
+            security_id,
+            content_hash,
+            model_version,
+            prompt_version,
+            schema_version,
+            taxonomy_version,
+        ) = parts
         results = await self._repo.query(
             "SELECT * FROM c WHERE c.content_hash=@ch AND c.model_version=@mv AND c.prompt_version=@pv "
             "AND c.schema_version=@sv AND c.taxonomy_version=@tv",
@@ -429,9 +437,11 @@ class CosmosChannelAExtractionSink:
                 {"name": "@sv", "value": schema_version},
                 {"name": "@tv", "value": taxonomy_version},
             ],
+            partition_key=security_id,
         )
         for candidate in results:
             if channel_a_cache_key(
+                security_id=candidate.security_id,
                 content_hash=candidate.content_hash,
                 model_version=candidate.model_version,
                 prompt_version=candidate.prompt_version,
@@ -458,9 +468,9 @@ class CosmosChannelBDigestSink:
 
     async def find_by_cache_key(self, cache_key: str) -> ChannelBDigest | None:
         parts = cache_key.split("|")
-        if len(parts) != 3:
+        if len(parts) != 4:
             return None
-        content_hash, model_version, prompt_version = parts
+        security_id, content_hash, model_version, prompt_version = parts
         results = await self._repo.query(
             "SELECT * FROM c WHERE c.content_hash=@ch AND c.model_version=@mv AND c.prompt_version=@pv",
             [
@@ -468,6 +478,7 @@ class CosmosChannelBDigestSink:
                 {"name": "@mv", "value": model_version},
                 {"name": "@pv", "value": prompt_version},
             ],
+            partition_key=security_id,
         )
         return results[0] if results else None
 

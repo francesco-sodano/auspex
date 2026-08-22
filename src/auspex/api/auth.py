@@ -257,6 +257,7 @@ class EntraTokenValidator:
                 algorithms=["RS256"],
                 audience=binding.audience,
                 issuer=binding.issuer,
+                leeway=self._settings.jwt_clock_skew_seconds,
             )
         except PyJWKClientConnectionError as exc:
             raise HTTPException(

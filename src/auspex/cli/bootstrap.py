@@ -132,6 +132,30 @@ class _AsOfPriceSink:
         bars = await fetch_all(self._delegate)
         return [b for b in bars if b.session_date <= self._as_of]
 
+    async def history_as_of(self, security_id: str, as_of: date, days: int = 7) -> list:
+        """Bounded history, clamped to the replayed day.
+
+        Needed as well as :meth:`all` because ``all`` deliberately collapses to
+        one latest bar per security, which is enough to price a portfolio but
+        not to reconstruct a *trading-session calendar*. Scoring reads that
+        calendar to age prices (staleness) and to find the previous session
+        (leg deltas, direction), so without this a replayed Monday would fall
+        back to calendar-day arithmetic and compare against a Sunday on which
+        no score exists.
+        """
+
+        bounded = min(as_of, self._as_of)
+        delegate_history = getattr(self._delegate, "history_as_of", None)
+        if delegate_history is not None:
+            return await delegate_history(security_id, bounded, days)
+        bars = [
+            bar
+            for bar in await fetch_all(self._delegate)
+            if bar.security_id == security_id and bar.session_date <= bounded
+        ]
+        bars.sort(key=lambda bar: bar.session_date)
+        return bars[-days:]
+
 
 class _ReplayScoreRepository:
     def __init__(self, delegate, existing: list) -> None:
@@ -631,10 +655,16 @@ class BootstrapRunner:
             for item in _each_day(start_date, end_date)
             if item.weekday() < 5 and item not in (completed_dates or set())
         }
+        # Prior-score lookbacks are expressed in *trading sessions*, not calendar
+        # days: DIFF reads the previous session (three calendar days back on a
+        # Monday, more after a holiday) and direction reads five sessions back.
+        # Preloading a full calendar week covers both without having to model a
+        # holiday calendar here; the set is trimmed to dates outside the replay
+        # window, so this is a handful of days at the start of the backfill.
         relevant_score_dates = {
             item - timedelta(days=offset)
             for item in replay_dates
-            for offset in (1, 7)
+            for offset in range(1, 8)
         } - replay_dates
         preloaded_scores = []
         if preload_ctx.repos.score_repo is not None:
@@ -842,6 +872,21 @@ class BootstrapRunner:
         for snap in all_snapshots:
             if snap.as_of_date in scored_dates:
                 snapshots_by_date.setdefault(snap.as_of_date, []).append(snap)
+        performance_config = ctx.config.get("fees", {})
+        momentum_window_sessions = int(
+            performance_config.get(
+                "performance_momentum_window_sessions",
+                63,
+            )
+        )
+        spread_quantile = Decimal(
+            str(
+                performance_config.get(
+                    "performance_spread_quantile",
+                    "0.20",
+                )
+            )
+        )
 
         cross_sections: list[DateCrossSection] = []
         for as_of in sorted(snapshots_by_date):
@@ -893,7 +938,7 @@ class BootstrapRunner:
                             snapshot.security_id: Decimal(snapshot.coverage) for snapshot in snaps
                         },
                         trailing_returns_usd_by_window={
-                            63: {
+                            momentum_window_sessions: {
                                 snapshot.security_id: trailing
                                 for snapshot in snaps
                                 if (
@@ -901,7 +946,7 @@ class BootstrapRunner:
                                         bars_by_security,
                                         snapshot.security_id,
                                         as_of,
-                                        63,
+                                        momentum_window_sessions,
                                         dates_by_security,
                                     )
                                 )
@@ -928,6 +973,8 @@ class BootstrapRunner:
                         )
                     )
                 ),
+                momentum_window_sessions=momentum_window_sessions,
+                spread_quantile=spread_quantile,
             )
         )
         if include_recommendation_metrics and ctx.repos.recommendation_repo is not None:

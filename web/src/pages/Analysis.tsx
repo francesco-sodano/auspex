@@ -7,41 +7,84 @@ import type { GateTrace, Recommendation, SecurityPackage, SecuritySummary } from
 const LEG_EXPLANATIONS = {
   thesis_linkage: {
     title: 'Thesis Linkage',
-    description: 'Measures how strongly recent filings and news support the company-specific investment themes Auspex is tracking.',
-    interpretation: 'Higher means current evidence reinforces the thesis; lower means support is weak or deteriorating.',
-    window: 'Trailing 180 days, with evidence losing half its weight every 90 days.',
+    question: 'Do recent filings and news support the reasons Auspex is following this company?',
+    measure: 'This looks for recent evidence supporting the investment themes Auspex tracks.',
   },
   attention_acceleration: {
     title: 'Attention Acceleration',
-    description: 'Compares weighted material events in the latest 30 days with the previous 30 days.',
-    interpretation: 'Higher means relevant activity is accelerating; lower means attention is fading.',
-    window: 'Latest 30 days versus days 30–60.',
+    question: 'Are important company updates arriving faster than they did a month ago?',
+    measure: 'This compares important company updates in the latest month with the month before.',
   },
   narrative_premium: {
     title: 'Narrative Premium',
-    description: 'Compares the strength of the current company story with the expectations already implied by peer-relative revenue growth.',
-    interpretation: 'Higher means the narrative is stronger than fundamentals currently justify; this can be opportunity or expectation risk.',
-    window: 'Narrative evidence decays with a 90-day half-life.',
+    question: 'Is the company story stronger than its current business progress would normally suggest?',
+    measure: 'This compares the strength of the company story with its current business progress.',
   },
   smart_money: {
     title: 'Smart Money',
-    description: 'Measures net open-market buying minus selling by officers and directors at full weight and 10%+ owners at half weight, scaled by company size.',
-    interpretation: 'Higher means insiders are net buyers; lower means insiders are net sellers.',
-    window: 'Trailing 90 days; not computable for foreign private issuers without Form 4 data.',
+    question: 'Have company insiders recently bought or sold shares with their own money?',
+    measure: 'This looks at recent open-market share purchases and sales by company insiders.',
   },
   fundamental_health: {
     title: 'Fundamental Health',
-    description: 'Combines revenue growth, gross-margin trend, free-cash-flow margin, net cash, and return on invested capital.',
-    interpretation: 'Higher means operating quality and balance-sheet health are stronger relative to peers.',
-    window: 'Latest point-in-time XBRL data; at least three of five inputs are required.',
+    question: 'How healthy is the underlying business compared with similar companies?',
+    measure: 'This combines growth, margins, cash generation, financial strength, and returns on investment.',
   },
   valuation_brake: {
     title: 'Valuation Brake',
-    description: 'Compares EV/Sales, EV/EBITDA, and free-cash-flow yield with comparable companies, oriented so cheaper is better.',
-    interpretation: 'Higher means relatively inexpensive; lower means relatively expensive.',
-    window: 'Latest price and point-in-time fundamentals.',
+    question: 'Does the current share price look reasonable compared with similar companies?',
+    measure: 'This compares the current valuation with similar companies; relatively cheaper ranks higher.',
   },
 } as const
+
+type ResearchUpdate = SecurityPackage['documents'][number]
+
+const updateKind = (item: ResearchUpdate) => {
+  if (item.form === 'NEWS') return 'News'
+  if (item.form === '4') return 'Insider filing'
+  return `${item.form} filing`
+}
+
+const latestResearchUpdates = (security: SecurityPackage | null): ResearchUpdate[] => {
+  if (!security) return []
+  const candidates = [...security.news, ...security.documents]
+    .sort((left, right) => right.filed_at.localeCompare(left.filed_at))
+  const selected: ResearchUpdate[] = []
+  const kinds = ['News', 'Insider filing', 'Company filing']
+  for (const kind of kinds) {
+    const match = candidates.find((item) => {
+      const itemKind = updateKind(item)
+      if (kind === 'Company filing') return itemKind.endsWith('filing') && itemKind !== 'Insider filing'
+      return itemKind === kind
+    })
+    if (match && !selected.some((item) => item.document_id === match.document_id)) selected.push(match)
+  }
+  const annual = candidates.find((item) => item.form === '10-K' || item.form === '20-F')
+  if (annual && !selected.some((item) => item.document_id === annual.document_id)) selected.push(annual)
+  for (const item of candidates) {
+    if (selected.length >= 4) break
+    if (!selected.some((selectedItem) => selectedItem.document_id === item.document_id)) selected.push(item)
+  }
+  return selected.sort((left, right) => right.filed_at.localeCompare(left.filed_at))
+}
+
+const legReading = (score: number | null, computable: boolean, neutral: boolean) => {
+  if (neutral) return 'Neutral'
+  if (!computable || score === null) return 'Not enough information'
+  if (score >= 75) return 'Strong'
+  if (score >= 60) return 'Above average'
+  if (score >= 40) return 'Mixed'
+  if (score >= 25) return 'Below average'
+  return 'Weak'
+}
+
+const relativeMeaning = (score: number) => {
+  if (score >= 75) return 'This area ranks strongly compared with similar companies.'
+  if (score >= 60) return 'This area ranks above average compared with similar companies.'
+  if (score >= 40) return 'This area sits near the middle of the comparison group.'
+  if (score >= 25) return 'This area ranks below average compared with similar companies.'
+  return 'This area ranks weakly compared with similar companies.'
+}
 
 const selectedFromHash = () => {
   const query = window.location.hash.split('?')[1] ?? ''
@@ -151,6 +194,7 @@ export function Analysis() {
     if (!query) return securities
     return securities.filter((item) => item.ticker.toLowerCase().includes(query) || item.name.toLowerCase().includes(query))
   }, [filter, securities])
+  const latestUpdates = useMemo(() => latestResearchUpdates(security), [security])
 
   const selectSecurity = (securityId: string) => {
     setSelected(securityId)
@@ -191,7 +235,7 @@ export function Analysis() {
                 <div className="score-title">
                   <span className="eyebrow">{security.security.ticker} · {security.market}</span>
                   <h2>{security.security.name}</h2>
-                  <p>{security.business_summary || 'A grounded company and research recap is not yet available.'}</p>
+                  <p className="company-brief">{security.business_summary || 'A plain-language company overview is not yet available.'}</p>
                 </div>
                 <div className="security-market-price">
                   <strong>{formatMoney(security.current_price_usd, 'USD')}</strong>
@@ -200,6 +244,34 @@ export function Analysis() {
                   </span>
                 </div>
               </div>
+
+              <Section title="Latest company updates" description="The newest filings, insider disclosures, and news in plain language">
+                <div className="latest-update-grid">
+                  {latestUpdates.length === 0 && <div className="empty">No recent company documents are available yet.</div>}
+                  {latestUpdates.map((item) => (
+                    <article className="latest-update-card" key={item.document_id}>
+                      <header>
+                        <span>{updateKind(item)}</span>
+                        <time>{item.filed_at}</time>
+                      </header>
+                      <h3>{item.headline || `${item.form} update`}</h3>
+                      <p>{item.digest || 'Auspex has the source document, but a plain-language summary is not available yet.'}</p>
+                      {item.source_url
+                        ? (
+                          <a
+                            href={item.source_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            aria-label={`Read the source for ${item.headline || `${item.form} update`} in a new tab`}
+                          >
+                            Read the source <span aria-hidden="true">↗</span>
+                          </a>
+                        )
+                        : <span className="source-unavailable">Source link unavailable</span>}
+                    </article>
+                  ))}
+                </div>
+              </Section>
 
               <Section title="Latest 15 sessions" description="Adjusted closing prices; each observation is labeled">
                 <div className="chart-panel"><PriceChart points={security.price_history} /></div>
@@ -211,34 +283,58 @@ export function Analysis() {
                 </div>
               </Section>
 
-              <Section title="How to read the six legs" description="Each leg is ranked against comparable companies; together they produce the 0–100 Auspex Score.">
-                <div className="leg-explanation-grid">
-                  {Object.entries(LEG_EXPLANATIONS).map(([name, explanation]) => (
-                    <article className="leg-explanation-card" key={name}>
-                      <span className="eyebrow">{explanation.title}</span>
-                      <p>{explanation.description}</p>
-                      <small>{explanation.interpretation}</small>
-                      <small>{explanation.window}</small>
-                    </article>
-                  ))}
-                </div>
-              </Section>
-
-              <Section title="Auspex" description="Composite 0–100 score and six independently ranked legs">
+              <Section title="How Auspex reads this company" description="Six simple questions are compared with similar companies and combined into the 0–100 Auspex Score.">
                 <div className="auspex-reasoning">
                   <div><span className="eyebrow">Why this score</span><p>{security.score_reasoning}</p></div>
                   <div className="score-change-callout"><strong className="gold">{security.security.percentile ?? '—'}</strong><span className={(security.score_change ?? 0) >= 0 ? 'positive' : 'negative'}>{security.score_change === null ? 'No prior score' : `${security.score_change > 0 ? '+' : ''}${security.score_change} vs prior`}</span></div>
                 </div>
-                <div className="leg-score-grid">
-                  {Object.entries(security.legs).map(([name, leg]) => (
-                    <article className="leg-score-card" key={name}>
-                      <label>{titleCase(name)}</label>
-                      <strong className="gold">{leg.neutral ? 'Neutral' : leg.computable ? (leg.score ?? '—') : 'N/C'}</strong>
-                      <small>z {formatNumber(leg.z)} · weight {formatNumber(Number(leg.weight) * 100, 0)}%</small>
-                      {leg.status_explanation && <p className="leg-status">{leg.status_explanation}</p>}
-                    </article>
-                  ))}
+                <div className="latest-auspex-update">
+                  <span className="eyebrow">Latest Auspex update</span>
+                  <p>{security.narrative || 'There is no new company-specific explanation for this scored session.'}</p>
                 </div>
+                <div className="leg-explanation-grid">
+                  {Object.entries(LEG_EXPLANATIONS).map(([name, explanation]) => {
+                    const leg = security.legs[name]
+                    const reading = leg === undefined
+                      ? 'Not used for this company'
+                      : legReading(leg.score, leg.computable, leg.neutral)
+                    const meaning = leg?.neutral
+                      ? (leg.status_explanation || 'There is no meaningful difference to compare right now.')
+                      : leg === undefined
+                        ? name === 'smart_money' && security.security.filer_profile === 'FPI'
+                          ? 'This area is not used for this company because comparable Form 4 insider filings are not available for foreign private issuers.'
+                          : 'This area is not applicable to the current score.'
+                        : !leg.computable
+                          ? (leg.status_explanation || 'Auspex does not have enough reliable information to assess this area.')
+                          : leg.score !== null
+                            ? `${relativeMeaning(leg.score)} ${explanation.measure}`
+                            : 'Auspex does not have enough comparable information to rank this area.'
+                    return (
+                      <article className="leg-explanation-card" key={name}>
+                        <span className="eyebrow">{explanation.title}</span>
+                        <h3>{explanation.question}</h3>
+                        <div className="leg-reading">
+                          <strong className="gold">{leg?.score ?? '—'}</strong>
+                          <span>{reading}</span>
+                        </div>
+                        <p>{meaning}</p>
+                      </article>
+                    )
+                  })}
+                </div>
+                <details className="technical-details">
+                  <summary>Show calculation details</summary>
+                  <div className="leg-score-grid">
+                    {Object.entries(security.legs).map(([name, leg]) => (
+                      <article className="leg-score-card" key={name}>
+                        <label>{titleCase(name)}</label>
+                        <strong className="gold">{leg.neutral ? 'Neutral' : leg.computable ? (leg.score ?? '—') : 'N/C'}</strong>
+                        <small>Standardized value {formatNumber(leg.z)} · weight {formatNumber(Number(leg.weight) * 100, 0)}%</small>
+                        {leg.status_explanation && <p className="leg-status">{leg.status_explanation}</p>}
+                      </article>
+                    ))}
+                  </div>
+                </details>
               </Section>
 
               {security.recommendation && !security.recommendation.action.startsWith('HOLD') && (

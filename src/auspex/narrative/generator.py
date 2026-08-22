@@ -22,7 +22,7 @@ class NarrativeSink(Protocol):
 
 
 class NarrativeGenerator:
-    prompt_version = "narrative-v1"
+    prompt_version = "narrative-v2"
 
     def __init__(
         self,

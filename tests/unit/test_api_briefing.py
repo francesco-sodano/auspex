@@ -315,6 +315,8 @@ class TestScoreMovers:
         assert body["movers_up"][0]["ticker"] == "AAA"
         assert body["movers_up"][0]["score"] == 85
         assert body["movers_up"][0]["score_change"] == 25
+        assert "rose 25 points to 85/100" in body["movers_up"][0]["summary"]
+        assert "no portfolio action" in body["movers_up"][0]["summary"].lower()
         assert body["movers_down"][0]["ticker"] == "BBB"
         assert body["movers_down"][0]["score_change"] == -30
 

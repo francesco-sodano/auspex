@@ -12,6 +12,12 @@ from decimal import Decimal
 from auspex.currency.money import to_decimal
 from auspex.models.enums import CohortConfidence
 
+#: The *single* authoritative cohort/parent size thresholds. Everything else
+#: about the fallback ladder — the confidence lambdas below, and therefore the
+#: reported scope label — is derived from these two numbers through
+#: :func:`shrinkage_lambda`. Editing one of them cannot silently disagree with a
+#: separately maintained lambda constant, which is exactly the failure mode a
+#: pair of "documentation only" constants invited.
 COHORT_MIN_SIZE = 12
 PARENT_MIN_SIZE = 8
 
@@ -19,8 +25,6 @@ PARENT_MIN_SIZE = 8
 #: documented ladder thresholds fall out of the same formula exactly:
 #: ``lambda(12) = 12/(12+12) = 0.5`` and ``lambda(8) = 8/(8+12) = 0.4``.
 SHRINKAGE_K = 12
-HIGH_CONFIDENCE_LAMBDA = Decimal("0.5")
-MEDIUM_CONFIDENCE_LAMBDA = Decimal("0.4")
 
 #: A cross-section needs at least this many observations before a z-score or a
 #: percentile computed against it means anything.
@@ -39,6 +43,12 @@ def shrinkage_lambda(n: int, k: int = SHRINKAGE_K) -> Decimal:
     if n <= 0:
         return Decimal(0)
     return Decimal(n) / Decimal(n + k)
+
+
+#: Derived, never hand-maintained: ``lambda_cohort >= HIGH_CONFIDENCE_LAMBDA``
+#: is by construction the same predicate as ``n_cohort >= COHORT_MIN_SIZE``.
+HIGH_CONFIDENCE_LAMBDA = shrinkage_lambda(COHORT_MIN_SIZE)
+MEDIUM_CONFIDENCE_LAMBDA = shrinkage_lambda(PARENT_MIN_SIZE)
 
 
 @dataclass(frozen=True)

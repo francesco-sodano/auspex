@@ -108,3 +108,30 @@ def test_email_claim_precedence_prefers_verified_email(monkeypatch) -> None:
 
     assert user.email == "primary@example.test"
     assert user.display_name == "Primary Person"
+
+
+def test_token_validation_applies_configured_clock_skew(monkeypatch) -> None:
+    claims = {
+        "iss": ISSUER,
+        "oid": "00000000-0000-0000-0000-0000000000aa",
+    }
+    decode = Mock(return_value=claims)
+    monkeypatch.setattr("auspex.api.auth.jwt.decode", decode)
+    validator = EntraTokenValidator(
+        Settings(
+            entra_audience="audience",
+            entra_issuer=ISSUER,
+            entra_jwks_url=JWKS_URL,
+            jwt_clock_skew_seconds=75,
+        )
+    )
+    jwk_client = Mock()
+    jwk_client.get_signing_key_from_jwt.return_value.key = object()
+    monkeypatch.setattr(
+        "auspex.api.auth.PyJWKClient",
+        lambda *args, **kwargs: jwk_client,
+    )
+
+    validator.validate("token")
+
+    assert decode.call_args_list[-1].kwargs["leeway"] == 75

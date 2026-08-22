@@ -8,10 +8,13 @@ from __future__ import annotations
 from auspex.scoring.composite import (
     CompositeResult,
     LegCompositeResult,
+    LegCrossSection,
+    LegDeltaDecomposition,
     classify_direction,
     compute_percentile,
     compute_security_composite,
     cross_sectional_zscores,
+    decompose_leg_delta,
 )
 from auspex.scoring.coverage import applicable_legs, coverage, is_stale
 from auspex.scoring.engine import (
@@ -42,6 +45,8 @@ from auspex.scoring.legs import (
     valuation_brake,
 )
 from auspex.scoring.normalize import (
+    COHORT_MIN_SIZE,
+    PARENT_MIN_SIZE,
     CohortScope,
     assign_cohort_scope,
     blended_percentile_rank,
@@ -62,15 +67,19 @@ from auspex.scoring.sessions import (
     normalise_calendar,
     nth_prior_session,
     prior_sessions,
+    sessions_between,
 )
 
 __all__ = [
     "CompositeResult",
     "LegCompositeResult",
+    "LegCrossSection",
+    "LegDeltaDecomposition",
     "classify_direction",
     "compute_percentile",
     "compute_security_composite",
     "cross_sectional_zscores",
+    "decompose_leg_delta",
     "applicable_legs",
     "coverage",
     "is_stale",
@@ -99,6 +108,8 @@ __all__ = [
     "valuation_brake",
     "CohortScope",
     "assign_cohort_scope",
+    "COHORT_MIN_SIZE",
+    "PARENT_MIN_SIZE",
     "blended_percentile_rank",
     "blended_zscore",
     "clip",
@@ -115,4 +126,5 @@ __all__ = [
     "normalise_calendar",
     "nth_prior_session",
     "prior_sessions",
+    "sessions_between",
 ]

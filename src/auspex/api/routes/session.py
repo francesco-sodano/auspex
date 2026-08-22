@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from auspex.api.access import STATUS_DETAIL, CurrentUser, get_app_user
 from auspex.api.auth import AuthenticatedUser, get_current_user
 from auspex.api.deps import get_app_user_service, get_onboarding_repo, get_user_settings_repo
+from auspex.api.rate_limit import SlidingWindowRateLimiter, get_rate_limiter
 from auspex.models.app_user import UserRole, UserStatus
 from auspex.models.onboarding import (
     OnboardingAcknowledgements,
@@ -32,6 +33,7 @@ from auspex.models.user_settings import (
     RiskProfile,
     migrate_investment_horizon,
 )
+from auspex.settings import Settings, get_settings
 from auspex.users.onboarding import OnboardingError, OnboardingService
 from auspex.users.service import AppUserService, UserLifecycleError
 
@@ -44,12 +46,6 @@ ACKNOWLEDGEMENT_FIELDS: tuple[str, ...] = tuple(
 )
 
 router = APIRouter(prefix="/session", tags=["session"])
-
-#: Same handlers, mounted at ``/api/registration`` as well. The SPA reaches
-#: for the registration noun while the rest of the lifecycle surface is
-#: session-shaped; serving both keeps either naming valid rather than making
-#: the two halves of the product agree on a coin flip.
-compat_router = APIRouter(prefix="/registration", tags=["session"])
 
 
 class SessionOut(BaseModel):
@@ -241,6 +237,8 @@ async def register(
     service: AppUserService = Depends(get_app_user_service),
     onboarding_repo=Depends(get_onboarding_repo),
     settings_repo=Depends(get_user_settings_repo),
+    limiter: SlidingWindowRateLimiter = Depends(get_rate_limiter),
+    settings: Settings = Depends(get_settings),
 ) -> SessionOut:
     """Register the authenticated principal. Idempotent.
 
@@ -251,6 +249,12 @@ async def register(
     authority then binds to that principal's immutable object ID.
     """
 
+    await limiter.check(
+        scope="registration",
+        key=user.user_id,
+        limit=settings.registration_rate_limit,
+        window_seconds=settings.rate_limit_window_seconds,
+    )
     if not request.accepted_terms:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -299,28 +303,4 @@ async def register(
                     )
 
     current = CurrentUser(authenticated=user, app_user=app_user)
-    return await _with_onboarding_step(current, onboarding_repo, settings_repo)
-
-
-@compat_router.post("", response_model=SessionOut, status_code=status.HTTP_201_CREATED)
-async def register_compat(
-    request: RegisterRequest,
-    user: AuthenticatedUser = Depends(get_current_user),
-    service: AppUserService = Depends(get_app_user_service),
-    onboarding_repo=Depends(get_onboarding_repo),
-    settings_repo=Depends(get_user_settings_repo),
-) -> SessionOut:
-    """``POST /api/registration`` — alias of :func:`register`."""
-
-    return await register(request, user, service, onboarding_repo, settings_repo)
-
-
-@compat_router.get("/status", response_model=SessionOut)
-async def registration_status_compat(
-    current: CurrentUser = Depends(get_app_user),
-    onboarding_repo=Depends(get_onboarding_repo),
-    settings_repo=Depends(get_user_settings_repo),
-) -> SessionOut:
-    """``GET /api/registration/status`` — alias of :func:`get_session_status`."""
-
     return await _with_onboarding_step(current, onboarding_repo, settings_repo)

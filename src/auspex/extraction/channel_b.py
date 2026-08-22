@@ -1,8 +1,8 @@
-"""Channel B — prose digest + comparative diff (arc42 §5.4).
+"""Channel B — plain-language summary, prose digest, and comparative diff.
 
-Maximally informative: 150-250 word digest, verbatim key quotes, and a
-comparative diff against the prior comparable filing when supplied. Never
-touches numbers.
+Produces a short beginner-friendly summary, a detailed grounded digest,
+verbatim key quotes, and a comparative diff against the prior comparable
+filing when supplied. Never calculates or infers numbers.
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ from auspex.providers.openai_provider import AzureOpenAIClient
 
 _DOMAIN_FIELDS = (
     "headline",
+    "plain_summary",
+    "plain_summary_evidence",
     "digest",
     "key_quotes",
     "management_claims",
@@ -40,7 +42,7 @@ class ChannelBDigestSink(Protocol):
 
 
 class ChannelBExtractor:
-    prompt_version = "digest-b-v1"
+    prompt_version = "digest-b-v2"
 
     def __init__(
         self,
@@ -94,6 +96,11 @@ class ChannelBExtractor:
         domain_data = {k: data[k] for k in _DOMAIN_FIELDS if k in data}
         domain_data.setdefault("headline", "Document update")
         domain_data.setdefault("digest", "No evidence digest was returned.")
+        domain_data["plain_summary_evidence"] = [
+            value
+            for value in domain_data.get("plain_summary_evidence", [])
+            if isinstance(value, str) and value.strip()
+        ]
         domain_data["key_quotes"] = [
             {
                 key: value
@@ -176,6 +183,82 @@ class ChannelBExtractor:
             **domain_data,
         )
 
+    @staticmethod
+    def _normalise_source_text(value: str) -> str:
+        return " ".join(value.split())
+
+    @classmethod
+    def _source_contains(cls, source: str, excerpt: str) -> bool:
+        normalised_excerpt = cls._normalise_source_text(excerpt)
+        return bool(
+            normalised_excerpt
+            and normalised_excerpt in cls._normalise_source_text(source)
+        )
+
+    @staticmethod
+    def _verify_source_grounding(
+        digest: ChannelBDigest,
+        *,
+        sections: list[Section],
+        prior_sections: list[Section] | None,
+    ) -> ChannelBDigest:
+        current_text = "\n".join(section.text for section in sections)
+        prior_text = "\n".join(
+            section.text for section in prior_sections or []
+        )
+        evidence = [
+            excerpt
+            for excerpt in digest.plain_summary_evidence
+            if ChannelBExtractor._source_contains(current_text, excerpt)
+        ]
+        key_quotes = [
+            quote
+            for quote in digest.key_quotes
+            if ChannelBExtractor._source_contains(current_text, quote.text)
+        ]
+        comparative = digest.comparative
+        if comparative is not None:
+            comparative = comparative.model_copy(
+                update={
+                    "risk_factors_added": [
+                        item
+                        for item in comparative.risk_factors_added
+                        if ChannelBExtractor._source_contains(
+                            current_text,
+                            item.verbatim,
+                        )
+                    ],
+                    "risk_factors_removed": [
+                        item
+                        for item in comparative.risk_factors_removed
+                        if ChannelBExtractor._source_contains(
+                            prior_text,
+                            item.prior_verbatim,
+                        )
+                    ],
+                    "risk_factors_reworded": [
+                        item
+                        for item in comparative.risk_factors_reworded
+                        if ChannelBExtractor._source_contains(
+                            current_text,
+                            item.after,
+                        )
+                        and ChannelBExtractor._source_contains(
+                            prior_text,
+                            item.before,
+                        )
+                    ],
+                }
+            )
+        return digest.model_copy(
+            update={
+                "plain_summary": digest.plain_summary if evidence else None,
+                "plain_summary_evidence": evidence,
+                "key_quotes": key_quotes,
+                "comparative": comparative,
+            }
+        )
+
     async def extract(
         self,
         *,
@@ -188,7 +271,10 @@ class ChannelBExtractor:
         prior_sections: list[Section] | None = None,
     ) -> ChannelBDigest:
         cache_key = channel_b_cache_key(
-            content_hash=content_hash, model_version=self._model_version, prompt_version=self.prompt_version
+            security_id=security_id,
+            content_hash=content_hash,
+            model_version=self._model_version,
+            prompt_version=self.prompt_version,
         )
         cached = await self._sink.find_by_cache_key(cache_key)
         if cached is not None:
@@ -202,6 +288,11 @@ class ChannelBExtractor:
         )
         digest = self.parse_response(
             raw_json, security_id=security_id, document_id=document_id, content_hash=content_hash
+        )
+        digest = self._verify_source_grounding(
+            digest,
+            sections=sections,
+            prior_sections=prior_sections,
         )
         await self._sink.upsert(digest)
         return digest

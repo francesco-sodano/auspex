@@ -14,7 +14,7 @@ from auspex.providers.openai_provider import AzureOpenAIClient
 
 
 class AnswerGenerator:
-    prompt_version = "answer-v1"
+    prompt_version = "answer-v2"
 
     def __init__(self, *, openai_client: AzureOpenAIClient, deployment: str, system_prompt: str) -> None:
         self._openai = openai_client

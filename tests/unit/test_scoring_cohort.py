@@ -13,6 +13,10 @@ from decimal import Decimal
 
 from auspex.models.enums import CohortConfidence
 from auspex.scoring.normalize import (
+    COHORT_MIN_SIZE,
+    HIGH_CONFIDENCE_LAMBDA,
+    MEDIUM_CONFIDENCE_LAMBDA,
+    PARENT_MIN_SIZE,
     assign_cohort_scope,
     blended_percentile_rank,
     blended_zscore,
@@ -156,6 +160,29 @@ class TestShrinkage:
         )
         assert scope.scope == "c"
         assert scope.lambda_cohort >= Decimal("0.5")
+
+
+class TestThresholdConstants:
+    """One authoritative source for the two ladder thresholds.
+
+    ``COHORT_MIN_SIZE``/``PARENT_MIN_SIZE`` were declared and referenced by
+    nothing while the effective thresholds lived in separately hand-written
+    lambda constants, so editing one without the other would silently have had
+    no effect. The lambdas are now derived from the sizes.
+    """
+
+    def test_the_confidence_lambdas_are_derived_from_the_sizes(self):
+        assert HIGH_CONFIDENCE_LAMBDA == shrinkage_lambda(COHORT_MIN_SIZE)
+        assert MEDIUM_CONFIDENCE_LAMBDA == shrinkage_lambda(PARENT_MIN_SIZE)
+
+    def test_the_derived_lambdas_reproduce_the_documented_values(self):
+        assert HIGH_CONFIDENCE_LAMBDA == Decimal("0.5")
+        assert MEDIUM_CONFIDENCE_LAMBDA == Decimal("0.4")
+
+    def test_the_lambda_predicate_is_exactly_the_size_predicate(self):
+        for n in range(0, 40):
+            assert (shrinkage_lambda(n) >= HIGH_CONFIDENCE_LAMBDA) == (n >= COHORT_MIN_SIZE)
+            assert (shrinkage_lambda(n) >= MEDIUM_CONFIDENCE_LAMBDA) == (n >= PARENT_MIN_SIZE)
 
 
 class TestBlendedStatistics:

@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from auspex.config.loader import build_config_version, load_universe, load_weights
+import pytest
+
+from auspex.config.loader import (
+    ConfigValidationError,
+    _validate_fpi_redistribution,
+    build_config_version,
+    load_universe,
+    load_weights,
+)
 from auspex.models.common import utc_now
 from auspex.models.enums import FilerProfile
 
@@ -86,6 +94,92 @@ class TestWeightsLoading:
     def test_fpi_has_no_smart_money_weight(self):
         weights = load_weights()
         assert "smart_money" not in weights["fpi"]
+
+    def test_committed_fpi_weights_are_the_proportional_redistribution(self):
+        weights = load_weights()
+        surviving = Decimal(1) - Decimal(weights["domestic"]["smart_money"])
+        for leg, configured in weights["fpi"].items():
+            expected = Decimal(weights["domestic"][leg]) / surviving
+            assert Decimal(configured) == expected.quantize(Decimal(configured))
+
+
+class TestFpiRedistributionValidation:
+    """arc42 §5.2: an FPI files no Form 4, so ``smart_money``'s weight is
+    redistributed across the other five legs *in proportion*.
+
+    ``config/weights.yaml`` has always claimed the loader enforces this. It did
+    not, so a future edit could have scored foreign private issuers on a
+    quietly different model to their domestic peers while both rows kept citing
+    the same ``config_version_id``.
+    """
+
+    BASE = {
+        "domestic": {
+            "thesis_linkage": "0.20",
+            "attention_acceleration": "0.15",
+            "narrative_premium": "0.10",
+            "smart_money": "0.20",
+            "fundamental_health": "0.20",
+            "valuation_brake": "0.15",
+        },
+        "fpi": {
+            "thesis_linkage": "0.25",
+            "attention_acceleration": "0.1875",
+            "narrative_premium": "0.125",
+            "fundamental_health": "0.25",
+            "valuation_brake": "0.1875",
+        },
+    }
+
+    def _weights(self, **fpi_overrides) -> dict:
+        weights = {"domestic": dict(self.BASE["domestic"]), "fpi": dict(self.BASE["fpi"])}
+        weights["fpi"].update(fpi_overrides)
+        return weights
+
+    def test_the_correct_redistribution_is_accepted(self):
+        _validate_fpi_redistribution(self._weights())
+
+    def test_a_disproportionate_weight_is_rejected(self):
+        # Both still sum to 1.0 — only the *proportions* are wrong, which a
+        # sum-to-one check would happily wave through.
+        weights = self._weights(thesis_linkage="0.30", fundamental_health="0.20")
+        with pytest.raises(ConfigValidationError, match="proportional redistribution"):
+            _validate_fpi_redistribution(weights)
+
+    def test_a_smart_money_weight_on_an_fpi_is_rejected(self):
+        weights = self._weights(smart_money="0.20")
+        with pytest.raises(ConfigValidationError, match="smart_money"):
+            _validate_fpi_redistribution(weights)
+
+    def test_a_leg_missing_from_fpi_is_rejected(self):
+        weights = self._weights()
+        del weights["fpi"]["valuation_brake"]
+        with pytest.raises(ConfigValidationError, match="valuation_brake"):
+            _validate_fpi_redistribution(weights)
+
+    def test_an_unknown_fpi_leg_is_rejected(self):
+        weights = self._weights(momentum="0.10")
+        with pytest.raises(ConfigValidationError, match="momentum"):
+            _validate_fpi_redistribution(weights)
+
+    def test_a_missing_section_is_rejected(self):
+        with pytest.raises(ConfigValidationError):
+            _validate_fpi_redistribution({"domestic": self.BASE["domestic"]})
+
+    def test_documented_rounding_precision_is_honoured(self):
+        """Values are committed to 4 dp; the check compares at the precision
+        each value is written to rather than demanding infinite digits."""
+
+        weights = {
+            "domestic": {"a": "0.30", "b": "0.30", "smart_money": "0.40"},
+            "fpi": {"a": "0.5", "b": "0.5"},
+        }
+        _validate_fpi_redistribution(weights)
+
+    def test_redistributing_the_whole_weight_is_rejected(self):
+        weights = {"domestic": {"a": "0.0", "smart_money": "1.0"}, "fpi": {"a": "1.0"}}
+        with pytest.raises(ConfigValidationError, match="no weight to redistribute"):
+            _validate_fpi_redistribution(weights)
 
 
 class TestConfigVersion:

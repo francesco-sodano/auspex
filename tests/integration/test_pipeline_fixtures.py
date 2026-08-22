@@ -22,6 +22,7 @@ from tests.integration.conftest import (
     seed_fx,
     seed_insider_form4,
     seed_prices,
+    seed_universe_prices,
 )
 
 
@@ -31,6 +32,11 @@ def test_pipeline_produces_coherent_scores_from_seeded_evidence(universe, config
 
     nvda = universe.by_ticker()["NVDA"]
     amd = universe.by_ticker()["AMD"]  # same cohort (semi-compute) — needed for a non-degenerate cross-section
+
+    # Every universe member is priced, as it is on a live night: the staleness
+    # rule (arc42 §5.5) excludes a security with no observed price on a day the
+    # market traded, so an unpriced fixture would exercise exclusion, not scoring.
+    seed_universe_prices(repos, universe, as_of_date)
 
     seed_fundamentals(repos, nvda.id, as_of_date)
     seed_channel_a_extraction(repos, nvda.id, as_of_date)

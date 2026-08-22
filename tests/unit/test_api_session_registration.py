@@ -218,25 +218,23 @@ class TestLifecycleGate:
 
 
 class TestClientFacingContract:
-    """The SPA addresses registration/onboarding/deletion by its own nouns.
+    """The SPA uses the canonical session lifecycle routes."""
 
-    Both spellings are served so the two halves of the product are not
-    coupled to a naming coin flip; these tests pin the aliases so a future
-    refactor cannot quietly break the shipped client.
-    """
-
-    def test_registration_alias_registers(self):
+    def test_session_registration_registers(self):
         client, _ = make_client()
 
-        response = client.post("/api/registration", json={"accepted_terms": True})
+        response = client.post(
+            "/api/session/register",
+            json={"accepted_terms": True},
+        )
 
         assert response.status_code == 201
         assert response.json()["status"] == UserStatus.PENDING_APPROVAL.value
 
-    def test_registration_status_alias(self):
+    def test_session_status_is_available(self):
         client, _ = make_client()
 
-        assert client.get("/api/registration/status").status_code == 200
+        assert client.get("/api/session/status").status_code == 200
 
     def test_registration_carries_preferences_into_onboarding(self):
         """Preferences typed at sign-up should not have to be retyped."""
@@ -249,7 +247,7 @@ class TestClientFacingContract:
         client, _ = make_client(service=service, user_id=derived)
 
         response = client.post(
-            "/api/registration",
+            "/api/session/register",
             json={
                 "accepted_terms": True,
                 "risk_profile": "CONSERVATIVE",

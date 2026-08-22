@@ -28,6 +28,7 @@ from auspex.api.deps import (
     get_score_repo,
     get_universe,
 )
+from auspex.api.explanations import mover_summary
 from auspex.api.repos import get_digest_repo, get_document_repo, get_extraction_repo, get_leg_change_repo
 from auspex.api.schemas import (
     BriefingChangeItem,
@@ -220,6 +221,7 @@ async def get_briefing(
                 score=current.percentile,
                 prior_score=prior.percentile,
                 score_change=current.percentile - prior.percentile,
+                summary=mover_summary(current, prior, recommendation),
                 narrative=current.narrative or "",
                 buy_ready=recommendation_out.buy_ready if recommendation_out else False,
                 buy_blockers=(

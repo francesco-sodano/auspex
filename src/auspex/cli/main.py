@@ -80,7 +80,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     baseline_parser.add_argument(
         "--label",
         required=True,
-        help="safe release/config label, e.g. v4.1.0",
+        help="safe baseline label, e.g. pre-convergence",
+    )
+    cleanup_parser = subparsers.add_parser(
+        "derived-cleanup",
+        help=(
+            "clear rebuildable pre-production engine state while preserving "
+            "raw evidence, users, user decisions, settings, conversations, "
+            "performance attribution, and the portfolio ledger"
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="perform deletion; without this flag the command is read-only",
     )
 
     diagnose_parser = subparsers.add_parser(
@@ -229,7 +242,13 @@ async def _run_pipeline_command(as_of_date: date) -> int:
         CosmosPriceSink,
         CosmosWatermarkStore,
     )
-    from auspex.pipeline.context import PipelineContext, PipelineProviders, PipelineRepos
+    from auspex.pipeline.context import (
+        PipelineContext,
+        PipelineProviders,
+        PipelineRepos,
+        resolve_hard_timeout_minutes,
+        resolve_step_timeout_minutes,
+    )
     from auspex.portfolio.adapter import PortfolioAdapter
     from auspex.portfolio.mapping import load_portfolio_mapping
     from auspex.providers.factory import build_default_providers
@@ -411,6 +430,14 @@ async def _run_pipeline_command(as_of_date: date) -> int:
         user_id=primary_user_id,
         repos=repos,
         providers=providers,
+        # The run budget is configuration, not a literal: without this the
+        # deadline was a hard-coded 45 minutes and both
+        # AUSPEX_PIPELINE_HARD_TIMEOUT_MINUTES and policy.yaml's
+        # pipeline.hard_timeout_minutes were read by nothing. The per-step
+        # ceiling is resolved the same way so one hung provider call cannot
+        # consume the entire night on its own.
+        hard_timeout_minutes=resolve_hard_timeout_minutes(config, settings),
+        step_timeout_minutes=resolve_step_timeout_minutes(config, settings),
     )
     ctx.__dict__["_config_version_id"] = config_version.id
 
@@ -549,7 +576,7 @@ async def _performance_command(as_of_date: date) -> int:
     """
 
     from auspex.cli.bootstrap import BootstrapRunner
-    from auspex.config import load_universe
+    from auspex.config import load_fees, load_policy, load_universe
     from auspex.models.performance import PerformanceMetric
     from auspex.models.policy import Recommendation
     from auspex.models.scoring import ScoreSnapshot
@@ -565,7 +592,12 @@ async def _performance_command(as_of_date: date) -> int:
         CosmosPriceSink,
         CosmosWatermarkStore,
     )
-    from auspex.pipeline.context import PipelineContext, PipelineRepos
+    from auspex.pipeline.context import (
+        PipelineContext,
+        PipelineRepos,
+        resolve_hard_timeout_minutes,
+        resolve_step_timeout_minutes,
+    )
     from auspex.portfolio.adapter import PortfolioAdapter
     from auspex.portfolio.event_ledger import effective_transactions
     from auspex.portfolio.mapping import load_portfolio_mapping
@@ -599,7 +631,16 @@ async def _performance_command(as_of_date: date) -> int:
     )
     performance_repo = CosmosRepository(cosmos, "performance", PerformanceMetric)
 
-    ctx = PipelineContext(universe=universe, config={}, as_of_date=as_of_date, user_id="system", repos=repos)
+    policy_config = load_policy()
+    ctx = PipelineContext(
+        universe=universe,
+        config={"fees": load_fees(), "policy": policy_config},
+        as_of_date=as_of_date,
+        user_id="system",
+        repos=repos,
+        hard_timeout_minutes=resolve_hard_timeout_minutes({"policy": policy_config}),
+        step_timeout_minutes=resolve_step_timeout_minutes({"policy": policy_config}),
+    )
 
     runner = BootstrapRunner(universe=universe, context_factory=lambda _as_of: ctx)
     metrics = await runner.compute_performance_metrics(
@@ -1097,7 +1138,13 @@ async def _bootstrap_command(
         CosmosPriceSink,
         CosmosWatermarkStore,
     )
-    from auspex.pipeline.context import PipelineContext, PipelineProviders, PipelineRepos
+    from auspex.pipeline.context import (
+        PipelineContext,
+        PipelineProviders,
+        PipelineRepos,
+        resolve_hard_timeout_minutes,
+        resolve_step_timeout_minutes,
+    )
     from auspex.portfolio.adapter import PortfolioAdapter
     from auspex.portfolio.mapping import load_portfolio_mapping
     from auspex.providers.factory import build_default_providers
@@ -1222,7 +1269,14 @@ async def _bootstrap_command(
         day its own scratch state (new-document/accession tracking, etc)."""
 
         ctx = PipelineContext(
-            universe=universe, config=config, as_of_date=as_of, user_id=user_id, repos=repos, providers=providers
+            universe=universe,
+            config=config,
+            as_of_date=as_of,
+            user_id=user_id,
+            repos=repos,
+            providers=providers,
+            hard_timeout_minutes=resolve_hard_timeout_minutes(config, settings),
+            step_timeout_minutes=resolve_step_timeout_minutes(config, settings),
         )
         ctx.__dict__["_config_version_id"] = config_version.id
         return ctx
@@ -1367,6 +1421,10 @@ def main(argv: list[str] | None = None) -> int:
         from auspex.cli.engine_baseline import export_engine_baseline_command
 
         return asyncio.run(export_engine_baseline_command(args.label))
+    if args.command == "derived-cleanup":
+        from auspex.cli.derived_cleanup import cleanup_derived_command
+
+        return asyncio.run(cleanup_derived_command(apply=args.apply))
     if args.command == "market-data-diagnose":
         from auspex.cli.market_data import market_data_diagnose_command
 

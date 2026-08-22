@@ -19,6 +19,7 @@ from auspex.scoring.sessions import (
     normalise_calendar,
     nth_prior_session,
     prior_sessions,
+    sessions_between,
 )
 
 # Mon 2025-06-02 .. Fri 2025-06-06, then Mon 2025-06-09 .. Wed 2025-06-11.
@@ -56,6 +57,37 @@ class TestLatestSessionOnOrBefore:
 
     def test_none_for_an_empty_calendar(self):
         assert latest_session_on_or_before((), date(2025, 6, 4)) is None
+
+
+class TestSessionsBetween:
+    """Price age measured in sessions the market actually held.
+
+    This is the input the documented staleness rule expects. Counting calendar
+    days instead ages a Friday close by three days over a weekend and by more
+    across a holiday, which would exclude perfectly current securities.
+    """
+
+    def test_adjacent_sessions_have_nothing_between_them(self):
+        assert sessions_between(WEEK, date(2025, 6, 4), date(2025, 6, 5)) == 0
+
+    def test_a_weekend_does_not_age_a_price(self):
+        assert sessions_between(WEEK, date(2025, 6, 6), date(2025, 6, 9)) == 0
+
+    def test_counts_only_the_sessions_strictly_in_between(self):
+        assert sessions_between(WEEK, date(2025, 6, 2), date(2025, 6, 5)) == 2
+
+    def test_a_same_day_span_is_zero(self):
+        assert sessions_between(WEEK, date(2025, 6, 4), date(2025, 6, 4)) == 0
+
+    def test_a_future_dated_bar_is_never_negatively_stale(self):
+        assert sessions_between(WEEK, date(2025, 6, 10), date(2025, 6, 4)) == 0
+
+    def test_an_empty_calendar_reports_no_intervening_sessions(self):
+        assert sessions_between((), date(2025, 6, 2), date(2025, 6, 11)) == 0
+
+    def test_duplicate_calendar_entries_are_not_double_counted(self):
+        noisy = (*WEEK, date(2025, 6, 4), date(2025, 6, 4))
+        assert sessions_between(noisy, date(2025, 6, 2), date(2025, 6, 5)) == 2
 
 
 class TestNthPriorSession:

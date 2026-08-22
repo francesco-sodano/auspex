@@ -21,6 +21,8 @@ fx_conversion_spread:
 # Conservative round-trip fraction used only by shadow/performance studies.
 # Live recommendations continue to use the exact commission and FX formulas.
 performance_round_trip_cost_rate: "0.0050"
+performance_momentum_window_sessions: 63
+performance_spread_quantile: "0.20"
 
 custody_fee_annual_bps:
   formula: 'portfolio_value_usd * "0.0015"'

@@ -109,3 +109,39 @@ class TestApiRoutesRequireAuth:
     def test_scores_route_is_under_api_prefix(self):
         app = create_app()
         assert "/api/scores/{ticker}/{as_of_date}" in app.openapi()["paths"]
+
+    def test_lifecycle_surface_uses_only_canonical_routes(self):
+        paths = create_app().openapi()["paths"]
+        for path in (
+            "/api/session/register",
+            "/api/session/status",
+            "/api/onboarding/initial-portfolio",
+            "/api/account/deletion",
+        ):
+            assert path in paths
+        for removed in (
+            "/api/registration",
+            "/api/registration/status",
+            "/api/onboarding/portfolio",
+            "/api/account/deletion-request",
+            "/api/account/deletion-status",
+        ):
+            assert removed not in paths
+
+
+class TestCors:
+    def test_local_development_origin_receives_preflight_headers(self):
+        response = make_client().options(
+            "/api/health",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "Authorization",
+            },
+        )
+
+        assert response.status_code == 200
+        assert (
+            response.headers["access-control-allow-origin"]
+            == "http://localhost:5173"
+        )

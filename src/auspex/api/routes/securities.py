@@ -28,6 +28,7 @@ from auspex.api.deps import (
     get_score_repo,
     get_universe,
 )
+from auspex.api.explanations import score_reasoning
 from auspex.api.repos import get_digest_repo, get_document_repo
 from auspex.api.schemas import (
     FundamentalMetricOut,
@@ -84,23 +85,90 @@ def _compact_recap(value: str, max_chars: int = 480) -> str:
     return f"{cleaned[: max_chars - 3].rstrip()}..."
 
 
+def _digest_text(digest: ChannelBDigest | None) -> str:
+    if digest is None:
+        return ""
+    plain = (digest.plain_summary or "").strip()
+    if digest.prompt_version == "digest-b-v2":
+        return (
+            plain
+            if plain and digest.plain_summary_evidence
+            else digest.digest.strip()
+        )
+    return digest.digest.strip()
+
+
+def _preferred_digests(
+    digests: list[ChannelBDigest],
+) -> dict[str, ChannelBDigest]:
+    def preference(digest: ChannelBDigest) -> tuple[int, int, str]:
+        return (
+            1 if digest.prompt_version == "digest-b-v2" else 0,
+            1 if (digest.plain_summary or "").strip() else 0,
+            digest.id,
+        )
+
+    selected: dict[str, ChannelBDigest] = {}
+    for digest in digests:
+        current = selected.get(digest.document_id)
+        if current is None or preference(digest) > preference(current):
+            selected[digest.document_id] = digest
+    return selected
+
+
 def _business_recap(
     security: Security,
     score: ScoreSnapshot,
-    annual_document: Document | None,
-    annual_digest: ChannelBDigest | None,
+    annual_update: SecurityDocumentOut | None,
+    documents: list[SecurityDocumentOut],
+    news: list[SecurityDocumentOut],
     *,
     displayed_document_count: int,
     digest_count: int,
 ) -> str:
+    updates: list[tuple[str, SecurityDocumentOut]] = []
+    latest_company_filing = next(
+        (
+            document
+            for document in documents
+            if document.form not in {"4", "NEWS"} and document.digest.strip()
+        ),
+        None,
+    )
+    if latest_company_filing is not None:
+        updates.append(
+            (f"Latest {latest_company_filing.form} filing", latest_company_filing)
+        )
     if (
-        annual_document is not None
-        and annual_document.document_type
-        in {DocumentType.FORM_10K, DocumentType.FORM_20F}
-        and annual_digest is not None
-        and len(annual_digest.digest.strip()) >= 80
+        annual_update is not None
+        and annual_update.digest.strip()
+        and (
+            latest_company_filing is None
+            or annual_update.document_id != latest_company_filing.document_id
+        )
     ):
-        return _compact_recap(annual_digest.digest)
+        updates.append(("Latest annual filing", annual_update))
+    latest_form4 = next(
+        (document for document in documents if document.form == "4"),
+        None,
+    )
+    if latest_form4 is not None and latest_form4.digest.strip():
+        updates.append(("Latest insider filing", latest_form4))
+    if news and news[0].digest.strip():
+        updates.append(("Latest news", news[0]))
+    if not updates:
+        latest_filing = next(
+            (document for document in documents if document.digest.strip()),
+            None,
+        )
+        if latest_filing is not None:
+            updates.append((f"Latest {latest_filing.form} filing", latest_filing))
+    if updates:
+        summaries = [
+            f"{label}: {_compact_recap(update.digest, 170)}"
+            for label, update in updates[:4]
+        ]
+        return _compact_recap(" ".join(summaries), 720)
 
     cohort = security.cohort.replace("-", " ")
     score_text = (
@@ -113,14 +181,12 @@ def _business_recap(
         f"The current package includes {displayed_document_count} displayed regulatory "
         f"evidence items and {digest_count} grounded digests."
     )
-    narrative = _compact_recap(score.narrative, 260) if score.narrative else ""
     recap = (
-        f"{security.name} is tracked by Auspex in the {cohort} peer group on "
-        f"{security.exchange}. {score_text}, with {coverage_pct:.0f}% of applicable "
-        f"research legs computable. {package_text}"
+        f"A plain-language company overview is not yet available for {security.name}. "
+        f"Auspex compares it with other companies in the {cohort} group on "
+        f"{security.exchange}. {score_text}, using reliable information for "
+        f"{coverage_pct:.0f}% of the applicable research areas. {package_text}"
     )
-    if narrative:
-        recap = f"{recap} Current Auspex view: {narrative}"
     return recap
 
 
@@ -254,9 +320,8 @@ def _leg_scores(
         ):
             neutral = True
             status_explanation = (
-                "Neutral, not missing: no qualifying open-market insider purchases or sales "
-                "were recorded in the trailing 90 days across this peer cohort, so there is "
-                "no variation to rank."
+                "No meaningful insider buying or selling was recorded recently, "
+                "so this area is neutral rather than missing."
             )
         details[leg.value] = LegDetail(
             raw=result.raw,
@@ -269,39 +334,6 @@ def _leg_scores(
             status_explanation=status_explanation,
         )
     return details
-
-
-def _score_reasoning(
-    score: ScoreSnapshot,
-    prior: ScoreSnapshot | None,
-    legs: dict[str, LegDetail],
-) -> str:
-    ranked = sorted(
-        ((name, leg.score) for name, leg in legs.items() if leg.score is not None),
-        key=lambda item: item[1],
-    )
-    weakest = ranked[:2]
-    strongest = list(reversed(ranked[-2:]))
-    if len(ranked) == 1:
-        weakest = []
-    delta = (
-        score.percentile - prior.percentile
-        if score.percentile is not None and prior is not None and prior.percentile is not None
-        else None
-    )
-    movement = (
-        f"It moved {delta:+d} points from the previous scored session. "
-        if delta is not None
-        else ""
-    )
-    support = ", ".join(f"{name.replace('_', ' ')} ({value})" for name, value in strongest) or "none"
-    drag = ", ".join(f"{name.replace('_', ' ')} ({value})" for name, value in weakest) or "insufficient data"
-    return (
-        f"The Auspex Score is {score.percentile if score.percentile is not None else 'not computable'} "
-        f"within the active comparison scope. {movement}"
-        f"Strongest support: {support}. Main drags: {drag}. "
-        f"Coverage is {Decimal(score.coverage) * Decimal(100):.0f}%."
-    )
 
 
 async def _latest_score(repo: CosmosRepository, security_id: str) -> ScoreSnapshot | None:
@@ -389,7 +421,7 @@ def _map_document(
         filed_at=filed_at.isoformat(),
         headline=digest.headline if digest else (document.title or form4_headline),
         digest=(
-            digest.digest
+            _digest_text(digest)
             if digest
             else form4_digest
             or document.content_excerpt
@@ -564,7 +596,7 @@ async def get_security(
         parameters=[{"name": "@security_id", "value": security_id}],
         partition_key=security_id,
     )
-    digest_by_document_id = {digest.document_id: digest for digest in digests}
+    digest_by_document_id = _preferred_digests(digests)
     documents_out = [
         _map_document(document, digest_by_document_id.get(document.id), security)
         for document in documents
@@ -574,13 +606,37 @@ async def get_security(
         for document in news_documents
         if _news_is_relevant(document, security)
     ][:3]
-    annual_document = annual_documents[0] if annual_documents else None
+    annual_document = next(
+        (
+            document
+            for document in annual_documents
+            if document.document_type
+            in {DocumentType.FORM_10K, DocumentType.FORM_20F}
+        ),
+        None,
+    )
+    if annual_document is None:
+        annual_document = next(
+            (
+                document
+                for document in documents
+                if document.document_type
+                in {DocumentType.FORM_10K, DocumentType.FORM_20F}
+            ),
+            None,
+        )
     annual_digest = digest_by_document_id.get(annual_document.id) if annual_document else None
+    annual_update = (
+        _map_document(annual_document, annual_digest, security)
+        if annual_document is not None
+        else None
+    )
     business_summary = _business_recap(
         security,
         score,
-        annual_document,
-        annual_digest,
+        annual_update,
+        documents_out,
+        news,
         displayed_document_count=len(documents_out),
         digest_count=len(digests),
     )
@@ -628,7 +684,11 @@ async def get_security(
             and prior_score.percentile is not None
             else None
         ),
-        score_reasoning=_score_reasoning(score, prior_score, legs),
+        score_reasoning=score_reasoning(
+            score,
+            prior_score,
+            {name: detail.score for name, detail in legs.items()},
+        ),
         news=news,
         history=history,
         documents=documents_out,
@@ -681,7 +741,7 @@ async def get_security_documents(
         parameters=[{"name": "@security_id", "value": security_id}],
         partition_key=security_id,
     )
-    digest_by_document_id = {digest.document_id: digest for digest in digests}
+    digest_by_document_id = _preferred_digests(digests)
     return [
         _map_document(document, digest_by_document_id.get(document.id), security)
         for document in documents

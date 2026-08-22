@@ -290,14 +290,14 @@ class TestOnboardingRoutes:
 
         assert client.get("/api/onboarding").json()["user_id"] == USER_ID
 
-    def test_portfolio_alias_accepts_the_clients_field_names(self):
-        """The SPA posts `/portfolio` with `client_request_id` and
+    def test_initial_portfolio_accepts_the_clients_field_names(self):
+        """The SPA sends `client_request_id` and
         `acquisition_date`; both are absorbed rather than rejected."""
 
         client, _ = make_client()
 
-        response = client.post(
-            "/api/onboarding/portfolio",
+        response = client.put(
+            "/api/onboarding/initial-portfolio",
             json={
                 "client_request_id": "req-1",
                 "opening_cash_chf": "0",

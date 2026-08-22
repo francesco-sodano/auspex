@@ -64,6 +64,24 @@ def prior_sessions(calendar: Sequence[date], as_of: date, count: int) -> tuple[d
     return tuple(reversed(ordered[-count:]))
 
 
+def sessions_between(calendar: Sequence[date], start: date, end: date) -> int:
+    """Number of observed trading sessions strictly between ``start`` and ``end``.
+
+    This is the quantity :func:`auspex.scoring.coverage.is_stale` expects: the
+    age of a price expressed in sessions the market actually held, not calendar
+    days. A Friday close read on the following Monday is zero sessions old, and
+    a close from before a four-day holiday weekend is likewise not aged by the
+    days on which nothing traded.
+
+    Returns ``0`` when ``end <= start`` so a bar dated in the future (a data
+    error upstream) is never reported as *negatively* stale.
+    """
+
+    if end <= start:
+        return 0
+    return sum(1 for session in normalise_calendar(calendar) if start < session < end)
+
+
 def contiguous_weakening_streak(
     current_direction: Direction,
     directions_by_date: Mapping[date, Direction],

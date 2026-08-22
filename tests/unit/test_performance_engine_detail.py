@@ -237,12 +237,12 @@ class TestDetailedMetricFamilies:
             if metric.scope == "equal_weight"
         } == set(HORIZONS)
 
-    def test_momentum_benchmark_uses_fixed_63_session_window(self) -> None:
+    def test_momentum_benchmark_uses_configured_session_window(self) -> None:
         sections = [
             replace(
                 _cross_section(day, 21),
                 trailing_returns_usd_by_window={
-                    63: {
+                    21: {
                         sid: Decimal(index) / Decimal("100")
                         for index, sid in enumerate(NAMES)
                     }
@@ -251,12 +251,24 @@ class TestDetailedMetricFamilies:
             for day in range(24)
         ]
 
-        metrics = compute_benchmark_metrics(sections)
+        metrics = compute_benchmark_metrics(
+            sections,
+            momentum_window_sessions=21,
+        )
 
         momentum = next(
             metric for metric in metrics if metric.scope == "momentum"
         )
-        assert momentum.detail["trailing_window_sessions"] == "63"
+        assert momentum.detail["trailing_window_sessions"] == "21"
+
+    def test_spread_metrics_publish_configured_quantile(self) -> None:
+        metrics = compute_spread_metrics(
+            _series(),
+            quantile_fraction=Decimal("0.25"),
+        )
+
+        assert metrics
+        assert metrics[0].detail["quantile_fraction"] == "0.25"
 
     def test_leg_correlation_uses_largest_population_per_date(self) -> None:
         sections = []

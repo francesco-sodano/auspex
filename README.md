@@ -41,6 +41,8 @@ the decision authority.
 - Keeps an append-only, event-sourced portfolio ledger with correction and void
   events.
 - Provides grounded company analysis, evidence, filings, news and conversation.
+  Quotations shown to a user are verified verbatim against the stored source
+  section before they are served.
 - Measures score and recommendation performance over time.
 - Reports confidence intervals, effective sample size, robust/cost-adjusted
   spreads, turnover, drawdown, and benchmark comparisons.
@@ -58,15 +60,32 @@ the decision authority.
 | Fundamental Health | Growth, margin, cash generation, balance sheet and ROIC |
 | Valuation Brake | Relative EV/Sales, EV/EBITDA and FCF yield pressure |
 
-Fundamental sub-metrics are normalized before combination, attention counts one
-event per source document, missing applicable legs contribute a neutral zero
-with confidence reported separately, and small cohorts shrink continuously
-toward their parent/universe rather than switching populations abruptly.
-Non-USD valuation uses only authoritative point-in-time FX; when a rate is
-unavailable the leg is structurally excluded instead of penalizing coverage.
+Fundamental sub-metrics are normalized in peer scope before combination, and
+attention counts one event per source document. A leg with no evidence at all
+reports *no measurement* rather than a neutral number, so "nothing was
+published" is never read as "published something unremarkable"; an applicable
+but unevidenced leg then contributes a neutral zero to the score while being
+excluded from coverage, which is reported separately. Small cohorts shrink
+continuously toward their parent and the universe rather than switching
+populations abruptly. Non-USD valuation uses only authoritative point-in-time
+FX; when a rate is unavailable the leg is structurally excluded instead of
+penalizing coverage. Foreign-private-issuer weights are validated on every
+config load to be a proportional redistribution of the domestic weights, so an
+FPI cannot drift onto a different model than its peers.
 
 The **Auspex Score (0–100)** is a midpoint percentile rank inside the blended
-peer scope. It is not a probability and it is not an absolute valuation.
+peer scope — the same cohort/parent/universe shrinkage that governs the leg
+z-scores also governs the published rank, so crossing a cohort-size threshold
+moves a score continuously instead of stepping it. It is not a probability and
+it is not an absolute valuation.
+
+Staleness, score direction and weakening streaks are all measured in observed
+trading sessions reconstructed from non-quarantined price bars, and each day's
+per-leg change is compared against the previous session the market actually
+held. That change is attributed, not just reported: the part explained by the
+company's own new evidence and the part explained by its peer group moving are
+published separately and sum exactly to the total, or both are withheld with a
+stated reason.
 
 ### Score versus action
 
@@ -92,23 +111,45 @@ allocation is stored privately as a shadow challenger; it cannot replace the
 production allocation until held-out, point-in-time, post-cost promotion gates
 pass.
 
-### Market-data repair and shadow validation
+Each nightly user stage projects the portfolio first, applies the gate cascade
+against that projection, and only then runs its post-run assertions — one ledger
+read per user per night, in the order the effects actually occur. Both the whole
+run and each individual step are bounded by budgets taken from configuration, so
+one stalled provider or model call is cut off well inside the night's deadline.
+
+### Market-data repair, derived cleanup and shadow validation
 
 Before replaying a new scoring version:
 
 ```powershell
-python -m auspex engine-baseline-export --label v4.1.0
+python -m auspex engine-baseline-export --label pre-convergence
 python -m auspex market-data-diagnose --json
 python -m auspex market-data-repair --dry-run --json
 python -m auspex market-data-repair --json
+python -m auspex derived-cleanup
+python -m auspex derived-cleanup --apply
 python -m auspex bootstrap-recover --replay-all
+python -m auspex performance
 python -m auspex shadow
 ```
 
 Repair manifests are append-only in `config_versions`. Raw provider OHLCV,
 split and dividend observations are not rewritten; only derived adjustment
-fields and quarantine metadata can change. `shadow` is read-only unless
-`--publish` is explicitly supplied.
+fields and quarantine metadata can change.
+
+`derived-cleanup` clears only state the engine deterministically rebuilds —
+digests, narratives, scores, leg changes, portfolio projections, performance
+metrics, run manifests, and scoring config versions (never repair manifests).
+It is read-only without `--apply`, enumerates before it deletes, and aborts the
+whole pass if any row is missing its id or partition key rather than leaving the
+database half-cleaned. Raw documents, extractions, market data, fundamentals and
+watermarks are kept because a replay reads them; users, settings, onboarding,
+conversations, audit records and the external ledger are kept because they are
+not derived; and recommendations, dispositions and private performance
+attribution are kept because they record user decisions that a scoring replay
+cannot recreate.
+
+`shadow` is read-only unless `--publish` is explicitly supplied.
 
 ## Architecture
 
@@ -143,7 +184,7 @@ flowchart LR
 | AI | Azure OpenAI GPT-4.1-mini and GPT-4.1 deployments |
 | Identity | Microsoft Entra workforce or External ID SPA/API registration |
 | Workload access | System-assigned managed identities and data-plane RBAC |
-| Network | Private endpoints for data, Key Vault and Azure OpenAI |
+| Network | Private endpoints for data, Key Vault and Azure OpenAI; a single API replica by design |
 | Observability | Log Analytics, Application Insights, alerts and budget |
 | Infrastructure | Bicep orchestrated by Azure Developer CLI |
 
@@ -167,7 +208,7 @@ multiple API replicas.
 config/             Universe, cohorts, scoring, policy, fees and ledger mapping
 doc/                Current Arc42 architecture and bank-readiness guidance
 infra/              Tenant-neutral Bicep modules and AZD parameter mapping
-prompts/            Versioned extraction, narrative, planning and answer prompts
+prompts/            The five current extraction, narrative, planning and answer prompts
 scripts/            AZD setup and post-provision Entra configuration
 src/auspex/         Python domain, pipeline, persistence and API
 tests/              Unit, integration, property and golden tests
@@ -518,22 +559,37 @@ docker build -t auspex:local .
 ## Security and data handling
 
 - Only `/healthz` and `/auth-config.json` are unauthenticated.
-- Every `/api/*` route validates issuer, audience and signature.
+- Every `/api/*` route validates issuer, audience and signature, with a bounded
+  clock-skew allowance so a small time difference against the identity provider
+  is not a spurious `401`.
+- Cross-origin access is an explicit allow-list. The deployed configuration is
+  same-origin and sets it empty; local development allows the Vite dev server.
+- Registration and chat carry per-user sliding-window rate limits. Those counts
+  are held in the API process, so this pre-production deployment runs a single
+  API replica by design — deterministic limits are preferred to horizontal scale
+  until the counter moves to a shared store.
 - Azure services use managed identity; local authentication is disabled.
 - Provider keys are Key Vault secrets and never application settings.
-- Data and AI services use private endpoints.
+- Data and AI services use private endpoints. The container registry is the
+  deliberate exception, because Container Apps image pulls over Private Link
+  require a Premium registry; its admin user is disabled and pull rights are
+  granted only to the three workload identities.
 - The portfolio ledger is append-only; edits and deletes are correction/void
   events.
 - LLM output cannot directly set numeric scores, policy thresholds or trades.
-- Prompts, taxonomies, weights and model deployments are versioned.
+  Quoted evidence is checked verbatim against its source section; the prose
+  around it is constrained, cited and bounded, but is not entailment-proven.
+- Prompts, taxonomies, weights and model deployments are versioned, and every
+  prompt version in code resolves to a committed prompt file.
 - Conversation history expires after 15 days.
 
 ## Regulatory boundary
 
-Auspex is an MVP for directional research and human decision support. A bank
-must complete its own legal classification, model risk, suitability, privacy,
-outsourcing, resilience and supervisory controls before production use. The
-high-level production gap is documented in the final section of
+Auspex is and remains an MVP for directional research and human decision
+support, not a production banking service. A bank must complete its own legal
+classification, model risk, suitability, privacy, outsourcing, resilience and
+supervisory controls before production use. The high-level production gap, and
+the deliberate limitations that remain in this implementation, are documented in
 [doc/auspex-arc42.md](doc/auspex-arc42.md).
 
 ## License

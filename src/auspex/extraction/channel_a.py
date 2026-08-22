@@ -159,6 +159,7 @@ class ChannelAExtractor:
         taxonomy_theme_ids: list[str],
     ) -> ChannelAExtraction:
         cache_key = channel_a_cache_key(
+            security_id=security_id,
             content_hash=content_hash,
             model_version=self._model_version,
             prompt_version=self.prompt_version,

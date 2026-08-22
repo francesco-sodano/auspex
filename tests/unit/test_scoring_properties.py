@@ -20,8 +20,16 @@ from auspex.scoring.composite import (
     compute_security_composite,
 )
 from auspex.scoring.coverage import applicable_legs, coverage
-from auspex.scoring.legs import FundamentalHealthInputs, fundamental_health
+from auspex.scoring.engine import SecurityScoringInput, score_universe
+from auspex.scoring.legs import (
+    AttentionEvent,
+    FundamentalHealthInputs,
+    attention_acceleration,
+    fundamental_health,
+    thesis_linkage,
+)
 from auspex.scoring.normalize import (
+    assign_cohort_scope,
     percentile_rank_fraction,
     shrinkage_lambda,
     shrinkage_tier_weights,
@@ -313,8 +321,119 @@ class TestCompositeProperties:
             assert leg.reason_not_computable == REASON_NOT_APPLICABLE
 
 
+class TestCompositePercentileContinuity:
+    """The reported percentile must not jump when a cohort crosses the ladder.
+
+    Leg z-scores were blended across cohort/parent/universe from the start, but
+    the composite percentile was ranked inside the reported scope's population
+    alone. Growing a cohort from eleven members to twelve therefore swapped the
+    entire reference population in one step — the exact cliff the shrinkage
+    blend exists to remove, reappearing one level up in the number a user reads.
+    """
+
+    LEG = LegName.THESIS_LINKAGE
+    WEIGHTS_BY_PROFILE = {FilerProfile.DOMESTIC: {LEG: Decimal("1")}}
+    UNIVERSE = [f"s{i}" for i in range(40)]
+    PARENT = UNIVERSE[:25]
+
+    def _percentile_and_label(self, cohort_size: int, raws: dict[str, Decimal]) -> tuple[int, str]:
+        cohort = self.UNIVERSE[:cohort_size]
+        in_cohort = assign_cohort_scope(
+            cohort_name="cohort",
+            cohort_member_ids=cohort,
+            parent_name="parent",
+            parent_member_ids=self.PARENT,
+            universe_member_ids=self.UNIVERSE,
+        )
+        outside = assign_cohort_scope(
+            cohort_name="other",
+            cohort_member_ids=[i for i in self.UNIVERSE if i not in cohort],
+            parent_name="parent",
+            parent_member_ids=self.PARENT,
+            universe_member_ids=self.UNIVERSE,
+        )
+        scope_by_security = {sid: (in_cohort if sid in cohort else outside) for sid in self.UNIVERSE}
+        inputs = [
+            SecurityScoringInput(
+                security_id=sid,
+                filer_profile=FilerProfile.DOMESTIC,
+                is_stale=False,
+                leg_raw={self.LEG: raws[sid]},
+            )
+            for sid in self.UNIVERSE
+        ]
+        results = score_universe(inputs, self.WEIGHTS_BY_PROFILE, scope_by_security)
+        return results["s0"].percentile, in_cohort.scope
+
+    def test_no_cohort_size_produces_a_percentile_cliff(self) -> None:
+        rng = _rng(20)
+        for _ in range(10):
+            raws = {sid: Decimal(rng.randint(-300, 300)) / Decimal(100) for sid in self.UNIVERSE}
+            observed = [self._percentile_and_label(n, raws) for n in range(3, 21)]
+            steps = [abs(observed[i + 1][0] - observed[i][0]) for i in range(len(observed) - 1)]
+            assert max(steps) <= 15
+
+    def test_the_reported_label_still_flips_at_the_documented_threshold(self) -> None:
+        """Proving the continuity test really does cross the old cliff."""
+
+        rng = _rng(21)
+        raws = {sid: Decimal(rng.randint(-300, 300)) / Decimal(100) for sid in self.UNIVERSE}
+        eleven, label_eleven = self._percentile_and_label(11, raws)
+        twelve, label_twelve = self._percentile_and_label(12, raws)
+
+        assert label_eleven == "parent"
+        assert label_twelve == "cohort"
+        assert abs(twelve - eleven) <= 15
+
+    def test_percentiles_stay_inside_the_open_interval(self) -> None:
+        rng = _rng(22)
+        raws = {sid: Decimal(rng.randint(-300, 300)) / Decimal(100) for sid in self.UNIVERSE}
+        for size in (3, 8, 12, 25, 40):
+            percentile, _ = self._percentile_and_label(size, raws)
+            assert 0 < percentile < 100
+
+
+class TestUnevidencedLegProperties:
+    """Legs 1 and 2 must be able to say "nothing was disclosed"."""
+
+    def test_an_empty_event_stream_is_never_reported_as_a_neutral_reading(self) -> None:
+        assert thesis_linkage([]) is None
+        assert attention_acceleration([]) is None
+
+    def test_an_unevidenced_leg_is_non_computable_and_lowers_coverage(self) -> None:
+        """The whole point of returning ``None``: coverage tells the truth."""
+
+        weights = {LegName.THESIS_LINKAGE: Decimal("0.5"), LegName.SMART_MONEY: Decimal("0.5")}
+        cohort = {
+            LegName.THESIS_LINKAGE: {"a": Decimal("0.8"), "b": Decimal("0.4"), "c": Decimal("0.2")},
+            LegName.SMART_MONEY: {"a": Decimal("0.02"), "b": Decimal("0.01"), "c": Decimal("0.03")},
+        }
+        result = compute_security_composite(
+            {LegName.THESIS_LINKAGE: thesis_linkage([]), LegName.SMART_MONEY: Decimal("0.02")},
+            cohort,
+            weights,
+            "a",
+        )
+        leg = result.legs[LegName.THESIS_LINKAGE]
+        assert leg.computable is False
+        assert leg.reason_not_computable == REASON_RAW_MISSING
+        computable = {name for name, r in result.legs.items() if r.computable}
+        assert coverage(computable, FilerProfile.DOMESTIC) < Decimal(1)
+
+    def test_evidence_that_nets_to_zero_is_still_evidence(self) -> None:
+        """Silence and a flat reading must stay distinguishable."""
+
+        balanced = [
+            AttentionEvent(materiality_weight=Decimal(1), document_authority=Decimal(1), days_ago=days_ago)
+            for days_ago in (1, 40)
+        ]
+        assert attention_acceleration(balanced) == Decimal(0)
+        assert attention_acceleration([]) is None
+
+
 class TestCoverageProperties:
     """Req 7 — structural exclusion must never be scored as a data failure."""
+
 
     def test_a_structurally_excluded_leg_cannot_lower_coverage(self) -> None:
         for profile in FilerProfile:

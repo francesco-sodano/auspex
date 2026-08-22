@@ -28,6 +28,7 @@ from auspex.models.enums import (
 
 MAX_EXCERPT_CHARS = 300
 MAX_QUOTE_CHARS = 400
+MAX_PLAIN_SUMMARY_CHARS = 420
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -101,6 +102,7 @@ class ChannelAExtraction(AuspexModel):
     def cache_key(self) -> str:
         return "|".join(
             [
+                self.security_id,
                 self.content_hash,
                 self.model_version,
                 self.prompt_version,
@@ -118,7 +120,7 @@ class KeyQuote(AuspexModel):
     @field_validator("text", mode="before")
     @classmethod
     def _clip(cls, v: str) -> str:
-        return _truncate(v, MAX_QUOTE_CHARS)
+        return v[:MAX_QUOTE_CHARS]
 
 
 class RiskFactorAdded(AuspexModel):
@@ -171,14 +173,40 @@ class ChannelBDigest(AuspexModel):
     document_id: str
     content_hash: str
     model_version: str
-    prompt_version: str = "digest-b-v1"
+    prompt_version: str = "digest-b-v2"
 
     headline: str
+    plain_summary: str | None = Field(
+        default=None,
+        max_length=MAX_PLAIN_SUMMARY_CHARS,
+    )
+    plain_summary_evidence: list[str] = Field(default_factory=list)
     digest: str
     key_quotes: list[KeyQuote] = Field(default_factory=list)
     management_claims: list[str] = Field(default_factory=list)
     unanswered_questions: list[str] = Field(default_factory=list)
     comparative: ComparativeDiff | None = None
+
+    @field_validator("plain_summary", mode="before")
+    @classmethod
+    def _clip_plain_summary(cls, value: str | None) -> str | None:
+        return (
+            _truncate(value, MAX_PLAIN_SUMMARY_CHARS)
+            if value is not None
+            else None
+        )
+
+    @field_validator("plain_summary_evidence", mode="before")
+    @classmethod
+    def _clip_plain_summary_evidence(
+        cls,
+        values: list[str] | None,
+    ) -> list[str]:
+        return [
+            value.strip()[:MAX_QUOTE_CHARS]
+            for value in values or []
+            if isinstance(value, str) and value.strip()
+        ]
 
     @property
     def partition_key(self) -> str:
@@ -186,4 +214,11 @@ class ChannelBDigest(AuspexModel):
 
     @property
     def cache_key(self) -> str:
-        return "|".join([self.content_hash, self.model_version, self.prompt_version])
+        return "|".join(
+            [
+                self.security_id,
+                self.content_hash,
+                self.model_version,
+                self.prompt_version,
+            ]
+        )

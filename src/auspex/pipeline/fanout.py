@@ -49,7 +49,7 @@ from auspex.models.run import PIPELINE_STEPS, RunManifest
 from auspex.pipeline.context import PipelineContext
 from auspex.pipeline.manifest import complete_step, fail_step, new_manifest, resume_step_index
 from auspex.pipeline.repo_access import fetch_all
-from auspex.pipeline.runner import STEP_FUNCTIONS
+from auspex.pipeline.runner import run_step_bounded
 from auspex.policy.risk import correlation_groups, estimate_market_risk
 from auspex.portfolio.port import PortfolioPort
 
@@ -61,8 +61,10 @@ async def _unfenced_user_operation() -> AsyncIterator[None]:
     yield
 
 #: Steps whose output depends on a single user's portfolio and settings.
-#: Contiguous in ``PIPELINE_STEPS`` by construction.
-PER_USER_STEPS: tuple[str, ...] = ("RUN_POLICY", "ASSERT", "PROJECT_PORTFOLIO")
+#: Contiguous in ``PIPELINE_STEPS`` by construction, and ordered so the
+#: projection every gate reads is produced and persisted before the cascade
+#: that consumes it.
+PER_USER_STEPS: tuple[str, ...] = ("PROJECT_PORTFOLIO", "RUN_POLICY", "ASSERT")
 
 _FIRST_PER_USER = PIPELINE_STEPS.index(PER_USER_STEPS[0])
 _LAST_PER_USER = PIPELINE_STEPS.index(PER_USER_STEPS[-1])
@@ -125,7 +127,15 @@ async def run_shared_stage(
             return manifest
 
         try:
-            await STEP_FUNCTIONS[step_name](ctx, manifest)
+            await run_step_bounded(ctx, manifest, step_name)
+        except TimeoutError:
+            fail_step(manifest, step_name, detail="step exceeded the pipeline timeout budget")
+            manifest.status = RunStatus.TIMEOUT
+            manifest.finished_at = utc_now()
+            manifest.watermarks_committed = False
+            if ctx.repos.run_repo is not None:
+                await ctx.repos.run_repo.upsert(manifest)
+            return manifest
         except Exception as exc:  # noqa: BLE001 - checkpoint the failure, do not corrupt state
             fail_step(manifest, step_name, detail=str(exc))
             manifest.status = RunStatus.FAILED
@@ -150,13 +160,31 @@ async def run_user_stage(
     The shared manifest is a coarse record of the whole night; per-user step
     checkpoints would overwrite each other, so this reports through
     :class:`UserStageResult` and lets the caller summarise once at the end.
+
+    Those checkpoints go onto a throwaway scratch manifest, but the *timeout*
+    is measured against the shared run's ``started_at``. A scratch manifest is
+    created fresh for every user, so anchoring on it would silently restart the
+    run clock per user and hand the last user of an already-overrunning night a
+    full budget the night no longer has.
     """
 
     ctx = shared_ctx.derive_for_user(user_id, portfolio_reader=portfolio_reader)
     scratch_manifest = new_manifest(shared_ctx.as_of_date, run_type=f"nightly-user-{user_id}")
     try:
         for step_name in PER_USER_STEPS:
-            await STEP_FUNCTIONS[step_name](ctx, scratch_manifest)
+            await run_step_bounded(
+                ctx,
+                scratch_manifest,
+                step_name,
+                deadline_from=manifest.started_at,
+            )
+    except TimeoutError:
+        logger.error("nightly: per-user stage timed out for %s", user_id)
+        return UserStageResult(
+            user_id=user_id,
+            succeeded=False,
+            detail="per-user stage exceeded the pipeline timeout budget",
+        )
     except Exception as exc:  # noqa: BLE001 - one user must never fail the whole night
         logger.error("nightly: per-user stage failed for %s", user_id, exc_info=True)
         return UserStageResult(user_id=user_id, succeeded=False, detail=str(exc))

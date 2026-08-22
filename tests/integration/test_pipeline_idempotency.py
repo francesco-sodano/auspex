@@ -23,12 +23,14 @@ from tests.integration.conftest import (
     seed_fx,
     seed_insider_form4,
     seed_prices,
+    seed_universe_prices,
 )
 
 
 def _seed_two_securities(repos, universe, as_of_date: date) -> None:
     nvda = universe.by_ticker()["NVDA"]
     amd = universe.by_ticker()["AMD"]
+    seed_universe_prices(repos, universe, as_of_date)
     seed_fundamentals(repos, nvda.id, as_of_date)
     seed_channel_a_extraction(repos, nvda.id, as_of_date)
     seed_insider_form4(repos, nvda.id, as_of_date)

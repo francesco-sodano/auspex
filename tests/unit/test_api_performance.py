@@ -47,6 +47,20 @@ def _metric(
     )
 
 
+def test_partition_key_matches_shared_and_private_metric_containers():
+    as_of = date(2026, 8, 22)
+    shared = _metric("composite_ic", as_of, "0.1")
+    private = _metric(
+        "suggestion_hit_rate",
+        as_of,
+        "0.5",
+        user_id="user-1",
+    )
+
+    assert shared.partition_key == "composite_ic"
+    assert private.partition_key == "user-1"
+
+
 def _make_client(repo=None, authed: bool = True, user_repo=None):
     class EmptyLedger:
         async def list_transactions(self, _user_id):

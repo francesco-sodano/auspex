@@ -48,6 +48,8 @@ from auspex.pipeline.prompts import load_prompt
 from auspex.pipeline.repo_access import fetch_all, read_blob_text
 from auspex.policy.assertions import run_post_run_assertions
 from auspex.policy.engine import load_policy_thresholds
+from auspex.scoring.composite import decompose_leg_delta
+from auspex.scoring.coverage import is_stale
 from auspex.scoring.engine import SecurityScoringInput, build_cohort_scopes, score_universe
 from auspex.scoring.legs import (
     FundamentalHealthInputs,
@@ -65,6 +67,7 @@ from auspex.scoring.sessions import (
     normalise_calendar,
     nth_prior_session,
     prior_sessions,
+    sessions_between,
 )
 from auspex.settings import get_settings
 
@@ -219,10 +222,6 @@ async def step_extract_channel_a(ctx: PipelineContext, manifest: RunManifest) ->
         sink=ctx.repos.channel_a_sink,
     )
     taxonomy_ids = [t["id"] for t in ctx.config["taxonomy"]["themes"]]
-    cached_keys = {
-        extraction.cache_key
-        for extraction in await fetch_all(ctx.repos.channel_a_sink)
-    }
     documents_by_id = {d.id: d for d in await fetch_all(ctx.repos.document_sink)}
 
     count = 0
@@ -233,13 +232,14 @@ async def step_extract_channel_a(ctx: PipelineContext, manifest: RunManifest) ->
             if doc is None or doc.form_type is None:
                 continue
             cache_key = channel_a_cache_key(
+                security_id=sec.id,
                 content_hash=doc.content_hash,
                 model_version=settings.aoai_deployment_extraction,
                 prompt_version=extractor.prompt_version,
                 schema_version=extractor.schema_version,
                 taxonomy_version=ctx.config["taxonomy"]["taxonomy_version"],
             )
-            if cache_key in cached_keys:
+            if await ctx.repos.channel_a_sink.find_by_cache_key(cache_key):
                 continue
             raw_text = await read_blob_text(ctx.repos.blob_sink, doc.blob_path)
             if doc.form_type in WHOLE_DOCUMENT_FORMS:
@@ -259,7 +259,6 @@ async def step_extract_channel_a(ctx: PipelineContext, manifest: RunManifest) ->
                     taxonomy_theme_ids=taxonomy_ids,
                 )
                 count += 1
-                cached_keys.add(cache_key)
             except Exception as exc:  # noqa: BLE001 - one malformed model response must not abort the universe
                 failures += 1
                 ctx.degraded_securities.add(sec.id)
@@ -317,9 +316,6 @@ async def step_extract_channel_b(ctx: PipelineContext, manifest: RunManifest) ->
         model_version=settings.aoai_deployment_extraction,
         sink=ctx.repos.channel_b_sink,
     )
-    cached_keys = {
-        digest.cache_key for digest in await fetch_all(ctx.repos.channel_b_sink)
-    }
     all_docs = await fetch_all(ctx.repos.document_sink)
     documents_by_id = {d.id: d for d in all_docs}
     count = 0
@@ -330,11 +326,12 @@ async def step_extract_channel_b(ctx: PipelineContext, manifest: RunManifest) ->
             if doc is None or doc.form_type is None:
                 continue
             cache_key = channel_b_cache_key(
+                security_id=sec.id,
                 content_hash=doc.content_hash,
                 model_version=settings.aoai_deployment_extraction,
                 prompt_version=extractor.prompt_version,
             )
-            if cache_key in cached_keys:
+            if await ctx.repos.channel_b_sink.find_by_cache_key(cache_key):
                 continue
             raw_text = await read_blob_text(ctx.repos.blob_sink, doc.blob_path)
             if doc.form_type in WHOLE_DOCUMENT_FORMS:
@@ -366,10 +363,14 @@ async def step_extract_channel_b(ctx: PipelineContext, manifest: RunManifest) ->
                     prior_sections=prior_sections,
                 )
                 count += 1
-                cached_keys.add(cache_key)
             except Exception as exc:  # noqa: BLE001 - one malformed model response must not abort the universe
                 failures += 1
-                ctx.degraded_securities.add(sec.id)
+                # Deliberately *not* ctx.degraded_securities: Channel B feeds
+                # narratives, digests and plain summaries, never one of the six
+                # legs. Marking the security degraded here excluded it from
+                # scoring entirely — the user lost their score because the
+                # explanation failed, which inverts the dependency.
+                ctx.explanation_degraded_securities.add(sec.id)
                 logger.error(
                     "Channel B extraction failed for %s document %s: %s",
                     sec.ticker,
@@ -425,6 +426,12 @@ async def step_compute_raw_legs(ctx: PipelineContext, manifest: RunManifest) -> 
         all_fundamentals = await fetch_all(ctx.repos.fundamental_sink)
 
     latest_prices_usd = await _latest_prices_usd(ctx)
+    # arc42 §5.5 "Staleness exclusion": price age in *observed trading sessions*.
+    # Unioned with this run's degraded set (a price that could not be refreshed,
+    # or a Channel A extraction that raised — Channel A feeds the legs, so its
+    # failure genuinely degrades the score). Channel B failures are deliberately
+    # absent: they cost the user an explanation, never a score.
+    stale_ids = await _stale_security_ids(ctx)
 
     def _shares_outstanding(fundamentals: list, as_of: date) -> Decimal | None:
         aliases = xbrl_concepts["concepts"]["shares_outstanding"]
@@ -484,10 +491,10 @@ async def step_compute_raw_legs(ctx: PipelineContext, manifest: RunManifest) -> 
         if sec.filer_profile == FilerProfile.DOMESTIC:
             leg_raw[LegName.SMART_MONEY] = smart_money(insider_events, market_cap)
 
-        is_stale = sec.id in ctx.degraded_securities
+        is_stale_today = sec.id in stale_ids or sec.id in ctx.degraded_securities
         per_security_state[sec.id] = {
             "filer_profile": sec.filer_profile,
-            "is_stale": is_stale,
+            "is_stale": is_stale_today,
             "leg_raw": leg_raw,
             "narrative_events": narrative_events,
             "revenue_growth_yoy": fundamental_inputs.revenue_growth_yoy,
@@ -605,10 +612,26 @@ async def step_normalise(ctx: PipelineContext, manifest: RunManifest) -> None:
 
 
 async def step_diff(ctx: PipelineContext, manifest: RunManifest) -> None:
+    """Per-leg z-score change since the previous *trading session* (arc42 §5.5).
+
+    Two things this step must get right:
+
+    * the comparison date is the previous session the market actually held, not
+      ``as_of - 1 day``. Calendar yesterday is a Sunday every Monday and a
+      holiday several times a year, on which no score row exists, so every leg
+      delta silently vanished on exactly the days a user is most likely to look;
+    * the delta is *attributed*, not merely reported. ``own_evidence_effect``
+      and ``cohort_distribution_effect`` are an exact split of ``delta_z``
+      (see :func:`auspex.scoring.composite.decompose_leg_delta`), and when the
+      inputs for that split are missing both are written as ``null`` rather than
+      dumping the whole move onto own evidence, which claimed the issuer had
+      moved on days when only its peers had.
+    """
+
     start_step(manifest, "DIFF")
     results = ctx.__dict__.get("_score_results", {})
     prior_scores = {}
-    prior_date = ctx.as_of_date - timedelta(days=1)
+    prior_date = await _previous_session_date(ctx)
     if hasattr(ctx.repos.score_repo, "for_dates"):
         prior_rows = await ctx.repos.score_repo.for_dates({prior_date})
     else:
@@ -618,16 +641,24 @@ async def step_diff(ctx: PipelineContext, manifest: RunManifest) -> None:
             prior_scores[s.security_id] = s
 
     leg_changes: list[LegChange] = []
+    attributed = 0
     for sec_id, res in results.items():
         prior = prior_scores.get(sec_id)
         if res.composite_result is None:
             continue
         for leg, leg_result in res.composite_result.legs.items():
-            prior_z = None
-            if prior is not None and leg.value in prior.legs and prior.legs[leg.value].z is not None:
-                prior_z = D_(prior.legs[leg.value].z)
-            current_z = leg_result.z
-            delta = (current_z - prior_z) if (current_z is not None and prior_z is not None) else None
+            prior_leg = prior.legs.get(leg.value) if prior is not None else None
+            prior_z = D_(prior_leg.z) if prior_leg is not None and prior_leg.z is not None else None
+            prior_raw = D_(prior_leg.raw) if prior_leg is not None and prior_leg.raw is not None else None
+
+            decomposition = decompose_leg_delta(
+                prior_z=prior_z,
+                current_z=leg_result.z,
+                prior_raw=prior_raw,
+                current_cross_section=leg_result.cross_section,
+            )
+            if decomposition.own_evidence_effect is not None:
+                attributed += 1
             leg_changes.append(
                 LegChange(
                     id=f"{sec_id}:{ctx.as_of_date.isoformat()}:{leg.value}",
@@ -635,14 +666,30 @@ async def step_diff(ctx: PipelineContext, manifest: RunManifest) -> None:
                     as_of_date=ctx.as_of_date,
                     leg=leg,
                     prior_z=str(prior_z) if prior_z is not None else None,
-                    current_z=str(current_z) if current_z is not None else None,
-                    delta_z=str(delta) if delta is not None else None,
-                    own_evidence_effect=str(delta) if delta is not None else None,
-                    cohort_distribution_effect="0" if delta is not None else None,
+                    current_z=str(leg_result.z) if leg_result.z is not None else None,
+                    delta_z=str(decomposition.delta_z) if decomposition.delta_z is not None else None,
+                    own_evidence_effect=(
+                        str(decomposition.own_evidence_effect)
+                        if decomposition.own_evidence_effect is not None
+                        else None
+                    ),
+                    cohort_distribution_effect=(
+                        str(decomposition.cohort_distribution_effect)
+                        if decomposition.cohort_distribution_effect is not None
+                        else None
+                    ),
+                    attribution_unavailable_reason=decomposition.reason_unavailable,
                 )
             )
     ctx.__dict__["_leg_changes"] = leg_changes
-    complete_step(manifest, "DIFF", detail=f"leg_changes={len(leg_changes)}")
+    complete_step(
+        manifest,
+        "DIFF",
+        detail=(
+            f"leg_changes={len(leg_changes)} attributed={attributed} "
+            f"prior_session={prior_date.isoformat()}"
+        ),
+    )
 
 
 def D_(value: str) -> Decimal:
@@ -746,12 +793,22 @@ async def _latest_fx_rate(ctx: PipelineContext) -> Decimal:
     return Decimal("1")
 
 
+#: How many universe members are sampled to reconstruct the trading calendar.
+#: More than one because a single name can be halted, delisted or simply have a
+#: gap in its history, and the calendar now decides which securities are stale
+#: as well as which session a leg delta compares against. Still a small,
+#: bounded number of partition-local queries rather than a scan of every price
+#: partition merely to discover dates.
+SESSION_CALENDAR_SAMPLE_SIZE = 5
+SESSION_CALENDAR_LOOKBACK_BARS = 130
+
+
 async def _session_calendar(ctx: PipelineContext) -> tuple[date, ...]:
     """Trading sessions on or before ``as_of``, derived from observed price bars.
 
-    A liquid universe member's price bars define the trading sessions. Production
-    performs one partition-local bounded query rather than scanning every price
-    partition merely to discover calendar dates.
+    The union of several liquid universe members' bars defines the sessions the
+    market actually held. Quarantined bars are excluded: a bar the integrity
+    pass rejected is not evidence that the market was open.
 
     Returns an empty tuple when no bars are available; callers must then fall
     back to calendar-day arithmetic rather than silently comparing nothing.
@@ -768,9 +825,9 @@ async def _session_calendar(ctx: PipelineContext) -> tuple[date, ...]:
                     history_as_of(
                         security.id,
                         ctx.as_of_date,
-                        130,
+                        SESSION_CALENDAR_LOOKBACK_BARS,
                     )
-                    for security in ctx.universe.securities[:3]
+                    for security in ctx.universe.securities[:SESSION_CALENDAR_SAMPLE_SIZE]
                 )
             )
             bars = [
@@ -786,7 +843,9 @@ async def _session_calendar(ctx: PipelineContext) -> tuple[date, ...]:
             exc_info=True,
         )
         bars = []
-    calendar = normalise_calendar(bar.session_date for bar in bars if bar.session_date <= ctx.as_of_date)
+    calendar = normalise_calendar(
+        bar.session_date for bar in exclude_quarantined(bars) if bar.session_date <= ctx.as_of_date
+    )
     ctx.__dict__["_session_calendar"] = calendar
     return calendar
 
@@ -802,10 +861,32 @@ async def _prior_session_date(ctx: PipelineContext, sessions_back: int, *, fallb
     return ctx.as_of_date - timedelta(days=fallback_days)
 
 
-async def _latest_prices_usd(ctx: PipelineContext) -> dict[str, Decimal]:
-    """Latest close price per ``security_id``."""
+async def _previous_session_date(ctx: PipelineContext) -> date:
+    """The most recent observed trading session strictly before ``as_of``.
 
-    cached = ctx.__dict__.get("_latest_prices_usd")
+    Unlike ``nth_prior_session(..., 1)`` this is correct whether or not ``as_of``
+    is itself a session: a run dated on a weekend compares against the Friday
+    that just closed rather than skipping back over it to the Thursday.
+
+    Falls back to calendar yesterday only when no session calendar exists at
+    all, which is the one case in which nothing better can be known.
+    """
+
+    calendar = await _session_calendar(ctx)
+    sessions = prior_sessions(calendar, ctx.as_of_date, 1)
+    if sessions:
+        return sessions[0]
+    return ctx.as_of_date - timedelta(days=1)
+
+
+async def _latest_price_bars(ctx: PipelineContext) -> dict[str, object]:
+    """Latest non-quarantined bar per ``security_id``, at or before ``as_of``.
+
+    One partition-local query per security in production; the full-scan branch
+    exists only for the in-memory sinks used by tests and local fixtures.
+    """
+
+    cached = ctx.__dict__.get("_latest_price_bars")
     if cached is not None:
         return cached
     latest_as_of = getattr(ctx.repos.price_sink, "latest_as_of", None)
@@ -814,21 +895,71 @@ async def _latest_prices_usd(ctx: PipelineContext) -> dict[str, Decimal]:
             ctx.as_of_date,
             [security.id for security in ctx.universe.securities],
         )
-        result = {
-            bar.security_id: Decimal(bar.close_adjusted)
-            for bar in exclude_quarantined(rows)
-        }
-        ctx.__dict__["_latest_prices_usd"] = result
-        return result
+        result: dict[str, object] = {bar.security_id: bar for bar in exclude_quarantined(rows)}
+    else:
+        result = {}
+        for bar in exclude_quarantined(await fetch_all(ctx.repos.price_sink)):
+            if bar.session_date > ctx.as_of_date:
+                continue
+            existing = result.get(bar.security_id)
+            if existing is None or bar.session_date > existing.session_date:
+                result[bar.security_id] = bar
+    ctx.__dict__["_latest_price_bars"] = result
+    return result
 
-    prices: dict[str, tuple] = {}
-    for bar in exclude_quarantined(await fetch_all(ctx.repos.price_sink)):
-        existing = prices.get(bar.security_id)
-        if existing is None or bar.session_date > existing[0]:
-            prices[bar.security_id] = (bar.session_date, Decimal(bar.close_adjusted))
-    result = {sid: v[1] for sid, v in prices.items()}
+
+async def _latest_prices_usd(ctx: PipelineContext) -> dict[str, Decimal]:
+    """Latest close price per ``security_id``."""
+
+    cached = ctx.__dict__.get("_latest_prices_usd")
+    if cached is not None:
+        return cached
+    result = {
+        security_id: Decimal(bar.close_adjusted)
+        for security_id, bar in (await _latest_price_bars(ctx)).items()
+    }
     ctx.__dict__["_latest_prices_usd"] = result
     return result
+
+
+async def _stale_security_ids(ctx: PipelineContext) -> set[str]:
+    """Securities excluded from today's cross-sections by the price-age rule.
+
+    arc42 §5.5 "Staleness exclusion" states the rule in *trading sessions*:
+    a security whose latest observed price is more than
+    :data:`auspex.scoring.coverage.MAX_STALE_SESSIONS` sessions old is dropped,
+    so a price that stopped updating cannot keep contributing a market cap, an
+    enterprise value and a peer observation as though it were current.
+
+    Two deliberate boundaries:
+
+    * with no observed session calendar at all (no price history anywhere — a
+      bare fixture, or a first run) the rule is unevaluable, so nothing is
+      excluded on price age. Silently emptying the universe would be a far
+      worse failure than scoring a day with thin prices and honest coverage;
+    * once the calendar shows the market did trade, a security with no observed
+      bar at all *is* stale: its price age is unbounded, which is the same
+      condition the rule exists to catch, only more so.
+    """
+
+    calendar = await _session_calendar(ctx)
+    if not calendar:
+        return set()
+
+    latest_bars = await _latest_price_bars(ctx)
+    stale: set[str] = set()
+    for security in ctx.universe.securities:
+        bar = latest_bars.get(security.id)
+        if bar is None:
+            stale.add(security.id)
+            continue
+        if is_stale(
+            bar.session_date,
+            ctx.as_of_date,
+            sessions_between(calendar, bar.session_date, ctx.as_of_date),
+        ):
+            stale.add(security.id)
+    return stale
 
 
 async def _get_portfolio_projection(ctx: PipelineContext):
@@ -1531,6 +1662,15 @@ async def step_narrate(ctx: PipelineContext, manifest: RunManifest) -> None:
     back onto that security's just-persisted :class:`ScoreSnapshot`
     (idempotent upsert on the same ``id``), which is where API readers
     expect a narrative to live (``ScoreSnapshot.narrative``).
+
+    This is also where a Channel B failure finally surfaces. Channel B feeds
+    narratives and digests, never one of the six legs, so ``EXTRACT_CHANNEL_B``
+    records its failures on ``ctx.explanation_degraded_securities`` rather than
+    excluding those securities from scoring. Their score, percentile and
+    recommendation are unaffected and correct; what is thinner is the *evidence
+    this step had to explain them with*. Counting them here marks the run
+    degraded for the right reason — a weaker explanation — instead of silently
+    serving a narrative built on less evidence than the reader assumes.
     """
 
     start_step(manifest, "NARRATE")
@@ -1560,6 +1700,7 @@ async def step_narrate(ctx: PipelineContext, manifest: RunManifest) -> None:
         digests_by_security.setdefault(digest.security_id, []).append(digest)
 
     generated = 0
+    narrated_with_degraded_evidence = 0
     for sec in ctx.universe.securities:
         package = packages_by_security.get(sec.id)
         if package is None:
@@ -1576,6 +1717,8 @@ async def step_narrate(ctx: PipelineContext, manifest: RunManifest) -> None:
             comparative=comparative,
         )
         generated += 1
+        if sec.id in ctx.explanation_degraded_securities:
+            narrated_with_degraded_evidence += 1
 
         snapshot = snapshots_by_security.get(sec.id)
         if snapshot is not None and ctx.repos.score_repo is not None:
@@ -1583,7 +1726,15 @@ async def step_narrate(ctx: PipelineContext, manifest: RunManifest) -> None:
             snapshot.narrative_model_version = settings.aoai_deployment_narrative
             await ctx.repos.score_repo.upsert(snapshot)
 
-    complete_step(manifest, "NARRATE", detail=f"generated={generated}")
+    detail = f"generated={generated}"
+    if narrated_with_degraded_evidence:
+        detail += f"; explanation_evidence_degraded={narrated_with_degraded_evidence}"
+    complete_step(
+        manifest,
+        "NARRATE",
+        detail=detail,
+        degraded=narrated_with_degraded_evidence > 0,
+    )
 
 
 async def step_validate(ctx: PipelineContext, manifest: RunManifest) -> None:

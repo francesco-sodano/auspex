@@ -15,8 +15,10 @@ domestic:
   valuation_brake: "0.15"
 
 # FPI files no Form 4 (§5.2): smart_money's 20% is redistributed proportionally
-# across the other five legs. Precomputed to 4dp for determinism; auspex.config.loader
-# validates this matches a proportional redistribution of `domestic` at import time.
+# across the other five legs. Precomputed to 4dp for determinism.
+# auspex.config.loader.load_weights validates on every load that each value here
+# equals the matching `domestic` weight divided by (1 - domestic.smart_money),
+# at the precision it is written to, and refuses to load the bundle otherwise.
 fpi:
   thesis_linkage: "0.25"
   attention_acceleration: "0.1875"
