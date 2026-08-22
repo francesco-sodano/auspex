@@ -11,27 +11,54 @@ from auspex.cli.derived_cleanup import (
 class _Container:
     def __init__(self, rows: list[dict]) -> None:
         self.rows = rows
-        self.deleted: list[str] = []
+        self.deleted: list[tuple[str, list[str]]] = []
         self.queries: list[str] = []
 
-    async def _iterate(self, query: str) -> AsyncIterator[object]:
+    async def _iterate(
+        self,
+        query: str,
+        partition_key: str | None,
+    ) -> AsyncIterator[object]:
         if "COUNT(1)" in query:
             yield len(self.rows)
+            return
+        if "VALUE c.id" in query:
+            for row in self.rows:
+                if (
+                    partition_key is None
+                    or partition_key in {
+                        str(value) for value in row.values()
+                    }
+                ):
+                    yield row.get("id")
             return
         field = query.split("c.", 1)[1].split(" ", 1)[0]
         for value in dict.fromkeys(row.get(field) for row in self.rows):
             yield value
 
-    def query_items(self, *, query: str) -> AsyncIterator[object]:
-        self.queries.append(query)
-        return self._iterate(query)
-
-    async def delete_all_items_by_partition_key(
+    def query_items(
         self,
         *,
+        query: str,
+        parameters=None,
+        partition_key=None,
+    ) -> AsyncIterator[object]:
+        self.queries.append(query)
+        return self._iterate(query, partition_key)
+
+    async def execute_item_batch(
+        self,
+        operations,
+        *,
         partition_key: str,
-    ) -> None:
-        self.deleted.append(partition_key)
+    ):
+        self.deleted.append(
+            (
+                partition_key,
+                [operation[1][0] for operation in operations],
+            )
+        )
+        return []
 
 
 class _Database:
@@ -93,7 +120,9 @@ async def test_apply_deletes_each_row_with_its_partition_key():
 
     assert sum(counts.values()) == len(DERIVED_CLEANUP_TARGETS)
     for target in DERIVED_CLEANUP_TARGETS:
-        assert database.containers[target.container].deleted == ["partition"]
+        assert database.containers[target.container].deleted == [
+            ("partition", [f"{target.container}-1"])
+        ]
 
 
 @pytest.mark.asyncio
@@ -106,3 +135,21 @@ async def test_missing_partition_key_fails_closed():
     assert all(
         not container.deleted for container in database.containers.values()
     )
+
+
+@pytest.mark.asyncio
+async def test_apply_chunks_large_partitions_into_cosmos_batch_limit():
+    database = _Database()
+    database.containers["leg_changes"].rows = [
+        {"id": f"change-{index}", "security_id": "security"}
+        for index in range(205)
+    ]
+
+    await cleanup_database(database, apply=True)
+
+    batches = database.containers["leg_changes"].deleted
+    assert [len(document_ids) for _partition, document_ids in batches] == [
+        100,
+        100,
+        5,
+    ]

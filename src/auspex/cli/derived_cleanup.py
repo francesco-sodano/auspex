@@ -53,12 +53,20 @@ DERIVED_CLEANUP_TARGETS = (
 
 
 class Container(Protocol):
-    def query_items(self, *, query: str): ...
-
-    async def delete_all_items_by_partition_key(
+    def query_items(
         self,
+        *,
+        query: str,
+        parameters: list[dict] | None = None,
+        partition_key: str | None = None,
+    ): ...
+
+    async def execute_item_batch(
+        self,
+        batch_operations: list[tuple[str, tuple[str]]],
+        *,
         partition_key: str,
-    ) -> None: ...
+    ): ...
 
 
 class Database(Protocol):
@@ -71,7 +79,7 @@ async def cleanup_database(
     apply: bool,
 ) -> dict[str, int]:
     counts: dict[str, int] = {}
-    planned: list[tuple[Container, str]] = []
+    planned: list[tuple[Container, str, list[str]]] = []
     for target in DERIVED_CLEANUP_TARGETS:
         container = database.get_container_client(target.container)
         count_rows = [
@@ -96,12 +104,45 @@ async def cleanup_database(
                     f"{target.container} row lacks "
                     f"{target.partition_key_field}; refusing partial cleanup"
                 )
-            planned.append((container, str(partition_key)))
-    if apply:
-        for container, partition_key in planned:
-            await container.delete_all_items_by_partition_key(
-                partition_key=partition_key,
+            resolved_partition = str(partition_key)
+            document_ids = [
+                value
+                async for value in container.query_items(
+                    query=(
+                        "SELECT VALUE c.id FROM c WHERE "
+                        f"c.{target.partition_key_field} = @partition"
+                    ),
+                    parameters=[
+                        {
+                            "name": "@partition",
+                            "value": partition_key,
+                        }
+                    ],
+                    partition_key=resolved_partition,
+                )
+            ]
+            if any(
+                not isinstance(document_id, str) or not document_id
+                for document_id in document_ids
+            ):
+                raise RuntimeError(
+                    f"{target.container} partition {resolved_partition} "
+                    "contains a row without an id; refusing partial cleanup"
+                )
+            planned.append(
+                (container, resolved_partition, document_ids)
             )
+    if apply:
+        for container, partition_key, document_ids in planned:
+            for offset in range(0, len(document_ids), 100):
+                operations = [
+                    ("delete", (document_id,))
+                    for document_id in document_ids[offset : offset + 100]
+                ]
+                await container.execute_item_batch(
+                    operations,
+                    partition_key=partition_key,
+                )
     return counts
 
 

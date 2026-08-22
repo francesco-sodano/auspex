@@ -584,12 +584,14 @@ append-only audit record. Everything else is untouched by construction:
 
 The command is two-phase and read-only by default. Without `--apply` it plans
 and reports per-container counts and deletes nothing. Both phases first resolve
-and validate every affected logical partition, then `--apply` uses Cosmos
-`delete_all_items_by_partition_key` for each planned partition. A missing
-partition-key value or malformed count result aborts the whole pass before any
-delete is issued, so malformed state cannot leave the database half-cleaned.
-Partition-level deletion keeps the one-time cleanup bounded even when a
-container holds hundreds of thousands of derived rows.
+every affected logical partition and validate every document id. `--apply`
+then uses supported Cosmos transactional batches of at most 100 deletes inside
+each partition. A missing partition key, missing id or malformed count aborts
+the whole pass before any delete is issued. Each batch is atomic and the
+operation is idempotently resumable if Azure interrupts a later batch. This
+keeps the one-time cleanup bounded even when a container holds hundreds of
+thousands of derived rows, without depending on the optional account-level
+partition-delete feature.
 
 The intended sequence around a replay is:
 
