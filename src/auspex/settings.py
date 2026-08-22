@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     # duration"). Sweden Central's regional TPM ceiling is 5,000,000 — well above
     # this, so a further quota increase is available without a region change if
     # bootstrap duration ever needs to shrink below the ~75 min this implies.
-    aoai_tokens_per_minute: float = 200_000.0
+    aoai_tokens_per_minute: float = 450_000.0
     # The full GPT-4.1 deployment has a separate 30K TPM quota. Narrative and
     # answer calls must be paced against it rather than the mini deployment's
     # larger extraction budget.

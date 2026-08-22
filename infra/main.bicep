@@ -114,7 +114,7 @@ param openAiAccountNameOverride string = ''
 param monthlyBudgetAmount string = '165'
 
 @description('GPT-4.1-mini Global Standard capacity in thousands of tokens per minute.')
-param extractionModelCapacity string = '200'
+param extractionModelCapacity string = '450'
 
 @description('GPT-4.1 Global Standard capacity in thousands of tokens per minute.')
 param narrativeModelCapacity string = '30'
@@ -300,6 +300,8 @@ module compute 'modules/containerapps.bicep' = {
     sourceLedgerCosmosEndpoint: 'https://${ledgerAccountName}.documents.azure.com:443/'
     sourceLedgerDatabaseName: ledgerDatabaseName
     openAiEndpoint: openAi.outputs.endpoint
+    extractionModelCapacity: int(extractionModelCapacity)
+    narrativeModelCapacity: int(narrativeModelCapacity)
     authClientId: authClientId
     authTenantId: authTenantId
     authAuthority: authAuthority

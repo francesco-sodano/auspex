@@ -2004,7 +2004,7 @@ files. The table groups closely related Key Vault and RBAC modules.
 | `data.bicep` | serverless Cosmos (`disableLocalAuth`, public access disabled, continuous 7-day backup, session consistency), 24 containers, StorageV2 (`allowSharedKeyAccess: false`), blob containers `documents`/`sections`/`exports`, versioning, cool tier after 90 days |
 | `ledger.bicep` | second Cosmos account with `app_users` and `portfolio_transactions` |
 | `keyvault.bicep`, `keyvault-secrets.bicep`, `keyvault-rbac.bicep` | RBAC vault with purge protection, the two provider secrets, Secrets User for the pipeline identity |
-| `openai.bicep` | Azure OpenAI (local auth disabled, outbound restricted) with `gpt-4.1-mini` and `gpt-4.1`, both model version `2025-04-14`, `NoAutoUpgrade`, capacities 200 K / 30 K TPM |
+| `openai.bicep` | Azure OpenAI (local auth disabled, outbound restricted) with `gpt-4.1-mini` and `gpt-4.1`, both model version `2025-04-14`, `NoAutoUpgrade`, capacities 450 K / 30 K TPM; those capacity parameters also configure the workload-side token buckets |
 | `registry.bicep` | Basic ACR, admin user disabled |
 | `containerapps.bicep` | environment plus the API app and two jobs |
 | `private-endpoints.bicep` | private endpoints and DNS zones for Cosmos, Blob, OpenAI, Key Vault and the ledger account |

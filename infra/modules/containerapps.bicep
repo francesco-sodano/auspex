@@ -13,6 +13,8 @@ param keyVaultUri string
 param sourceLedgerCosmosEndpoint string
 param sourceLedgerDatabaseName string
 param openAiEndpoint string
+param extractionModelCapacity int
+param narrativeModelCapacity int
 param authClientId string
 param authTenantId string
 param authAuthority string
@@ -85,11 +87,11 @@ var commonEnvironment = [
   }
   {
     name: 'AUSPEX_AOAI_TOKENS_PER_MINUTE'
-    value: '200000'
+    value: string(extractionModelCapacity * 1000)
   }
   {
     name: 'AUSPEX_AOAI_NARRATIVE_TOKENS_PER_MINUTE'
-    value: '30000'
+    value: string(narrativeModelCapacity * 1000)
   }
   {
     name: 'AUSPEX_EXTRACTION_CONCURRENCY'

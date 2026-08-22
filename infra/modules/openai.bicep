@@ -2,7 +2,7 @@ param location string
 param accountName string
 param logAnalyticsWorkspaceId string
 param environmentName string
-param extractionCapacity int = 200
+param extractionCapacity int = 450
 param narrativeCapacity int = 30
 
 resource account 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
