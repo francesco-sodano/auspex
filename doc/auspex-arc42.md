@@ -936,7 +936,11 @@ A per-user failure is caught in `run_one`, recorded as
 `users=N succeeded=N failed=N` and degrades the run instead of failing it.
 `_adopt_representative_scratch` promotes one succeeded user's policy scratch
 onto the shared context so `VALIDATE`/`END_RUN` have a concrete outcome to
-describe.
+describe. `VALIDATE` reconciles recommendation security IDs against the
+policy-evaluable score set, not every persisted snapshot: a stale security is
+still written as an explicit `excluded_stale` score row for auditability but is
+intentionally withheld from policy and therefore must not require a
+recommendation.
 
 `src/auspex/pipeline/runner.py` is the single-user path (`PipelineRunner.run`).
 Both runners checkpoint through `src/auspex/pipeline/manifest.py` and resume

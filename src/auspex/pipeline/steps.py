@@ -1781,10 +1781,29 @@ async def step_validate(ctx: PipelineContext, manifest: RunManifest) -> None:
             for r in await fetch_all(ctx.repos.recommendation_repo)
             if r.as_of_date == ctx.as_of_date and r.user_id == ctx.user_id
         ]
-        if len(recommendations_today) != len(snapshots):
+        score_results = ctx.__dict__.get("_score_results", {})
+        if score_results:
+            expected_security_ids = {
+                security_id
+                for security_id, result in score_results.items()
+                if result.composite_result is not None
+            }
+        else:
+            expected_security_ids = {
+                snapshot.security_id
+                for snapshot in snapshots
+                if not snapshot.excluded_stale and snapshot.composite is not None
+            }
+        recommendation_security_ids = {
+            recommendation.security_id
+            for recommendation in recommendations_today
+        }
+        missing = sorted(expected_security_ids - recommendation_security_ids)
+        unexpected = sorted(recommendation_security_ids - expected_security_ids)
+        if missing or unexpected:
             issues.append(
-                f"recommendation count ({len(recommendations_today)}) does not match "
-                f"scored security count ({len(snapshots)})"
+                "recommendation security set does not match policy-evaluable "
+                f"score set (missing={len(missing)}, unexpected={len(unexpected)})"
             )
 
     if issues:
