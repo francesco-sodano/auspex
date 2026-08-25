@@ -218,8 +218,8 @@ class BriefingScoreMover(AuspexModel):
     ticker: str
     company_name: str
     score: int
-    prior_score: int
-    score_change: int
+    prior_score: int | None = None
+    score_change: int | None = None
     summary: str
     narrative: str = ""
     buy_ready: bool = False
@@ -245,6 +245,7 @@ class BriefingResponse(AuspexModel):
     max_knowledge_date: date
     portfolio: PortfolioSummary | None = None
     changes: list[BriefingChangeItem] = Field(default_factory=list)
+    top_scored: list[BriefingScoreMover] = Field(default_factory=list)
     movers_up: list[BriefingScoreMover] = Field(default_factory=list)
     movers_down: list[BriefingScoreMover] = Field(default_factory=list)
     escalated_risks: list[EscalatedRiskItem] = Field(default_factory=list)

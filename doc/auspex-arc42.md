@@ -1819,9 +1819,12 @@ lifecycle status before persisting a turn and discards it if they are no longer
 15-day container TTL.
 
 **Deterministic explanation** (not LLM) lives in `src/auspex/api/explanations.py`:
-`mover_summary` and `score_reasoning` translate already-computed snapshots into
-plain language, consumed by `src/auspex/api/routes/briefing.py` and
-`src/auspex/api/routes/securities.py`.
+`top_score_summary`, `mover_summary` and `score_reasoning` translate
+already-computed snapshots into plain language, consumed by
+`src/auspex/api/routes/briefing.py` and
+`src/auspex/api/routes/securities.py`. The Home briefing lists the four highest
+current, non-stale scores before the largest positive and negative one-session
+movers; all three groups reuse the same expandable score-card interaction.
 
 ### A.18 API surface
 

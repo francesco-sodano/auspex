@@ -28,7 +28,7 @@ from auspex.api.deps import (
     get_score_repo,
     get_universe,
 )
-from auspex.api.explanations import mover_summary
+from auspex.api.explanations import mover_summary, top_score_summary
 from auspex.api.repos import get_digest_repo, get_document_repo, get_extraction_repo, get_leg_change_repo
 from auspex.api.schemas import (
     BriefingChangeItem,
@@ -196,11 +196,11 @@ async def get_briefing(
     recommendation_by_security = {
         recommendation.security_id: recommendation for recommendation in recommendation_rows
     }
-    movers: list[BriefingScoreMover] = []
-    for security_id, current in score_today_by_id.items():
-        prior = prior_by_id.get(security_id)
-        if current.percentile is None or prior is None or prior.percentile is None:
-            continue
+
+    def _recommendation_context(
+        security_id: str,
+        current: ScoreSnapshot,
+    ) -> tuple[object | None, object | None]:
         security = by_id.get(security_id)
         recommendation = recommendation_by_security.get(security_id)
         recommendation_out = (
@@ -213,6 +213,61 @@ async def get_briefing(
             if recommendation is not None
             else None
         )
+        return security, recommendation_out
+
+    top_scored: list[BriefingScoreMover] = []
+    ranked_scores = sorted(
+        (
+            score
+            for score in scores_today
+            if score.percentile is not None and not score.excluded_stale
+        ),
+        key=lambda score: (
+            -(score.percentile or 0),
+            by_id.get(score.security_id).ticker
+            if by_id.get(score.security_id) is not None
+            else score.security_id,
+        ),
+    )
+    for current in ranked_scores[:4]:
+        security_id = current.security_id
+        prior = prior_by_id.get(security_id)
+        security, recommendation_out = _recommendation_context(security_id, current)
+        recommendation = recommendation_by_security.get(security_id)
+        top_scored.append(
+            BriefingScoreMover(
+                security_id=security_id,
+                ticker=security.ticker if security else security_id,
+                company_name=security.name if security else security_id,
+                score=current.percentile,
+                prior_score=prior.percentile if prior is not None else None,
+                score_change=(
+                    current.percentile - prior.percentile
+                    if prior is not None and prior.percentile is not None
+                    else None
+                ),
+                summary=top_score_summary(current, prior, recommendation),
+                narrative=current.narrative or "",
+                buy_ready=recommendation_out.buy_ready if recommendation_out else False,
+                buy_blockers=(
+                    recommendation_out.blocking_reasons
+                    if recommendation_out
+                    and recommendation is not None
+                    and recommendation.action.value == "HOLD_NO_ACTION"
+                    and Decimal(recommendation.current_weight_pct or "0") == 0
+                    and current.percentile >= 75
+                    else []
+                ),
+            )
+        )
+
+    movers: list[BriefingScoreMover] = []
+    for security_id, current in score_today_by_id.items():
+        prior = prior_by_id.get(security_id)
+        if current.percentile is None or prior is None or prior.percentile is None:
+            continue
+        security, recommendation_out = _recommendation_context(security_id, current)
+        recommendation = recommendation_by_security.get(security_id)
         movers.append(
             BriefingScoreMover(
                 security_id=security_id,
@@ -348,6 +403,7 @@ async def get_briefing(
         max_knowledge_date=max_knowledge_date,
         portfolio=portfolio,
         changes=changes,
+        top_scored=top_scored,
         movers_up=movers_up,
         movers_down=movers_down,
         escalated_risks=escalated,

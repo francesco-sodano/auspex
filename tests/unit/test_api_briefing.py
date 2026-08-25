@@ -151,6 +151,7 @@ class TestContractShape:
             "max_knowledge_date",
             "portfolio",
             "changes",
+            "top_scored",
             "movers_up",
             "movers_down",
             "escalated_risks",
@@ -168,6 +169,7 @@ class TestContractShape:
         assert body["run_status"] == "RUNNING"
         assert body["portfolio"] is None
         assert body["changes"] == []
+        assert body["top_scored"] == []
         assert body["escalated_risks"] == []
         assert body["recommendations"] == []
         assert body["assertion_failures"] == []
@@ -297,6 +299,59 @@ class TestPortfolioSummary:
 
 
 class TestScoreMovers:
+    def test_returns_the_four_highest_current_scores(self):
+        current = [
+            _score("sec-a", percentile=85),
+            _score("sec-b", percentile=25),
+            _score("sec-c", percentile=92),
+            _score("sec-d", percentile=75),
+            _score("sec-e", percentile=88),
+        ]
+        prior = [
+            _score(score.security_id, as_of=date(2026, 8, 7), percentile=score.percentile - 1)
+            for score in current
+        ]
+        securities = [
+            SEC_A,
+            SEC_B,
+            Security(
+                id="sec-c",
+                ticker="CCC",
+                cik="0000000003",
+                name="Gamma Corp",
+                cohort="tech",
+                filer_profile=FilerProfile.DOMESTIC,
+            ),
+            Security(
+                id="sec-d",
+                ticker="DDD",
+                cik="0000000004",
+                name="Delta Corp",
+                cohort="tech",
+                filer_profile=FilerProfile.DOMESTIC,
+            ),
+            Security(
+                id="sec-e",
+                ticker="EEE",
+                cik="0000000005",
+                name="Epsilon Corp",
+                cohort="tech",
+                filer_profile=FilerProfile.DOMESTIC,
+            ),
+        ]
+        client = _make_client(
+            {
+                get_universe: lambda: FakeUniverse(securities=securities),
+                get_score_repo: lambda: FakeCosmosRepository(current + prior),
+            }
+        )
+
+        body = client.get("/api/briefing", params={"date": "2026-08-08"}).json()
+
+        assert [item["ticker"] for item in body["top_scored"]] == ["CCC", "EEE", "AAA", "DDD"]
+        assert [item["score"] for item in body["top_scored"]] == [92, 88, 85, 75]
+        assert all("share-price forecast" in item["summary"] for item in body["top_scored"])
+
     def test_returns_top_movers_on_zero_to_one_hundred_scale(self):
         current = [
             _score("sec-a", percentile=85),

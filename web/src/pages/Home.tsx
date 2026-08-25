@@ -1,4 +1,4 @@
-import { ArrowDownRight, ArrowUpRight, Ban, Clock3, MessageSquareText, ShieldAlert } from 'lucide-react'
+import { ArrowDownRight, ArrowUpRight, Award, Ban, Clock3, MessageSquareText, ShieldAlert } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { ActionPill, ErrorBlock, Loading, MetricTile, Section, formatMoney, formatNumber } from '../components/common'
 import { useApi } from '../lib/api'
@@ -13,8 +13,8 @@ const suggestedAction = (recommendation: Recommendation) => {
   return `Suggested: ${verb} ${quantity} (${formatMoney(recommendation.suggested_trade_chf)})`
 }
 
-function Movers({ movers, direction }: { movers: ScoreMover[]; direction: 'up' | 'down' }) {
-  const Icon = direction === 'up' ? ArrowUpRight : ArrowDownRight
+function ScoreCards({ movers, direction }: { movers: ScoreMover[]; direction: 'top' | 'up' | 'down' }) {
+  const Icon = direction === 'top' ? Award : direction === 'up' ? ArrowUpRight : ArrowDownRight
   const storageKey = `auspex:expanded-movers:${direction}`
   const [expanded, setExpanded] = useState<Set<string>>(() => {
     try {
@@ -37,26 +37,33 @@ function Movers({ movers, direction }: { movers: ScoreMover[]; direction: 'up' |
     })
   }
   return (
-    <div className="mover-column">
+    <div className={`mover-column ${direction === 'top' ? 'top-scored-column' : ''}`}>
       <header>
         <div>
-          <span className={`mover-direction ${direction}`}><Icon size={14} /> Movers {direction}</span>
-          <p>Largest one-day Auspex Score changes</p>
+          <span className={`mover-direction ${direction}`}>
+            <Icon size={14} /> {direction === 'top' ? 'Top scored' : `Movers ${direction}`}
+          </span>
+          <p>{direction === 'top' ? 'Four highest current Auspex Scores' : 'Largest one-day Auspex Score changes'}</p>
         </div>
       </header>
-      <div className="mover-list">
-        {movers.length === 0 && <div className="empty">No score moved in this direction.</div>}
+      <div className={`mover-list ${direction === 'top' ? 'top-scored-list' : ''}`}>
+        {movers.length === 0 && <div className="empty">{direction === 'top' ? 'No current scores are available.' : 'No score moved in this direction.'}</div>}
         {movers.map((mover) => (
           <article className="mover-card" key={mover.security_id}>
             <a className="identity identity-link" href={`#/analysis?security=${encodeURIComponent(mover.security_id)}`}>
               <span className="ticker">{mover.ticker}</span>
-              <div><strong>{mover.company_name}</strong><small>Prior score {mover.prior_score}</small></div>
+              <div>
+                <strong>{mover.company_name}</strong>
+                <small>{mover.prior_score === null ? 'No prior scored session' : `Prior score ${mover.prior_score}`}</small>
+              </div>
             </a>
             <div className="score-shift">
               <strong className="gold">{mover.score}</strong>
-              <span className={direction === 'up' ? 'positive' : 'negative'}>
-                {mover.score_change > 0 ? '+' : ''}{mover.score_change}
-              </span>
+              {mover.score_change !== null && (
+                <span className={mover.score_change > 0 ? 'positive' : mover.score_change < 0 ? 'negative' : ''}>
+                  {mover.score_change > 0 ? '+' : ''}{mover.score_change}
+                </span>
+              )}
             </div>
             <p className="mover-summary">{mover.summary}</p>
             {mover.narrative && (
@@ -156,9 +163,12 @@ export function Home() {
       </Section>
 
       <Section title="What changed today" description="Auspex Score is a 0–100 cross-sectional rank">
+        <div className="top-scored-section">
+          <ScoreCards movers={briefing.top_scored} direction="top" />
+        </div>
         <div className="movers-grid">
-          <Movers movers={briefing.movers_up} direction="up" />
-          <Movers movers={briefing.movers_down} direction="down" />
+          <ScoreCards movers={briefing.movers_up} direction="up" />
+          <ScoreCards movers={briefing.movers_down} direction="down" />
         </div>
       </Section>
 

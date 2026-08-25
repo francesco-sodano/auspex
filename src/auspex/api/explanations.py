@@ -126,6 +126,36 @@ def mover_summary(
     return " ".join((opening, reason, _action_sentence(recommendation)))
 
 
+def top_score_summary(
+    current: ScoreSnapshot,
+    prior: ScoreSnapshot | None,
+    recommendation: Recommendation | None,
+) -> str:
+    """Explain a high current score without implying a price forecast."""
+
+    if current.percentile is None:
+        return "A reliable current score is not available for this company."
+    opening = (
+        f"The Auspex Score is {current.percentile}/100, placing the company "
+        f"{_score_position(current.percentile)}."
+    )
+    movement = ""
+    if prior is not None and prior.percentile is not None:
+        score_change = current.percentile - prior.percentile
+        if score_change == 0:
+            movement = " The score is unchanged from the previous scored session."
+        else:
+            movement = (
+                f" It {'rose' if score_change > 0 else 'fell'} {abs(score_change)} "
+                f"{'point' if abs(score_change) == 1 else 'points'} since the previous "
+                "scored session."
+            )
+    return (
+        f"{opening}{movement} {_action_sentence(recommendation)} "
+        "The score is a comparison with similar companies, not a share-price forecast."
+    )
+
+
 def score_reasoning(
     score: ScoreSnapshot,
     prior: ScoreSnapshot | None,

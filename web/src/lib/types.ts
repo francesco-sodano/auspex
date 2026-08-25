@@ -54,6 +54,7 @@ export type Briefing = {
     narrative: string
     evidence_excerpt: string
   }>
+  top_scored: ScoreMover[]
   movers_up: ScoreMover[]
   movers_down: ScoreMover[]
   escalated_risks: Array<{
@@ -72,8 +73,8 @@ export type ScoreMover = {
   ticker: string
   company_name: string
   score: number
-  prior_score: number
-  score_change: number
+  prior_score: number | null
+  score_change: number | null
   summary: string
   narrative: string
   buy_ready: boolean
