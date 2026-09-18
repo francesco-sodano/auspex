@@ -4,6 +4,10 @@
 **Scope:** Approval-gated multi-user regulated-AI financial research MVP
 **Platform:** Microsoft Azure
 
+For the deeper as-built module contracts, exact execution paths, formulas and
+verified implementation limits, see the separate
+[Auspex implementation guide](auspex-implementation-guide.md).
+
 ## 1. Introduction and goals
 
 Auspex demonstrates how AI can be useful in financial research without making

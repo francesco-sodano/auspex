@@ -213,6 +213,9 @@ flowchart LR
 
 The detailed current-state design is in
 [doc/auspex-arc42.md](doc/auspex-arc42.md).
+For implementation-level contracts, complete execution flows, the six formulas,
+module responsibilities, operations, tests and verified limitations, use the
+standalone [Auspex implementation guide](doc/auspex-implementation-guide.md).
 
 Private API requests, onboarding/registration writes, administrator lifecycle
 mutations, per-user nightly work and private weekly attribution hold an
@@ -620,8 +623,9 @@ Auspex is and remains an MVP for directional research and human decision
 support, not a production banking service. A bank must complete its own legal
 classification, model risk, suitability, privacy, outsourcing, resilience and
 supervisory controls before production use. The high-level production gap, and
-the deliberate limitations that remain in this implementation, are documented in
-[doc/auspex-arc42.md](doc/auspex-arc42.md).
+the limitations and hardening gaps that remain in this implementation, are
+documented in [Arc42](doc/auspex-arc42.md) and the source-grounded
+[implementation guide](doc/auspex-implementation-guide.md).
 
 ## License
 
