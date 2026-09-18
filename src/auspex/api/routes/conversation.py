@@ -49,6 +49,9 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
 CHAT_TIMEOUT_SECONDS = 180
 CHAT_HEARTBEAT_SECONDS = 10
+AMBIGUOUS_LOWERCASE_TICKERS = frozenset(
+    {"ai", "app", "arm", "be", "form", "meta", "now", "on", "onto", "path", "snow"}
+)
 
 
 def _resolve_question_tickers(question: str, universe: Universe) -> list[str]:
@@ -82,7 +85,8 @@ def _resolve_question_tickers(question: str, universe: Universe) -> list[str]:
         company_phrase = " ".join(company_tokens)
         explicit_ticker = bool(
             re.search(rf"\b{re.escape(security.ticker)}\b", question)
-        ) or (stock_context and ticker in tokens)
+            or re.search(rf"(?:\$|\bticker\s+){re.escape(ticker)}\b", question, flags=re.IGNORECASE)
+        ) or (stock_context and ticker in tokens and ticker not in AMBIGUOUS_LOWERCASE_TICKERS)
         company_match = bool(
             company_phrase
             and company_phrase in normalized

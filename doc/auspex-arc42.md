@@ -1809,6 +1809,10 @@ top-mover questions use an empty security list, not a model-invented
 unknown securities and reversed dates. One corrective retry is allowed;
 invalid plans never fall through to broader unfiltered retrieval. The
 persisted `RetrievalPlan` keeps the existing string-filter contract.
+The route's deterministic ticker resolver treats common lowercase words
+(`now`, `on`, `be`, and similar ambiguous symbols) as prose unless explicitly
+identified as a ticker. For example, "right now" must not scope a
+universe-wide buy-candidate question to ServiceNow.
 `src/auspex/assistant/retrieval.py` executes that plan against Cosmos scoped to
 `user_id`,
 enforcing `MAX_BUDGET_TOKENS = 20_000` (≈4 characters per token) and

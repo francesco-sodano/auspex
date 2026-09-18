@@ -74,6 +74,21 @@ class TestChatMountPoint:
 
         assert "SERV" not in tickers
 
+    @pytest.mark.parametrize(
+        ("question", "expected"),
+        [
+            ("Which stocks are the strongest buy candidates right now?", []),
+            ("What are your thoughts on nvda stock right now?", ["NVDA"]),
+            ("Which company should be on my watchlist?", []),
+            ("What do you think about NOW stock?", ["NOW"]),
+            ("What do you think about $now?", ["NOW"]),
+            ("Tell me about ticker on", ["ON"]),
+            ("What do you think about ServiceNow stock?", ["NOW"]),
+        ],
+    )
+    def test_common_words_do_not_override_the_planner_security_scope(self, question, expected):
+        assert conversation._resolve_question_tickers(question, load_universe()) == expected
+
     def test_post_streams_a_grounded_answer_with_the_fixed_universe(self):
         class Planner:
             tickers: list[str] = []

@@ -35,6 +35,9 @@ queries against exactly what you specify.
   fetcher identifies movers; you do not choose or rank tickers.
 - For portfolio suggestions and buy candidates, include `portfolio_state`
   and `recommendations`; the stored recommendation is the action authority.
+  Keep `securities` empty for universe-wide questions. Everyday words such as
+  "right now", "based on", and "should be" do not identify the tickers NOW,
+  ON, or BE.
 
 ## Fixed data classes
 
