@@ -138,6 +138,36 @@ class TestCompleteJson:
             await client.complete_json(
                 deployment="gpt-4.1-mini", system_prompt="s", user_content="u", json_schema={"type": "object"}
             )
+        assert client._client.chat.completions.create.await_count == 2
+
+    async def test_truncated_json_retries_once_without_changing_input_or_output_ceiling(self, caplog):
+        client = make_client()
+        truncated = FakeResponse('{"excerpt":"\\u0000')
+        truncated.choices[0].finish_reason = "length"
+        client._client.chat.completions.create = AsyncMock(
+            side_effect=[truncated, FakeResponse('{"ok": true}')]
+        )
+        client._bucket.acquire = AsyncMock()
+        result = await client.complete_json(
+            deployment="gpt-4.1-mini", system_prompt="verified source rules", user_content="source", max_tokens=1500
+        )
+        assert result == '{"ok": true}'
+        calls = client._client.chat.completions.create.call_args_list
+        assert [call.kwargs["frequency_penalty"] for call in calls] == [0.0, 0.2]
+        assert [call.kwargs["max_tokens"] for call in calls] == [1500, 1500]
+        assert calls[0].kwargs["messages"] == calls[1].kwargs["messages"]
+        assert calls[0].kwargs["response_format"] == calls[1].kwargs["response_format"]
+        assert client._bucket.acquire.await_count == 2
+        assert "retrying once with repetition control" in caplog.text
+
+    async def test_content_filter_finish_is_not_retried_as_a_length_failure(self):
+        client = make_client()
+        response = FakeResponse(None)
+        response.choices[0].finish_reason = "content_filter"
+        client._client.chat.completions.create = AsyncMock(return_value=response)
+        with pytest.raises(ValueError, match="complete structured response"):
+            await client.complete_json(deployment="gpt-4.1-mini", system_prompt="s", user_content="u")
+        assert client._client.chat.completions.create.await_count == 1
 
     @pytest.mark.asyncio
     async def test_returns_content_and_calls_create_once_on_success(self):

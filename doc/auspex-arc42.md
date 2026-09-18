@@ -1784,7 +1784,10 @@ Container Apps environment). All calls share the same token-based
 configured TPM budget. The source must be read and bounded before cache reuse
 can verify its actual input fingerprint; cache lookups remain partition-local.
 News has smaller output reserves (Channel A: 1,500 tokens; Channel B: 2,000);
-filings reserve 5,000. Empty or truncated JSON responses fail explicitly.
+filings reserve 5,000. A length-terminated JSON response receives one
+budgeted repetition-control retry at the same output ceiling; if it still
+truncates, it fails explicitly. Empty/refused/filtered responses fail without
+that retry. No truncated JSON is accepted.
 An interrupted refresh resumes from completed, fingerprint-matching records.
 
 `_verify_source_grounding` then checks every quotation against the exact section

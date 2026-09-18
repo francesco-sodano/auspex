@@ -19,7 +19,9 @@ backoff pattern used for EDGAR/Alpha Vantage/Finnhub.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
+from functools import partial
 
 import openai
 from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
@@ -29,6 +31,11 @@ from openai.types.chat.completion_create_params import ResponseFormat
 from auspex.providers.rate_limit import TokenBucket, backoff_sleep
 
 MAX_RETRIES = 5
+logger = logging.getLogger(__name__)
+
+
+class TruncatedStructuredResponseError(ValueError):
+    """A model response hit its output limit before completing JSON."""
 
 # A rough, deliberately conservative chars-per-token estimate (English prose
 # and JSON both average closer to 4, but padding the estimate upward means
@@ -131,11 +138,12 @@ class AzureOpenAIClient:
                 },
             }
 
-        async def _call():
+        async def _call(frequency_penalty: float):
             response = await self._client.chat.completions.create(
                 model=deployment,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                frequency_penalty=frequency_penalty,
                 response_format=response_format,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -143,15 +151,31 @@ class AzureOpenAIClient:
                 ],
             )
             choice = response.choices[0]
+            if choice.finish_reason == "length":
+                raise TruncatedStructuredResponseError(
+                    "The model did not return a complete structured response: output limit reached."
+                )
             if choice.finish_reason != "stop" or not choice.message.content:
                 raise ValueError("The model did not return a complete structured response.")
             return choice.message.content
 
-        return await self._call_with_retry(
-            deployment,
-            estimate_tokens(system_prompt, user_content, output_reserve=max_tokens),
-            _call,
-        )
+        for attempt in range(2):
+            try:
+                return await self._call_with_retry(
+                    deployment,
+                    estimate_tokens(system_prompt, user_content, output_reserve=max_tokens),
+                    partial(_call, 0.0 if attempt == 0 else 0.2),
+                )
+            except TruncatedStructuredResponseError:
+                if attempt == 1:
+                    raise
+                logger.warning(
+                    "JSON output limit reached for %s; retrying once with repetition control "
+                    "and the same %d-token output ceiling",
+                    deployment,
+                    max_tokens,
+                )
+        raise AssertionError("unreachable")
 
     async def complete_text(
         self,

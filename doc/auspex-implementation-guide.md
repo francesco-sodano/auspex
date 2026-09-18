@@ -703,6 +703,14 @@ The token bucket clamps an oversized single reservation to its capacity, so
 callers must still bound requests. Separate processes can contend for the same
 service quota; retries do not create extra quota.
 
+If a JSON call ends with `finish_reason="length"`, the provider retries once
+with a small repetition penalty (`0.2`), the identical source/prompt and the
+same output ceiling. Each attempt reserves its own token budget. This breaks
+the observed repetitive Unicode-escape failure without accepting truncated
+JSON or invalidating completed source caches. A second truncation still fails;
+refusal/content-filter/empty responses do not take this retry path. Existing
+source-span validation remains authoritative after the response is complete.
+
 ## The six-leg engine, exactly as implemented
 
 ### From stored records to calculation inputs
