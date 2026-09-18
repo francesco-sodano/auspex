@@ -26,7 +26,8 @@ fpi:
   fundamental_health: "0.25"
   valuation_brake: "0.1875"
 
-# Recency decay half-life (days) shared by thesis_linkage and narrative_premium.
+# Thesis decay e-folding constant in days (the historical key name is retained).
+# Narrative premium currently uses its helper's independent 90-day default.
 recency_half_life_days: 90
 
 # document_authority by filing/document type - thesis_linkage & attention_acceleration

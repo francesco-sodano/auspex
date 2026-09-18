@@ -1286,7 +1286,9 @@ async def _bootstrap_command(
     try:
         if recovery_only:
             if openai_client is None:
-                logger.error("bootstrap recovery requires a working extraction client; refusing to replay stale evidence")
+                logger.error(
+                    "bootstrap recovery requires a working extraction client; refusing to replay stale evidence"
+                )
                 return 1
             seed_ctx = context_factory(today)
             binding = await runner.bind_and_validate_portfolio(

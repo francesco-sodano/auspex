@@ -282,11 +282,10 @@ def clip(value: Decimal, low: Decimal, high: Decimal) -> Decimal:
 def exponential_decay(age_days: int, half_life_days: Decimal) -> Decimal:
     """``exp(-age_days / half_life)`` computed via Decimal-friendly ``e**x``.
 
-    ``Decimal`` has no native ``exp``; we use ``math.exp`` on the float ratio
-    (a pure decay weight, not a monetary value) and immediately re-wrap via
-    ``str()`` so the *result* re-enters Decimal arithmetic cleanly. This is the
-    one place floats are used, deliberately isolated to a non-monetary decay
-    coefficient, and is exact enough for a recency-weighting heuristic.
+    The implementation uses ``math.exp`` on the float ratio (a decay
+    coefficient, not a monetary amount), then re-wraps via ``str()``.
+    Despite the parameter name, the denominator is an e-folding time constant:
+    a mathematical half-life would also require a factor of ``ln(2)``.
     """
 
     import math

@@ -350,6 +350,7 @@ def seed_channel_a_extraction(repos: PipelineRepos, security_id: str, as_of_date
         content_hash=doc.content_hash,
         model_version="gpt-4.1-mini-test",
         taxonomy_version="themes-2026-08",
+        input_fingerprint="verified-fixture-input",
         materiality=materiality,
         sentiment=Sentiment.POSITIVE,
         guidance_direction=GuidanceDirection.RAISED,

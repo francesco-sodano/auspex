@@ -1,6 +1,7 @@
-"""`FxCollector` — USD/CHF daily close (arc42 §5.3).
+"""`FxCollector` — configured daily currency pairs (arc42 §5.3).
 
-Ledger only, never scoring (arc42 §8.2: FX never enters the scoring engine).
+Rates support ledger valuation and point-in-time conversion of non-USD
+fundamentals before comparable valuation ratios are built.
 """
 
 from __future__ import annotations

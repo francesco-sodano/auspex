@@ -71,6 +71,22 @@ def _age_days(knowledge_date: date, as_of_date: date) -> int:
     return (as_of_date - knowledge_date).days
 
 
+def verified_scoring_extractions(
+    extractions: list[ChannelAExtraction],
+    documents_by_id: dict[str, Document],
+    taxonomy_version: str | None,
+) -> list[ChannelAExtraction]:
+    return [
+        extraction
+        for extraction in extractions
+        if extraction.input_fingerprint
+        and (document := documents_by_id.get(extraction.document_id)) is not None
+        and document.security_id == extraction.security_id
+        and document.content_hash == extraction.content_hash
+        and (taxonomy_version is None or extraction.taxonomy_version == taxonomy_version)
+    ]
+
+
 def build_thesis_linkage_events(
     extractions: list[ChannelAExtraction],
     documents_by_id: dict[str, Document],
@@ -236,7 +252,8 @@ def _latest_facts_with_end(
                 ):
                     candidates.append((fact.end, Decimal(fact.value)))
     candidates.sort(key=lambda t: t[0])
-    # de-duplicate by period end, keep latest filed value per period (already sorted by end)
+    # Same-end ties currently retain the last encountered candidate; this is not
+    # duration normalization or an explicit latest-filing/alias-priority rule.
     by_end: dict = {}
     for end, value in candidates:
         by_end[end] = value
@@ -252,7 +269,7 @@ def _latest_facts(
     *,
     unit: str | None = None,
 ) -> list[Decimal]:
-    """Most recent ``n`` distinct-period values for the first matching alias, filed <= as_of_date."""
+    """Most recent ``n`` distinct period ends across aliases, filtered by filing date/unit."""
 
     return [value for _end, value in _latest_facts_with_end(snapshots, concept_aliases, as_of_date, n, unit=unit)]
 

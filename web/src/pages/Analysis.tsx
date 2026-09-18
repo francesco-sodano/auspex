@@ -295,6 +295,7 @@ export function Analysis() {
                 <div className="leg-explanation-grid">
                   {Object.entries(LEG_EXPLANATIONS).map(([name, explanation]) => {
                     const leg = security.legs[name]
+                    const excludedInsiderLeg = name === 'smart_money' && security.security.filer_profile === 'FPI'
                     const reading = leg?.explanation
                       ? ({
                           supports: 'Helps the score',
@@ -304,14 +305,14 @@ export function Analysis() {
                           not_applicable: 'Not used for this company',
                         }[leg.explanation.effect])
                       : leg === undefined
-                        ? 'Not used for this company'
+                        ? excludedInsiderLeg ? 'Not used for this company' : 'Assessment unavailable'
                         : legReading(leg.score, leg.computable, leg.neutral)
                     const meaning = leg?.explanation?.summary || (leg?.neutral
                       ? (leg.status_explanation || 'There is no meaningful difference to compare right now.')
                       : leg === undefined
-                        ? name === 'smart_money' && security.security.filer_profile === 'FPI'
+                        ? excludedInsiderLeg
                           ? 'This area is not used for this company because comparable Form 4 insider filings are not available for foreign private issuers.'
-                          : 'This area is not applicable to the current score.'
+                          : 'A reliable assessment is not available for this area in the saved score. Missing information is not a negative finding.'
                         : !leg.computable
                           ? (leg.status_explanation || 'Auspex does not have enough reliable information to assess this area.')
                           : leg.score !== null

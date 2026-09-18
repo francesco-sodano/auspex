@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from typing import TypeVar
 from unittest.mock import AsyncMock
 
 import pytest
 
+from auspex.cli.bootstrap import BootstrapRunner, extraction_backfill_start
 from auspex.config.loader import Universe
 from auspex.extraction.channel_a import ChannelAExtractor
 from auspex.extraction.relevance import news_is_relevant
@@ -179,3 +180,39 @@ def test_whole_filings_and_news_are_html_cleaned():
     document = _news().model_copy(update={"document_type": DocumentType.FORM_8K, "form_type": "8-K"})
     sections = document_sections(document, "<html><head><title>metadata</title></head><p>Real source.</p></html>")
     assert sections == [Section(item="full_document", text="Real source.")]
+
+
+async def test_recovery_refreshes_used_warmup_interpretations_without_expanding_new_extraction(monkeypatch):
+    floor = extraction_backfill_start(AS_OF)
+    documents = InMemoryDocumentSink()
+    channel_a = _ExtractionSink[ChannelAExtraction]()
+    channel_b = _ExtractionSink[ChannelBDigest]()
+    dates = {
+        "current": floor,
+        "previously-read": floor - timedelta(days=30),
+        "old-unread": floor - timedelta(days=30),
+        "too-old": floor - timedelta(days=181),
+        "future": AS_OF + timedelta(days=1),
+    }
+    for document_id, knowledge_date in dates.items():
+        await documents.upsert_document(_news().model_copy(update={
+            "id": document_id, "knowledge_date": knowledge_date,
+        }))
+    for document_id in ("previously-read", "too-old"):
+        await channel_b.upsert(ChannelBDigest(
+            id=f"digest-{document_id}", security_id=SECURITY.id, document_id=document_id,
+            content_hash="news-hash", model_version="test", headline="An older interpretation", digest=SOURCE,
+        ))
+    ctx = PipelineContext(
+        universe=Universe(securities=[SECURITY]), as_of_date=AS_OF, user_id="owner", config={},
+        repos=PipelineRepos(
+            document_sink=documents, blob_sink=InMemoryBlobSink(), price_sink=InMemoryPriceSink(),
+            fundamental_sink=InMemoryFundamentalSink(), fx_sink=InMemoryFxSink(),
+            watermarks=InMemoryWatermarkStore(), channel_a_sink=channel_a, channel_b_sink=channel_b,
+        ),
+    )
+    for name in ("step_extract_channel_a", "step_extract_channel_b"):
+        monkeypatch.setattr(f"auspex.cli.bootstrap.{name}", AsyncMock())
+    runner = BootstrapRunner(universe=ctx.universe, context_factory=lambda _date: ctx)
+    await runner.extract_and_collect_fundamentals(ctx, include_fundamentals=False)
+    assert set(ctx.new_document_ids_by_security[SECURITY.id]) == {"current", "previously-read"}

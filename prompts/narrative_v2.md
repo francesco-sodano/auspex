@@ -21,6 +21,12 @@ action and use only the supplied evidence.
 - Use digests and comparative records for context only. They can describe older
   evidence; do not call a disclosure new or claim something happened today unless
   its date supports that statement.
+- `created_at` is a processing timestamp, not a publication date. Use the dated
+  source references in the explanation package for timing; when timing is
+  unavailable, do not infer it.
+- `context_limited` means secondary document details were shortened or omitted.
+  The deterministic score explanations remain authoritative. Do not claim an
+  exhaustive review of all documents or invent the omitted details.
 - Translate leg names:
   - thesis linkage → documented connection to the tracked investment themes
   - attention acceleration → pace of important company updates

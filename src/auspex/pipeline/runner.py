@@ -1,8 +1,10 @@
 """Nightly pipeline runner (arc42 §6.1).
 
 Runs the 20 steps in order, checkpointing to the run manifest after each
-step. A failed run resumes from the last successful step on the next
-invocation for the same ``as_of_date``. Hard timeout terminates the run with
+step. A caller can supply an existing manifest to skip completed steps, but
+must also restore any transient context those steps produced. The normal CLI
+creates a fresh run; this class is not an automatic durable-workflow resume.
+Hard timeout terminates the run with
 ``status=TIMEOUT`` and does not commit watermarks — and is enforced *within*
 each step, not merely between them, so a step that hangs on a provider call
 cannot outlive the configured budget.

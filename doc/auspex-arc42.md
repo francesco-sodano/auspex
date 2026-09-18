@@ -439,11 +439,13 @@ metric detail.
 This measures whether Auspex is informative; it does not rewrite history or
 train on owner outcomes automatically.
 
-`auspex shadow` evaluates a fingerprinted pre-registration against immutable
-stored leg z-scores and returns promotion verdicts without changing production
-weights. Publishing shadow metrics is opt-in. A challenger may be promoted
-only when held-out, benchmark-relative, post-cost intervals exclude zero and
-the result does not depend on one ticker, cohort, or regime.
+`auspex shadow` evaluates a fingerprinted registration against stored leg
+z-scores and returns statistical verdicts without changing production weights.
+Publishing shadow metrics is opt-in. Its implemented gate uses paired IC
+improvement, effective sample size, a Newey-West interval and multiple-testing
+correction. It does not implement train/test folds or establish held-out,
+post-cost validation. Stored inputs can be replaced by a replay, so a
+fingerprint alone does not make the underlying dataset immutable.
 
 ### 5.9 Grounded conversation
 
@@ -1702,7 +1704,7 @@ A `PreRegistration` fixes `study_id`, `hypothesis`, `primary_metric`,
 published in `detail["fingerprint"]` on every emitted row.
 
 The champion variant returns the **stored** composite unchanged; challengers
-re-score from immutable stored leg z-scores in memory only. ICs are evaluated
+re-score from stored leg z-scores in memory only. ICs are evaluated
 on `common_ids_by_date` — securities scoreable by every variant that date — so
 variants are never compared on different populations. The default standing
 study is `shadow-v4.2-neutral-missing-v1` with primary metric
@@ -1715,6 +1717,11 @@ Benjamini–Hochberg result is rejected at α = 0.05. Otherwise it returns
 `"not_primary"`, `"insufficient_evidence"` or `"no_improvement"`. Nothing is
 written unless `auspex shadow --publish` is passed, and nothing ever writes to
 `scores` or mutates production weights.
+
+This is a historical configuration comparison, not a trained walk-forward
+backtest. The registration date is not enforced against observation dates,
+and no fold/purge/embargo structure is implemented. The separate risk-aware
+allocation shadow is not evaluated by this score-variant gate.
 
 ### A.17 The LLM boundary
 
@@ -2202,8 +2209,9 @@ form. What remains are deliberate boundaries, not divergences:
    position, cohort, correlation and turnover ceilings to 100 % and
    participation to 1, so only the shared CHF budget, per-trade cost and
    `min_trade_chf` bind. The full risk-aware allocation is computed and stored
-   as `shadow_suggested_trade_chf` and stays shadow-only until the registered
-   promotion gate passes.
+   as `shadow_suggested_trade_chf` and stays shadow-only. Switching the live
+   allocator requires an explicit code/configuration decision; the score-variant
+   study's verdict does not promote allocations.
 
 5. **The scored history is too short for a validated predictive claim.** The
    promotion gate in `promotion_verdict` requires a primary-horizon comparison,

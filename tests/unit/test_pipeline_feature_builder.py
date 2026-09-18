@@ -26,6 +26,7 @@ from auspex.pipeline.feature_builder import (
     build_thesis_linkage_events,
     build_valuation_metrics,
     reviewed_thesis_documents,
+    verified_scoring_extractions,
 )
 
 AS_OF = date(2026, 8, 10)
@@ -101,6 +102,18 @@ def test_reviewed_no_theme_match_is_distinct_from_no_reviewed_evidence():
     assert reviewed_thesis_documents([legacy], {document.id: document}, AS_OF) == 0
     assert reviewed_thesis_documents([verified], {document.id: document}, AS_OF) == 1
     assert reviewed_thesis_documents([invalid], {document.id: document}, AS_OF) == 0
+
+
+def test_scoring_accepts_only_verified_matching_source_interpretations():
+    document = _document("source", AS_OF)
+    legacy = _extraction(document)
+    verified = legacy.model_copy(update={"input_fingerprint": "verified-input"})
+    stale_source = verified.model_copy(update={"content_hash": "a-different-source"})
+    old_taxonomy = verified.model_copy(update={"taxonomy_version": "old"})
+    selected = verified_scoring_extractions(
+        [legacy, stale_source, old_taxonomy, verified], {document.id: document}, "test"
+    )
+    assert selected == [verified]
 
 
 def test_insider_events_exclude_transactions_not_yet_filed():

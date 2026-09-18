@@ -555,6 +555,12 @@ class BootstrapRunner:
         """
 
         floor = extraction_backfill_start(ctx.as_of_date)
+        warmup_floor = floor - timedelta(days=180)
+        prior_interpretations = [
+            *await fetch_all(ctx.repos.channel_a_sink),
+            *await fetch_all(ctx.repos.channel_b_sink),
+        ]
+        previously_interpreted = {item.document_id for item in prior_interpretations}
         documents = await fetch_all(ctx.repos.document_sink)
         from auspex.extraction.sections import is_extraction_document
 
@@ -563,7 +569,8 @@ class BootstrapRunner:
         ctx.new_accessions_by_security = {}
         for document in documents:
             if (
-                document.knowledge_date < floor
+                document.knowledge_date < warmup_floor
+                or (document.knowledge_date < floor and document.id not in previously_interpreted)
                 or document.knowledge_date > ctx.as_of_date
                 or not is_extraction_document(document)
             ):

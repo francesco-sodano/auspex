@@ -44,6 +44,7 @@ from auspex.pipeline.feature_builder import (
     build_thesis_linkage_events,
     build_valuation_metrics,
     reviewed_thesis_documents,
+    verified_scoring_extractions,
 )
 from auspex.pipeline.manifest import complete_step, skip_step, start_step
 from auspex.pipeline.prompts import load_prompt
@@ -85,7 +86,7 @@ DIRECTION_LOOKBACK_SESSIONS = 5
 
 async def step_start_run(ctx: PipelineContext, manifest: RunManifest) -> None:
     start_step(manifest, "START_RUN")
-    complete_step(manifest, "START_RUN", detail=f"lease acquired for {ctx.as_of_date.isoformat()}")
+    complete_step(manifest, "START_RUN", detail=f"started for {ctx.as_of_date.isoformat()}")
 
 
 async def step_collect_prices(ctx: PipelineContext, manifest: RunManifest) -> None:
@@ -470,7 +471,11 @@ async def step_compute_raw_legs(ctx: PipelineContext, manifest: RunManifest) -> 
     for sec in ctx.universe.securities:
         docs = documents_by_security.get(sec.id, [])
         documents_by_id = {d.id: d for d in docs}
-        extractions = [e for e in all_extractions if e.security_id == sec.id]
+        extractions = verified_scoring_extractions(
+            [extraction for extraction in all_extractions if extraction.security_id == sec.id],
+            documents_by_id,
+            ctx.config.get("taxonomy", {}).get("taxonomy_version"),
+        )
         fundamentals = [s for s in all_fundamentals if s.security_id == sec.id]
 
         thesis_events = build_thesis_linkage_events(extractions, documents_by_id, weights_cfg, ctx.as_of_date)

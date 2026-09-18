@@ -129,8 +129,9 @@ cash budget so the published set is jointly executable. A fuller risk-aware
 allocation evaluates horizon, objective, position/cohort concentration,
 date-aligned correlation, volatility, liquidity and turnover limits. That
 allocation is stored privately as a shadow challenger; it cannot replace the
-production allocation until held-out, point-in-time, post-cost promotion gates
-pass.
+production allocation automatically. A production switch requires a separate
+implementation decision and validation. The shipped score-variant shadow study
+is not a held-out evaluation of this allocator.
 
 Each nightly user stage projects the portfolio first, applies the gate cascade
 against that projection, and only then runs its post-run assertions — one ledger

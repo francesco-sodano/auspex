@@ -1,9 +1,9 @@
 """Provider abstractions (arc42 §3.1 "Provider abstraction").
 
 ``PriceProvider``, ``NewsProvider``, and ``FxProvider`` are interfaces.
-Swapping a vendor must require no change outside this package. Named vendors
-(Tiingo, Finnhub, exchangerate.host, SEC EDGAR) are the default
-implementations in the sibling modules.
+The default factory uses Alpha Vantage for price/FX and Finnhub for news.
+Tiingo and exchangerate.host remain alternative adapters; EDGAR is a separate
+filing/companyfacts client.
 """
 
 from __future__ import annotations
