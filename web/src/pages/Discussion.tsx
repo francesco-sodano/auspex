@@ -1,10 +1,10 @@
 import { Clock3, Plus, Send } from 'lucide-react'
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react'
-import { PageHeading } from '../components/common'
+import { ErrorBlock, PageHeading } from '../components/common'
 import { useApi } from '../lib/api'
 import type { ConversationTurn } from '../lib/types'
 
-type ChatMessage = { role: 'user' | 'assistant'; content: string }
+type ChatMessage = { role: 'user' | 'assistant'; content: string; error?: string }
 
 const promptFromHash = () => {
   const query = window.location.hash.split('?')[1] ?? ''
@@ -45,44 +45,67 @@ export function Discussion() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [question, setQuestion] = useState('')
   const [streaming, setStreaming] = useState(false)
+  const [statusMessage, setStatusMessage] = useState('')
+  const [historyError, setHistoryError] = useState<unknown>(null)
+  const [loadingConversation, setLoadingConversation] = useState(false)
   const [history, setHistory] = useState<ConversationTurn[]>([])
   const logRef = useRef<HTMLDivElement>(null)
   const autoPromptSent = useRef(false)
   const conversationId = useRef<string>(crypto.randomUUID())
+  const activeRequest = useRef<AbortController | null>(null)
   const refreshHistory = useCallback(() => {
-    void api.getChatHistory().then(setHistory).catch(() => undefined)
+    void api.getChatHistory().then((turns) => {
+      setHistory(turns)
+      setHistoryError(null)
+    }).catch(setHistoryError)
   }, [api])
 
   useEffect(refreshHistory, [refreshHistory])
+  useEffect(() => () => activeRequest.current?.abort(), [])
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: 'smooth' })
-  }, [messages])
+  }, [messages, statusMessage])
 
   const ask = useCallback(async (text: string) => {
     const normalized = text.trim()
-    if (!normalized || streaming) return
+    if (!normalized || activeRequest.current || loadingConversation) return
+    const controller = new AbortController()
+    activeRequest.current = controller
     setQuestion('')
+    setStatusMessage('Connecting to Auspex...')
     setMessages((current) => [...current, { role: 'user', content: normalized }, { role: 'assistant', content: '' }])
     setStreaming(true)
     try {
       await api.streamChat(normalized, conversationId.current, (chunk) => {
         setMessages((current) => current.map((message, index) => index === current.length - 1 ? { ...message, content: message.content + chunk } : message))
-      })
+      }, { signal: controller.signal, onStatus: setStatusMessage })
     } catch (cause) {
-      setMessages((current) => current.map((message, index) => index === current.length - 1 ? { ...message, content: cause instanceof Error ? cause.message : 'The answer stream failed.' } : message))
+      if (controller.signal.aborted) return
+      const error = cause instanceof Error ? cause.message : 'The answer stream failed. Please try again.'
+      setMessages((current) => current.map((message, index) => index === current.length - 1 ? { ...message, error } : message))
+      setQuestion((current) => current || normalized)
     } finally {
-      setStreaming(false)
-      refreshHistory()
+      if (activeRequest.current === controller) activeRequest.current = null
+      if (!controller.signal.aborted) {
+        setStreaming(false)
+        setStatusMessage('')
+        refreshHistory()
+      }
     }
-  }, [api, refreshHistory, streaming])
+  }, [api, refreshHistory, loadingConversation])
 
   useEffect(() => {
     const prompt = promptFromHash()
     if (!prompt || autoPromptSent.current) return
-    autoPromptSent.current = true
-    window.history.replaceState(null, '', '#/discussion')
-    void ask(prompt)
+    let cancelled = false
+    void Promise.resolve().then(() => {
+      if (cancelled) return
+      autoPromptSent.current = true
+      window.history.replaceState(null, '', '#/discussion')
+      void ask(prompt)
+    })
+    return () => { cancelled = true }
   }, [ask])
 
   const send = (event: FormEvent) => {
@@ -90,18 +113,28 @@ export function Discussion() {
     void ask(question)
   }
   const newChat = () => {
+    if (activeRequest.current || loadingConversation) return
     conversationId.current = crypto.randomUUID()
     setMessages([])
     setQuestion('')
   }
   const openConversation = async (id: string) => {
-    if (streaming) return
-    const turns = await api.getChatHistory(id)
-    conversationId.current = id
-    setMessages(turns.flatMap((turn) => [
-      { role: 'user' as const, content: turn.question },
-      { role: 'assistant' as const, content: turn.answer ?? '' },
-    ]))
+    if (activeRequest.current || loadingConversation) return
+    setLoadingConversation(true)
+    try {
+      const turns = await api.getChatHistory(id)
+      conversationId.current = id
+      setMessages(turns.flatMap((turn) => [
+        { role: 'user' as const, content: turn.question },
+        { role: 'assistant' as const, content: turn.answer ?? '' },
+      ]))
+      setQuestion('')
+      setHistoryError(null)
+    } catch (cause) {
+      setHistoryError(cause)
+    } finally {
+      setLoadingConversation(false)
+    }
   }
   const conversationSummaries = Array.from(
     history.reduce((map, turn) => {
@@ -115,12 +148,19 @@ export function Discussion() {
       <PageHeading eyebrow="Grounded conversation" title="Discussion" description="Ask Auspex about today’s movers, portfolio suggestions, scores, filings, fundamentals, or evidence. Answers use only retrieved Auspex facts." />
       <div className="discussion-chat-layout">
         <aside className="chat-history-panel">
-          <button className="button primary" type="button" onClick={newChat}><Plus size={14} /> New chat</button>
+          <button className="button primary" type="button" disabled={streaming || loadingConversation} onClick={newChat}><Plus size={14} /> New chat</button>
           <header><Clock3 size={13} /><span>Last 15 days</span></header>
           <div>
-            {conversationSummaries.length === 0 && <p>No saved conversations yet.</p>}
+            {historyError !== null && (
+              <div role="alert">
+                <p>Saved conversations could not be loaded.</p>
+                <ErrorBlock error={historyError} />
+                <button className="button compact" type="button" onClick={refreshHistory}>Retry history</button>
+              </div>
+            )}
+            {historyError === null && conversationSummaries.length === 0 && <p>No saved conversations yet.</p>}
             {conversationSummaries.map((turn) => (
-              <button type="button" key={turn.conversation_id} onClick={() => void openConversation(turn.conversation_id)}>
+              <button type="button" key={turn.conversation_id} disabled={streaming || loadingConversation} onClick={() => void openConversation(turn.conversation_id)}>
                 <strong>{turn.question}</strong>
                 <small>{new Date(turn.created_at).toLocaleDateString()}</small>
               </button>
@@ -132,14 +172,19 @@ export function Discussion() {
           {messages.length === 0 && (
             <div className="chat-welcome">
               <p>What would you like to understand?</p>
-              <div>{QUICK_QUESTIONS.map((item) => <button type="button" className="button" key={item} onClick={() => void ask(item)}>{item}</button>)}</div>
+              <div>{QUICK_QUESTIONS.map((item) => <button type="button" className="button" key={item} disabled={streaming || loadingConversation} onClick={() => void ask(item)}>{item}</button>)}</div>
             </div>
           )}
-          {messages.map((message, index) => <div className={`chat-message ${message.role}`} key={index}><CitationText content={message.content || (streaming && index === messages.length - 1 ? '…' : '')} /></div>)}
+          {messages.map((message, index) => (
+            <div className={`chat-message ${message.role}`} key={index}>
+              <CitationText content={message.content || (streaming && index === messages.length - 1 ? statusMessage : '')} />
+              {message.error && <p className="chat-message-error" role="alert">{message.error}</p>}
+            </div>
+          ))}
         </div>
         <form className="chat-composer" onSubmit={send}>
           <textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="Ask a grounded question about Auspex data…" aria-label="Question" />
-          <button className="button primary" disabled={streaming || !question.trim()}><Send size={14} /> Send</button>
+          <button className="button primary" disabled={streaming || loadingConversation || !question.trim()}><Send size={14} /> Send</button>
         </form>
         </section>
       </div>

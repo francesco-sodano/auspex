@@ -587,6 +587,10 @@ docker build -t auspex:local .
 - Prompts, taxonomies, weights and model deployments are versioned, and every
   prompt version in code resolves to a committed prompt file.
 - Conversation history expires after 15 days.
+- Discussion validates the AI retrieval plan against a strict schema. It
+  reports progress while checking grounded answers, shows actionable errors
+  with a reference ID, and lets you retry failed questions or history loads.
+  A dropped stream is never treated as a completed answer.
 
 ## Regulatory boundary
 

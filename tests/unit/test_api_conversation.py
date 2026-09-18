@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import UTC, datetime
+
+import pytest
 
 from auspex.api.auth import AuthenticatedUser, get_current_user
 from auspex.api.deps import get_app_user_service, get_universe
@@ -280,3 +284,120 @@ class TestChatHistory:
         body = response.json()
         assert [row["turn_index"] for row in body] == [0, 1]
         assert all(row["conversation_id"] == "conv-1" for row in body)
+
+
+class TestStreamFailures:
+    async def test_disconnected_client_cancels_unfinished_preparation(self):
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        class Planner:
+            async def plan(self, *args, **kwargs):
+                started.set()
+                try:
+                    await asyncio.sleep(10)
+                finally:
+                    cancelled.set()
+
+        repo = FakeCosmosRepository()
+        stream = conversation._stream_answer(
+            conversation.ConversationRequest(question="top movers"),
+            AuthenticatedUser(user_id="owner-1", claims={}),
+            Planner(),
+            None,
+            None,
+            load_universe(),
+            repo,
+            build_app_user_service([make_app_user("owner-1")]),
+        )
+        assert "event: status" in await anext(stream)
+        await asyncio.wait_for(started.wait(), 1)
+        await stream.aclose()
+
+        assert cancelled.is_set()
+        assert repo.upserted == []
+
+    @pytest.mark.parametrize("failing_stage", ["history", "planning", "retrieval", "generation", "storage"])
+    def test_failure_is_a_safe_error_event_not_a_broken_stream(self, failing_stage, caplog):
+        class Repository(FakeCosmosRepository):
+            async def query(self, *args, **kwargs):
+                if failing_stage == "history":
+                    raise RuntimeError("private dependency detail")
+                return await super().query(*args, **kwargs)
+
+            async def upsert(self, item):
+                if failing_stage == "storage":
+                    raise RuntimeError("private dependency detail")
+                await super().upsert(item)
+
+        class Planner:
+            async def plan(self, *args, **kwargs):
+                if failing_stage == "planning":
+                    raise ValueError("private dependency detail")
+                return RetrievalPlan(data_classes=["score_snapshot"])
+
+        class Fetcher:
+            async def fetch(self, *args, **kwargs):
+                if failing_stage == "retrieval":
+                    raise RuntimeError("private dependency detail")
+                return RetrievalResult()
+
+        class Answerer:
+            async def stream_answer(self, *args, **kwargs):
+                yield "An answer that has not passed all checks."
+                if failing_stage == "generation":
+                    raise RuntimeError("private dependency detail")
+
+        repo = Repository()
+        client = _make_client(
+            repo=repo,
+            extra_overrides={
+                conversation.get_planner: Planner,
+                conversation.get_fetcher: Fetcher,
+                conversation.get_answerer: Answerer,
+            },
+        )
+        response = client.post("/api/chat", json={"question": "What changed today?"})
+
+        assert response.status_code == 200
+        assert "event: error\n" in response.text
+        assert "event: done\n" in response.text
+        assert "private dependency detail" not in response.text
+        assert "An answer that has not passed all checks." not in response.text
+        assert "failed" in caplog.text.lower()
+        assert failing_stage in caplog.text
+        assert repo.upserted == []
+        error_event = next(event for event in response.text.split("\n\n") if event.startswith("event: error"))
+        error = json.loads(error_event.split("data: ", 1)[1])
+        assert error["request_id"]
+        assert error["message"]
+
+    def test_slow_request_emits_keepalives_then_times_out_without_saving(self, monkeypatch):
+        cancelled = []
+
+        class Planner:
+            async def plan(self, *args, **kwargs):
+                try:
+                    await asyncio.sleep(10)
+                finally:
+                    cancelled.append(True)
+
+        monkeypatch.setattr(conversation, "CHAT_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(conversation, "CHAT_HEARTBEAT_SECONDS", 0.01)
+        repo = FakeCosmosRepository()
+        client = _make_client(
+            repo=repo,
+            extra_overrides={
+                conversation.get_planner: Planner,
+                conversation.get_fetcher: lambda: None,
+                conversation.get_answerer: lambda: None,
+            },
+        )
+        response = client.post("/api/chat", json={"question": "top movers"})
+
+        assert ": keep-alive\n\n" in response.text
+        assert "event: status" in response.text
+        assert "chat_timeout" in response.text
+        assert "event: done" in response.text
+        assert cancelled == [True]
+        assert repo.upserted == []

@@ -1799,9 +1799,16 @@ escapes
 rather than discarding a whole response.
 
 **Conversation** is two-pass. `src/auspex/assistant/planner.py` converts the
-question and
-conversation state into a `RetrievalPlan` restricted to the twelve values in
-`FIXED_DATA_CLASSES`; anything else the model emits is discarded.
+question, current UTC date and conversation state into a `RetrievalPlan`.
+The planner requests Azure OpenAI strict JSON Schema output, generated from
+`PlannerResponse`: securities are constrained to the supplied universe,
+data classes to the twelve values in `FIXED_DATA_CLASSES`, and the only
+supported structured filter is a nullable document-section `item`. General
+top-mover questions use an empty security list, not a model-invented
+`top_movers` flag. Local validation rejects unknown fields, incorrect types,
+unknown securities and reversed dates. One corrective retry is allowed;
+invalid plans never fall through to broader unfiltered retrieval. The
+persisted `RetrievalPlan` keeps the existing string-filter contract.
 `src/auspex/assistant/retrieval.py` executes that plan against Cosmos scoped to
 `user_id`,
 enforcing `MAX_BUDGET_TOKENS = 20_000` (≈4 characters per token) and
@@ -1817,6 +1824,23 @@ the caller's
 lifecycle status before persisting a turn and discards it if they are no longer
 `ACTIVE`; history is served for 15 days and `conversations` carries a matching
 15-day container TTL.
+
+The API buffers model tokens until grounding and persistence succeed; status
+events and ten-second SSE keep-alives keep that preparation visible without
+exposing unchecked prose. A 180-second deadline covers history lookup,
+planning, retrieval, generation and storage. Disconnects cancel unfinished
+work. The stream boundary logs the failing stage with a request ID and sends
+a sanitized `error` event, followed by `done`; it never disguises an exception
+as a successful answer. Rate-limited model stream openings are retried with
+the provider's bounded backoff, but a partially consumed stream is never
+replayed. Truncated or content-filtered answers fail before storage.
+
+`web/src/lib/chatStream.ts` handles fragmented UTF-8 and LF/CRLF SSE frames,
+keeps progress separate from answer text, surfaces server error messages and
+request IDs, and requires a terminal `done` event. A dropped connection cannot
+silently become a complete answer. Discussion preserves failed questions for
+retry, prevents conversation switching while a request is active, cancels on
+navigation, and shows history-loading failures with an explicit retry control.
 
 **Deterministic explanation** (not LLM) lives in `src/auspex/api/explanations.py`:
 `top_score_summary`, `mover_summary` and `score_reasoning` translate

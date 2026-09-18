@@ -7,9 +7,13 @@ over SSE, `GET /chat/history` lists the caller's own prior turns from the
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 from collections.abc import AsyncIterator
+from contextlib import suppress
+from dataclasses import dataclass
 from datetime import timedelta
 from functools import lru_cache
 from uuid import uuid4
@@ -42,6 +46,9 @@ from auspex.settings import get_settings
 from auspex.users.service import AppUserService
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+logger = logging.getLogger(__name__)
+CHAT_TIMEOUT_SECONDS = 180
+CHAT_HEARTBEAT_SECONDS = 10
 
 
 def _resolve_question_tickers(question: str, universe: Universe) -> list[str]:
@@ -96,7 +103,22 @@ def _sse_event(data: str) -> str:
     return f"data: {json.dumps({'chunk': data})}\n\n"
 
 
-async def _stream_answer(
+@dataclass
+class ChatProgress:
+    phase: str = "history"
+
+
+@dataclass(frozen=True)
+class PreparedAnswer:
+    conversation_id: str
+    chunks: list[str]
+
+
+class AccountAccessChangedError(PermissionError):
+    pass
+
+
+async def _prepare_answer(
     request: ConversationRequest,
     user: AuthenticatedUser,
     planner: RetrievalPlanner,
@@ -105,8 +127,8 @@ async def _stream_answer(
     universe: Universe,
     conversation_repo: CosmosRepository[ConversationTurn],
     users: AppUserService,
-) -> AsyncIterator[str]:
-    yield _sse_event("Reading current scores, evidence, and portfolio suggestions…\n\n")
+    progress: ChatProgress,
+) -> PreparedAnswer:
     conversation_id = request.conversation_id or str(uuid4())
     prior_turns = await conversation_repo.query(
         query=(
@@ -121,6 +143,7 @@ async def _stream_answer(
     )
     prior_turn = prior_turns[0] if prior_turns else None
     state = prior_turn.state_after if prior_turn and prior_turn.state_after else request.state
+    progress.phase = "planning"
     plan = await planner.plan(
         request.question,
         state,
@@ -159,7 +182,9 @@ async def _stream_answer(
     if not data_classes:
         data_classes.extend(["score_snapshot", "portfolio_state", "recommendations"])
     plan = plan.model_copy(update={"data_classes": list(dict.fromkeys(data_classes))})
+    progress.phase = "retrieval"
     retrieval = await fetcher.fetch(plan, user.user_id)
+    progress.phase = "generation"
     chunks = [
         chunk
         async for chunk in answerer.stream_answer(
@@ -169,12 +194,18 @@ async def _stream_answer(
         )
     ]
     answer = "".join(chunks)
+    if not answer.strip():
+        raise ValueError("The model returned an empty answer.")
     violations = [
         *check_citations_present(answer, retrieval.items),
         *check_citations_resolve(answer, retrieval.items),
         *check_truncation_disclosed(answer, retrieval.truncated),
     ]
     if violations:
+        logger.warning(
+            "Chat grounding rejected an answer: %s",
+            ", ".join(violation.kind for violation in violations),
+        )
         answer = (
             "I could not produce an answer that passed Auspex grounding checks. "
             "Please ask a narrower question so I can answer only from retrieved facts."
@@ -202,11 +233,10 @@ async def _stream_answer(
         if item.document_id is not None
     ]
     turn_index = prior_turn.turn_index + 1 if prior_turn is not None else 0
+    progress.phase = "storage"
     latest_user = await users.get_user(user.user_id)
     if latest_user is None or latest_user.status is not UserStatus.ACTIVE:
-        yield "event: error\ndata: {\"message\":\"Account access changed while the answer was prepared.\"}\n\n"
-        yield "event: done\ndata: {}\n\n"
-        return
+        raise AccountAccessChangedError("Account access changed while the answer was prepared.")
     await conversation_repo.upsert(
         ConversationTurn(
             id=f"{conversation_id}:{turn_index}",
@@ -223,10 +253,58 @@ async def _stream_answer(
             created_at=utc_now(),
         )
     )
+    return PreparedAnswer(conversation_id=conversation_id, chunks=chunks)
 
-    for chunk in chunks:
-        yield _sse_event(chunk)
-    yield f"event: conversation\ndata: {json.dumps({'conversation_id': conversation_id})}\n\n"
+
+async def _stream_answer(
+    request: ConversationRequest,
+    user: AuthenticatedUser,
+    planner: RetrievalPlanner,
+    fetcher: RetrievalFetcher,
+    answerer: AnswerGenerator,
+    universe: Universe,
+    conversation_repo: CosmosRepository[ConversationTurn],
+    users: AppUserService,
+) -> AsyncIterator[str]:
+    request_id = str(uuid4())
+    progress = ChatProgress()
+    worker = asyncio.create_task(
+        _prepare_answer(request, user, planner, fetcher, answerer, universe, conversation_repo, users, progress)
+    )
+    try:
+        yield (
+            "event: status\n"
+            'data: {"message":"Reading current scores, evidence, and portfolio suggestions..."}\n\n'
+        )
+        async with asyncio.timeout(CHAT_TIMEOUT_SECONDS):
+            while not worker.done():
+                finished, _ = await asyncio.wait({worker}, timeout=CHAT_HEARTBEAT_SECONDS)
+                if not finished:
+                    yield ": keep-alive\n\n"
+            prepared = await worker
+
+        for chunk in prepared.chunks:
+            yield _sse_event(chunk)
+        yield f"event: conversation\ndata: {json.dumps({'conversation_id': prepared.conversation_id})}\n\n"
+    except Exception as exc:  # noqa: BLE001 - the SSE response has started; report failures in-band
+        logger.exception("Chat request %s failed during %s", request_id, progress.phase)
+        code = "chat_failed"
+        if isinstance(exc, AccountAccessChangedError):
+            code = "account_access_changed"
+            message = "Account access changed while the answer was prepared. Please sign in again."
+        elif isinstance(exc, TimeoutError):
+            code = "chat_timeout"
+            message = "Auspex took too long to prepare the answer. Please try again or ask a narrower question."
+        elif progress.phase == "storage":
+            message = "Auspex could not save this conversation. Please try again."
+        else:
+            message = "Auspex could not complete the answer. Please try again in a moment."
+        yield f"event: error\ndata: {json.dumps({'code': code, 'message': message, 'request_id': request_id})}\n\n"
+    finally:
+        if not worker.done():
+            worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker
     yield "event: done\ndata: {}\n\n"
 
 
@@ -298,6 +376,7 @@ async def converse(
             users,
         ),
         media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
     )
 
 

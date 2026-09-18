@@ -40,6 +40,7 @@ def make_client(
 class FakeChoice:
     def __init__(self, content: str | None) -> None:
         self.message = type("M", (), {"content": content})()
+        self.finish_reason = "stop"
 
 
 class FakeResponse:
@@ -103,6 +104,41 @@ class TestAzureOpenAIClientBudgeting:
 
 
 class TestCompleteJson:
+    @pytest.mark.asyncio
+    async def test_planner_can_require_a_strict_json_schema(self):
+        client = make_client()
+        client._client.chat.completions.create = AsyncMock(return_value=FakeResponse('{"item": null}'))
+        schema = {
+            "type": "object",
+            "properties": {"item": {"type": ["string", "null"]}},
+            "required": ["item"],
+            "additionalProperties": False,
+        }
+        result = await client.complete_json(
+            deployment="gpt-4.1-mini",
+            system_prompt="system",
+            user_content="user",
+            json_schema=schema,
+        )
+
+        assert result == '{"item": null}'
+        assert client._client.chat.completions.create.call_args.kwargs["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {"name": "structured_response", "schema": schema, "strict": True},
+        }
+
+    @pytest.mark.asyncio
+    async def test_incomplete_structured_response_is_not_an_empty_plan(self):
+        client = make_client()
+        response = FakeResponse('{"item":')
+        response.choices[0].finish_reason = "length"
+        client._client.chat.completions.create = AsyncMock(return_value=response)
+
+        with pytest.raises(ValueError, match="complete structured response"):
+            await client.complete_json(
+                deployment="gpt-4.1-mini", system_prompt="s", user_content="u", json_schema={"type": "object"}
+            )
+
     @pytest.mark.asyncio
     async def test_returns_content_and_calls_create_once_on_success(self):
         client = make_client()
@@ -194,13 +230,23 @@ class FakeDelta:
 
 
 class FakeStreamChoice:
-    def __init__(self, content: str | None) -> None:
+    def __init__(self, content: str | None, finish_reason: str | None = None) -> None:
         self.delta = FakeDelta(content)
+        self.finish_reason = finish_reason
 
 
 class FakeStreamChunk:
     def __init__(self, choices: list) -> None:
         self.choices = choices
+
+
+class FakeStream:
+    def __init__(self, iterator) -> None:
+        self.iterator = iterator
+        self.close = AsyncMock()
+
+    def __aiter__(self):
+        return self.iterator
 
 
 class TestStreamText:
@@ -214,11 +260,13 @@ class TestStreamText:
             yield FakeStreamChunk([FakeStreamChoice(None)])  # empty delta — skipped
             yield FakeStreamChunk([FakeStreamChoice(" world")])
 
-        client._client.chat.completions.create = AsyncMock(return_value=fake_stream())
+        stream = FakeStream(fake_stream())
+        client._client.chat.completions.create = AsyncMock(return_value=stream)
 
         chunks = [c async for c in client.stream_text(deployment="gpt-4.1", system_prompt="s", user_content="u")]
 
         assert chunks == ["Hello", " world"]
+        stream.close.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_acquires_budget_before_streaming(self):
@@ -229,9 +277,64 @@ class TestStreamText:
             return
             yield  # pragma: no cover - unreachable, makes this an async generator
 
-        client._client.chat.completions.create = AsyncMock(return_value=fake_stream())
+        client._client.chat.completions.create = AsyncMock(return_value=FakeStream(fake_stream()))
 
         async for _ in client.stream_text(deployment="gpt-4.1", system_prompt="x" * 200, user_content="y" * 200):
             pass
 
         assert client._bucket._tokens < tokens_before
+
+    @pytest.mark.asyncio
+    async def test_retries_rate_limited_stream_opening(self, monkeypatch):
+        client = make_client()
+
+        async def chunks():
+            yield FakeStreamChunk([FakeStreamChoice("A grounded answer")])
+
+        stream = FakeStream(chunks())
+        client._client.chat.completions.create = AsyncMock(side_effect=[make_rate_limit_error(), stream])
+        monkeypatch.setattr("auspex.providers.openai_provider.backoff_sleep", AsyncMock())
+
+        answer = [
+            chunk async for chunk in client.stream_text(deployment="gpt-4.1", system_prompt="s", user_content="u")
+        ]
+
+        assert answer == ["A grounded answer"]
+        assert client._client.chat.completions.create.await_count == 2
+        stream.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_failure_after_output_is_not_retried(self):
+        client = make_client()
+
+        async def chunks():
+            yield FakeStreamChunk([FakeStreamChoice("Partial")])
+            raise make_rate_limit_error()
+
+        stream = FakeStream(chunks())
+        client._client.chat.completions.create = AsyncMock(return_value=stream)
+
+        with pytest.raises(openai.RateLimitError):
+            async for _ in client.stream_text(deployment="gpt-4.1", system_prompt="s", user_content="u"):
+                pass
+
+        assert client._client.chat.completions.create.await_count == 1
+        stream.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("finish_reason", ["length", "content_filter"])
+    async def test_incomplete_answer_fails_instead_of_appearing_complete(self, finish_reason):
+        client = make_client()
+
+        async def chunks():
+            yield FakeStreamChunk([FakeStreamChoice("Partial")])
+            yield FakeStreamChunk([FakeStreamChoice(None, finish_reason=finish_reason)])
+
+        stream = FakeStream(chunks())
+        client._client.chat.completions.create = AsyncMock(return_value=stream)
+
+        with pytest.raises(ValueError, match="interrupted"):
+            async for _ in client.stream_text(deployment="gpt-4.1", system_prompt="s", user_content="u"):
+                pass
+
+        stream.close.assert_awaited_once()

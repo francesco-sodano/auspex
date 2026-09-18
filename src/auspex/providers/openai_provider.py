@@ -24,6 +24,7 @@ from collections.abc import AsyncIterator
 import openai
 from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
 from openai import AsyncAzureOpenAI
+from openai.types.chat.completion_create_params import ResponseFormat
 
 from auspex.providers.rate_limit import TokenBucket, backoff_sleep
 
@@ -114,21 +115,38 @@ class AzureOpenAIClient:
         system_prompt: str,
         user_content: str,
         temperature: float = 0.0,
+        json_schema: dict[str, object] | None = None,
     ) -> str:
-        """Non-streaming JSON-mode completion (Channel A/B extraction, planner)."""
+        """JSON completion, with strict schema enforcement when supplied."""
+
+        response_format: ResponseFormat = {"type": "json_object"}
+        if json_schema is not None:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_response",
+                    "schema": json_schema,
+                    "strict": True,
+                },
+            }
 
         async def _call():
             response = await self._client.chat.completions.create(
                 model=deployment,
                 temperature=temperature,
                 max_tokens=5000,
-                response_format={"type": "json_object"},
+                response_format=response_format,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
                 ],
             )
-            return response.choices[0].message.content or "{}"
+            choice = response.choices[0]
+            if json_schema is not None and (
+                choice.finish_reason != "stop" or not choice.message.content
+            ):
+                raise ValueError("The model did not return a complete structured response.")
+            return choice.message.content or "{}"
 
         return await self._call_with_retry(
             deployment,
@@ -184,27 +202,36 @@ class AzureOpenAIClient:
         sensible to retry.
         """
 
-        bucket = self._deployment_buckets.get(deployment, self._bucket)
-        await bucket.acquire(
+        async def _open_stream():
+            return await self._client.chat.completions.create(
+                model=deployment,
+                temperature=temperature,
+                max_tokens=2000,
+                stream=True,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+            )
+
+        stream = await self._call_with_retry(
+            deployment,
             estimate_tokens(
                 system_prompt,
                 user_content,
                 output_reserve=_STREAM_OUTPUT_TOKEN_RESERVE,
-            )
+            ),
+            _open_stream,
         )
-        stream = await self._client.chat.completions.create(
-            model=deployment,
-            temperature=temperature,
-            max_tokens=2000,
-            stream=True,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-        )
-        async for chunk in stream:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta and delta.content:
-                yield delta.content
+        try:
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                if choice.finish_reason in {"length", "content_filter"}:
+                    raise ValueError("The model answer was interrupted before completion.")
+                delta = choice.delta
+                if delta and delta.content:
+                    yield delta.content
+        finally:
+            await stream.close()

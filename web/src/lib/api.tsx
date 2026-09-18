@@ -1,5 +1,7 @@
 /* oxlint-disable react/only-export-components -- Provider and its required hook intentionally share one module. */
 import { createContext, type PropsWithChildren, useCallback, useContext, useEffect, useMemo, useRef } from 'react'
+import { ChatStreamError, consumeChatStream, type ChatStreamOptions } from './chatStream'
+import { responseError } from './httpError'
 import type {
   Briefing,
   ConversationTurn,
@@ -33,7 +35,12 @@ type Api = {
   deletePortfolioTransaction: (id: string, clientRequestId: string) => Promise<void>
   getPerformance: () => Promise<PerformanceReport>
   disposition: (id: string, value: 'ACCEPTED' | 'REJECTED' | 'DEFERRED') => Promise<void>
-  streamChat: (question: string, conversationId: string | null, onChunk: (chunk: string) => void) => Promise<void>
+  streamChat: (
+    question: string,
+    conversationId: string | null,
+    onChunk: (chunk: string) => void,
+    options?: ChatStreamOptions,
+  ) => Promise<void>
   getUserSettings: () => Promise<UserSettings>
   updateUserSettings: (input: UserSettingsInput) => Promise<UserSettings>
   getAccountConfiguration: () => Promise<AccountConfiguration>
@@ -71,17 +78,7 @@ export function ApiProvider({ getToken, children }: PropsWithChildren<{ getToken
     if (!(init?.body instanceof FormData)) headers.set('Content-Type', 'application/json')
     const response = await fetch(`${baseUrl}${path}`, { ...init, headers })
     if (!response.ok) {
-      const contentType = response.headers.get('content-type') ?? ''
-      let detail = `${response.status} ${response.statusText}`
-      if (contentType.includes('application/json')) {
-        const payload = await response.json() as {
-          detail?: string | Array<{ msg?: string }> | { message?: string; reason?: string }
-        }
-        if (typeof payload.detail === 'string') detail = payload.detail
-        else if (Array.isArray(payload.detail)) detail = payload.detail.map((item) => item.msg).filter(Boolean).join(' · ') || detail
-        else if (payload.detail?.message) detail = payload.detail.message
-      }
-      throw new Error(detail)
+      throw new Error(await responseError(response))
     }
     if (response.status === 204) return undefined as T
     return await response.json() as T
@@ -194,41 +191,25 @@ export function ApiProvider({ getToken, children }: PropsWithChildren<{ getToken
       body: JSON.stringify({ confirmation }),
     }),
     getDeletionStatus: () => request('/api/account/deletion'),
-    streamChat: async (question, conversationId, onChunk) => {
+    streamChat: async (question, conversationId, onChunk, options = {}) => {
       const token = await getToken()
-      const response = await fetch(`${baseUrl}/api/chat`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          Accept: 'text/event-stream',
-        },
-        body: JSON.stringify({ question, conversation_id: conversationId }),
-      })
-      if (!response.ok || !response.body) throw new Error(await response.text() || 'Chat stream unavailable.')
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      for (;;) {
-        const { value, done } = await reader.read()
-        buffer += decoder.decode(value, { stream: !done })
-        const events = buffer.split('\n\n')
-        buffer = events.pop() ?? ''
-        for (const event of events) {
-          for (const line of event.split('\n')) {
-            if (!line.startsWith('data:')) continue
-            const payload = line.slice(5).trim()
-            if (payload === '[DONE]') continue
-            try {
-              const decoded = JSON.parse(payload) as { chunk?: string; content?: string; text?: string }
-              onChunk(decoded.chunk ?? decoded.content ?? decoded.text ?? '')
-            } catch {
-              onChunk(payload)
-            }
-          }
-        }
-        if (done) break
+      let response: Response
+      try {
+        response = await fetch(`${baseUrl}/api/chat`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            Accept: 'text/event-stream',
+          },
+          body: JSON.stringify({ question, conversation_id: conversationId }),
+          signal: options.signal,
+        })
+      } catch (cause) {
+        if (cause instanceof Error && cause.name === 'AbortError') throw cause
+        throw new ChatStreamError('Could not connect to Auspex. Please check your connection and try again.', { cause })
       }
+      await consumeChatStream(response, onChunk, options)
     },
   }), [cachedRequest, getToken, invalidatePortfolio, request])
 
