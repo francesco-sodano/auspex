@@ -72,6 +72,17 @@ def test_pipeline_produces_coherent_scores_from_seeded_evidence(universe, config
     assert narrative_leg.computable  # revenue-growth percentile is computed within the score scope
     smart_money_leg = nvda_score.legs["smart_money"]
     assert smart_money_leg.computable  # seeded Form 4 purchase feeds this leg
+    source_ids = {document.id for document in repos.document_sink.all()} | {
+        snapshot.id for snapshot in repos.fundamental_sink.all()
+    }
+    for leg in nvda_score.legs.values():
+        assert leg.explanation is not None
+        assert leg.explanation.summary
+        assert leg.evidence_ids == [source.evidence_id for source in leg.explanation.evidence]
+        assert all(source.evidence_id in source_ids for source in leg.explanation.evidence)
+        assert all(source.knowledge_date <= as_of_date for source in leg.explanation.evidence)
+    package = ctx.__dict__["_packages_by_security"][nvda.id]
+    assert package["leg_explanations"]["smart_money"] == smart_money_leg.explanation.model_dump(mode="json")
 
     nvda_recommendation = asyncio.run(repos.recommendation_repo.get(f"owner:{nvda.id}:{as_of_date.isoformat()}"))
     assert nvda_recommendation is not None

@@ -6,11 +6,26 @@ arc42 §5.11 score document + §5.5 scoring engine outputs.
 from __future__ import annotations
 
 from datetime import date
+from typing import Literal
 
 from pydantic import Field
 
 from auspex.models.common import AuspexModel
 from auspex.models.enums import CohortConfidence, Direction, FilerProfile, LegName
+
+
+class ScoreEvidence(AuspexModel):
+    evidence_id: str
+    label: str
+    knowledge_date: date
+    source_url: str | None = None
+    excerpt: str | None = None
+
+
+class LegExplanation(AuspexModel):
+    summary: str
+    effect: Literal["supports", "weighs", "neutral", "unavailable", "not_applicable"]
+    evidence: list[ScoreEvidence] = Field(default_factory=list)
 
 
 class LegResult(AuspexModel):
@@ -21,6 +36,7 @@ class LegResult(AuspexModel):
     computable: bool
     evidence_ids: list[str] = Field(default_factory=list)
     reason_not_computable: str | None = None
+    explanation: LegExplanation | None = None
 
 
 class ScoreSnapshot(AuspexModel):

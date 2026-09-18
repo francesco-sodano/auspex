@@ -260,6 +260,7 @@ class TestGetSecurity:
             "score",
             "neutral",
             "status_explanation",
+            "explanation",
         }
         assert leg["z"] == "0.9"
 

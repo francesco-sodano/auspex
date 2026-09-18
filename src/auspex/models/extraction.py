@@ -82,6 +82,8 @@ class ChannelAExtraction(AuspexModel):
     prompt_version: str = "extract-a-v1"
     schema_version: str = "4.0"
     taxonomy_version: str
+    input_fingerprint: str | None = None
+    discarded_claim_count: int = 0
 
     materiality: Materiality
     sentiment: Sentiment
@@ -174,6 +176,7 @@ class ChannelBDigest(AuspexModel):
     content_hash: str
     model_version: str
     prompt_version: str = "digest-b-v2"
+    input_fingerprint: str | None = None
 
     headline: str
     plain_summary: str | None = Field(

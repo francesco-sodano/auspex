@@ -61,6 +61,7 @@ class _ExplodingExtractor:
     """Stands in for a model response the parser cannot make sense of."""
 
     prompt_version = "digest-b-v2"
+    cache_hits = 0
 
     def __init__(self, **_kwargs) -> None:
         pass

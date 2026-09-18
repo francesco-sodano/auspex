@@ -19,8 +19,12 @@ arithmetic.
   outside the JSON object.
 - Every `evidence_excerpt` and `verbatim` field MUST be copied character-for-
   character from the supplied text. Never paraphrase inside an excerpt field.
-  Max 300 characters per excerpt; truncate with `...` if needed, never invent.
+  Max 300 characters per excerpt; select a shorter exact span if needed.
+  Never insert ellipses or stitch disconnected source fragments together.
 - If a field's evidence is absent, omit the claim rather than inventing one.
+- Attribute claims only to the supplied issuer. A news article may mention
+  other companies or general market conditions; these are not evidence about
+  the selected issuer unless the text explicitly connects them.
 - `materiality`, `sentiment`, `guidance_direction`, and `novelty` describe the
   document as a whole, not any single claim.
 - Do not output a numeric score, weight, percentile, or recommendation of any
@@ -83,8 +87,9 @@ taxonomy applies, omit `theme_claims` entirely.
 
 - `security` ticker/name/cik
 - `document` type, form, filed date, accession
-- `sections`: targeted section text (Item 1, 1A, 7, 7A for 10-K; equivalent for
-  other forms per arc42 §5.4 "Section targeting")
+- `sections`: cleaned targeted filing text, or the provider-supplied headline
+  and summary for a news article. An article summary is not the full article;
+  infer nothing beyond the supplied text.
 - `taxonomy`: the current theme id list
 
 Identifiers (`extraction_id`, `security_id`, `document_id`, `content_hash`,

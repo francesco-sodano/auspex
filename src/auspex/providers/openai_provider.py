@@ -116,6 +116,7 @@ class AzureOpenAIClient:
         user_content: str,
         temperature: float = 0.0,
         json_schema: dict[str, object] | None = None,
+        max_tokens: int = 5000,
     ) -> str:
         """JSON completion, with strict schema enforcement when supplied."""
 
@@ -134,7 +135,7 @@ class AzureOpenAIClient:
             response = await self._client.chat.completions.create(
                 model=deployment,
                 temperature=temperature,
-                max_tokens=5000,
+                max_tokens=max_tokens,
                 response_format=response_format,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -142,15 +143,13 @@ class AzureOpenAIClient:
                 ],
             )
             choice = response.choices[0]
-            if json_schema is not None and (
-                choice.finish_reason != "stop" or not choice.message.content
-            ):
+            if choice.finish_reason != "stop" or not choice.message.content:
                 raise ValueError("The model did not return a complete structured response.")
-            return choice.message.content or "{}"
+            return choice.message.content
 
         return await self._call_with_retry(
             deployment,
-            estimate_tokens(system_prompt, user_content),
+            estimate_tokens(system_prompt, user_content, output_reserve=max_tokens),
             _call,
         )
 

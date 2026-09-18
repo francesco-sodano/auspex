@@ -7,8 +7,8 @@ import type { GateTrace, Recommendation, SecurityPackage, SecuritySummary } from
 const LEG_EXPLANATIONS = {
   thesis_linkage: {
     title: 'Thesis Linkage',
-    question: 'Do recent filings and news support the reasons Auspex is following this company?',
-    measure: 'This looks for recent evidence supporting the investment themes Auspex tracks.',
+    question: 'What do recent filings and news tell us about this company’s connection to the tracked themes?',
+    measure: 'This looks for verified evidence linking the company to the investment themes Auspex tracks.',
   },
   attention_acceleration: {
     title: 'Attention Acceleration',
@@ -295,10 +295,18 @@ export function Analysis() {
                 <div className="leg-explanation-grid">
                   {Object.entries(LEG_EXPLANATIONS).map(([name, explanation]) => {
                     const leg = security.legs[name]
-                    const reading = leg === undefined
-                      ? 'Not used for this company'
-                      : legReading(leg.score, leg.computable, leg.neutral)
-                    const meaning = leg?.neutral
+                    const reading = leg?.explanation
+                      ? ({
+                          supports: 'Helps the score',
+                          weighs: 'Holds the score back',
+                          neutral: 'Neutral contribution',
+                          unavailable: 'Evidence unavailable',
+                          not_applicable: 'Not used for this company',
+                        }[leg.explanation.effect])
+                      : leg === undefined
+                        ? 'Not used for this company'
+                        : legReading(leg.score, leg.computable, leg.neutral)
+                    const meaning = leg?.explanation?.summary || (leg?.neutral
                       ? (leg.status_explanation || 'There is no meaningful difference to compare right now.')
                       : leg === undefined
                         ? name === 'smart_money' && security.security.filer_profile === 'FPI'
@@ -308,16 +316,29 @@ export function Analysis() {
                           ? (leg.status_explanation || 'Auspex does not have enough reliable information to assess this area.')
                           : leg.score !== null
                             ? `${relativeMeaning(leg.score)} ${explanation.measure}`
-                            : 'Auspex does not have enough comparable information to rank this area.'
+                            : 'Auspex does not have enough comparable information to rank this area.')
                     return (
                       <article className="leg-explanation-card" key={name}>
                         <span className="eyebrow">{explanation.title}</span>
                         <h3>{explanation.question}</h3>
                         <div className="leg-reading">
-                          <strong className="gold">{leg?.score ?? '—'}</strong>
-                          <span>{reading}</span>
+                          <strong className={`leg-impact ${leg?.explanation?.effect ?? ''}`}>{reading}</strong>
                         </div>
                         <p>{meaning}</p>
+                        {leg?.explanation?.evidence && leg.explanation.evidence.length > 0 && (
+                          <details className="leg-evidence">
+                            <summary>See the evidence behind this explanation</summary>
+                            {leg.explanation.evidence.map((source) => (
+                              <article key={source.evidence_id}>
+                                {source.source_url && /^https?:\/\//i.test(source.source_url) ? (
+                                  <a href={source.source_url} target="_blank" rel="noopener noreferrer">{source.label}</a>
+                                ) : <span>{source.label}</span>}
+                                <time dateTime={source.knowledge_date}>{source.knowledge_date}</time>
+                                {source.excerpt && <blockquote>{source.excerpt}</blockquote>}
+                              </article>
+                            ))}
+                          </details>
+                        )}
                       </article>
                     )
                   })}

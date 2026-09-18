@@ -66,15 +66,19 @@ class NarrativeGenerator:
         digests: list[ChannelBDigest],
         comparative: ComparativeDiff | None = None,
     ) -> str:
-        fingerprint = compute_package_fingerprint(package)
+        user_content = self.build_user_content(
+            package=package, leg_changes=leg_changes, digests=digests, comparative=comparative
+        )
+        fingerprint = compute_package_fingerprint({
+            "package": package,
+            "source_input": user_content,
+            "system_prompt": self._system_prompt,
+        })
         key = self.cache_key(fingerprint)
         cached = await self._sink.find_by_cache_key(key)
         if cached is not None:
             return cached
 
-        user_content = self.build_user_content(
-            package=package, leg_changes=leg_changes, digests=digests, comparative=comparative
-        )
         narrative = await self._openai.complete_text(
             deployment=self._deployment, system_prompt=self._system_prompt, user_content=user_content
         )

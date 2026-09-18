@@ -14,7 +14,6 @@ field-by-field mapping rationale.
 
 from __future__ import annotations
 
-import re
 from datetime import date
 from decimal import Decimal
 
@@ -28,7 +27,7 @@ from auspex.api.deps import (
     get_score_repo,
     get_universe,
 )
-from auspex.api.explanations import score_reasoning
+from auspex.api.explanations import leg_availability_explanation, score_reasoning
 from auspex.api.repos import get_digest_repo, get_document_repo
 from auspex.api.schemas import (
     FundamentalMetricOut,
@@ -42,6 +41,7 @@ from auspex.api.schemas import (
 )
 from auspex.api.viewmodels import build_recommendation_out
 from auspex.config.loader import Universe, load_xbrl_concepts
+from auspex.extraction.relevance import news_is_relevant as _news_is_relevant
 from auspex.models.document import Document
 from auspex.models.enums import DocumentType, LegName
 from auspex.models.extraction import ChannelBDigest
@@ -305,8 +305,8 @@ def _leg_scores(
             if result.z is not None and population_values
             else None
         )
-        status_explanation = result.reason_not_computable
-        neutral = False
+        status_explanation = leg_availability_explanation(leg, result)
+        neutral = result.raw is not None and result.z is None and result.reason_not_computable != "not_applicable"
         if (
             leg == LegName.SMART_MONEY
             and result.raw is not None
@@ -319,10 +319,11 @@ def _leg_scores(
             )
         ):
             neutral = True
-            status_explanation = (
-                "No meaningful insider buying or selling was recorded recently, "
-                "so this area is neutral rather than missing."
-            )
+            if result.explanation is None:
+                status_explanation = (
+                    "The available net insider-trading signal does not distinguish this company from its peers, "
+                    "so this area is neutral rather than missing."
+                )
         details[leg.value] = LegDetail(
             raw=result.raw,
             z=result.z,
@@ -332,6 +333,7 @@ def _leg_scores(
             score=display_score,
             neutral=neutral,
             status_explanation=status_explanation,
+            explanation=result.explanation,
         )
     return details
 
@@ -433,21 +435,6 @@ def _map_document(
         relevance_reason=relevance_reason,
         stale=(date.today() - filed_at).days > 180,
     )
-
-
-def _news_is_relevant(document: Document, security: Security) -> bool:
-    title = document.title or ""
-    if re.search(rf"\b{re.escape(security.ticker)}\b", title, flags=re.IGNORECASE):
-        return True
-    company = re.sub(
-        r"\b(incorporated|inc|corporation|corp|limited|ltd|plc)\b\.?",
-        "",
-        security.name,
-        flags=re.IGNORECASE,
-    )
-    company = re.sub(r"[^a-z0-9]+", " ", company.lower()).strip()
-    normalized_title = re.sub(r"[^a-z0-9]+", " ", title.lower())
-    return bool(company and company in normalized_title)
 
 
 @router.get("", response_model=list[SecuritySummary])

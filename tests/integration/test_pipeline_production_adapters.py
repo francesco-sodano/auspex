@@ -318,6 +318,24 @@ class TestNarrateAgainstProductionAdapters:
 
         assert len(fake_chat.calls) == 1  # second call was a package_fingerprint cache hit, no re-call
 
+    async def test_changed_evidence_invalidates_narrative_even_when_rank_is_unchanged(self, universe, config_bundle):
+        as_of_date = date(2026, 8, 8)
+        ctx, _, _, fake_chat = build_production_context(universe, config_bundle, as_of_date)
+        nvda = universe.by_ticker()["NVDA"]
+        await self._seed_narrate_scratch_state(ctx, nvda.id, as_of_date)
+        manifest = new_manifest(as_of_date)
+        await step_narrate(ctx, manifest)
+        ctx.__dict__["_packages_by_security"][nvda.id]["leg_explanations"] = {
+            "smart_money": {
+                "summary": "Officers reported open-market share sales.",
+                "effect": "weighs",
+                "evidence": [],
+            },
+        }
+        await step_narrate(ctx, manifest)
+        assert len(fake_chat.calls) == 2
+        assert "Officers reported open-market share sales" in fake_chat.calls[1]["messages"][1]["content"]
+
 
 class TestFullPipelineAgainstProductionAdapters:
     async def test_all_20_steps_execute_without_error_against_cosmos_and_blob_adapters(

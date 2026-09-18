@@ -1285,6 +1285,9 @@ async def _bootstrap_command(
 
     try:
         if recovery_only:
+            if openai_client is None:
+                logger.error("bootstrap recovery requires a working extraction client; refusing to replay stale evidence")
+                return 1
             seed_ctx = context_factory(today)
             binding = await runner.bind_and_validate_portfolio(
                 adapter,
@@ -1295,6 +1298,14 @@ async def _bootstrap_command(
                 seed_ctx,
                 include_fundamentals=True,
             )
+            if seed_ctx.degraded_securities or seed_ctx.explanation_degraded_securities:
+                logger.error(
+                    "bootstrap recovery: extraction incomplete; scoring failures=%s, explanation failures=%s. "
+                    "Resolve the logged failures and rerun; unchanged inputs will reuse their cached results.",
+                    sorted(seed_ctx.degraded_securities),
+                    sorted(seed_ctx.explanation_degraded_securities),
+                )
+                return 1
             start_date = extraction_backfill_start(today)
             (
                 sessions_scored,

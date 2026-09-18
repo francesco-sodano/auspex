@@ -81,6 +81,55 @@ class TestTenKSectionTargeting:
 
 
 class TestTenQSectionTargeting:
+    def test_mda_heading_does_not_end_at_its_own_results_of_operations_text(self):
+        text = """
+Item 1. Financial Statements
+The results of operations in these accounting notes are not the business discussion.
+
+Item 2. Management's Discussion and Analysis of Financial Condition and
+Results of Operations
+Our data center business grew as customers expanded artificial intelligence infrastructure.
+We launched new accelerators and increased investment in advanced packaging.
+
+Item 3. Quantitative and Qualitative Disclosures About Market Risk
+Interest rate sensitivity.
+"""
+        sections = target_sections("10-Q", text)
+        mda = next(section for section in sections if section.item == "mda")
+
+        assert "artificial intelligence infrastructure" in mda.text
+        assert "advanced packaging" in mda.text
+        assert "accounting notes" not in mda.text
+        assert "Interest rate sensitivity" not in mda.text
+        assert not any(section.item == "results_of_operations" for section in sections)
+
+    def test_prose_references_are_not_section_headings(self):
+        text = """
+Item 1. Financial Statements
+Our results of operations include acquisition costs.
+Please see Item 1A. Risk Factors for additional information.
+
+Item 2. Management's Discussion and Analysis
+Demand for liquid cooling systems increased with data center construction.
+
+Item 3. Quantitative and Qualitative Disclosures About Market Risk
+"""
+        sections = target_sections("10-Q", text)
+        assert [section.item for section in sections] == ["mda"]
+        assert "liquid cooling systems" in sections[0].text
+        assert "acquisition costs" not in sections[0].text
+
+    def test_longest_real_mda_beats_the_table_of_contents(self):
+        html = """
+<table><tr><td>Item 2.</td><td>Management's Discussion and Analysis of Financial Condition and
+Results of Operations</td><td>12</td></tr><tr><td>Item 3.</td><td>Market risk</td></tr></table>
+<div>Item 2.</div><div>Management's Discussion and Analysis of Financial Condition and Results of Operations</div>
+<p>We acquired a business supplying liquid cooling technology for data centers.</p>
+<div>Item 3. Quantitative and Qualitative Disclosures About Market Risk</div>
+"""
+        mda = next(section for section in target_sections("10-Q", html) if section.item == "mda")
+        assert "liquid cooling technology" in mda.text
+
     def test_extracts_mda_and_risk_updates(self):
         sections = target_sections("10-Q", SAMPLE_10Q)
         items = {s.item for s in sections}

@@ -53,7 +53,7 @@ the decision authority.
 
 | Leg | What it measures |
 | --- | --- |
-| Thesis Linkage | Whether current evidence supports configured investment themes |
+| Thesis Linkage | Verified company exposure to configured investment themes, not whether every theme-related development is good news |
 | Attention Acceleration | Whether material company evidence is increasing |
 | Narrative Premium | Whether the narrative is improving faster than fundamentals |
 | Smart Money | Qualifying insider buying and selling for domestic filers |
@@ -72,6 +72,27 @@ FX; when a rate is unavailable the leg is structurally excluded instead of
 penalizing coverage. Foreign-private-issuer weights are validated on every
 config load to be a proportional redistribution of the domestic weights, so an
 FPI cannot drift onto a different model than its peers.
+
+A confidently reviewed document with no verified theme match is different from
+an unread or failed extraction: Thesis Linkage can record an observed zero only
+in the former case. Relevant provider news is extracted from its stored headline
+and summary, rather than being skipped for lacking a filing form or Blob path.
+Annual and quarterly section targeting preserves the full numbered discussion,
+including its nested results-of-operations headings.
+
+Each saved score carries plain-language reasons for its individual legs, derived
+deterministically from the exact inputs used on that date, plus dated evidence
+references. Analysis keeps those facts visible and calculations expandable.
+Insider sales, for example, are described as sales, while their relative effect
+is explained separately; less selling than peers can still help the score.
+Neither missing evidence nor a non-applicable leg is presented as a bad finding.
+An AI-written shared summary can rephrase this package but cannot assign a
+portfolio action or override these source-backed reasons.
+
+Extraction caches fingerprint the actual bounded source text and prompt.
+Corrected section selection or instructions therefore refresh stale
+interpretations in place without duplicating source records. A recover/replay
+reuses completed inputs and stops before score replay if extraction failed.
 
 The **Auspex Score (0–100)** is a midpoint percentile rank inside the blended
 peer scope — the same cohort/parent/universe shrinkage that governs the leg

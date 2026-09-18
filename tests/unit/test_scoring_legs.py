@@ -55,6 +55,10 @@ class TestThesisLinkage:
         ]
         assert thesis_linkage(events) == Decimal(0)
 
+    def test_reliably_reviewed_documents_can_show_no_theme_match(self):
+        assert thesis_linkage([], reviewed_documents=2) == Decimal(0)
+        assert thesis_linkage([], reviewed_documents=0) is None
+
     def test_recency_decay_reduces_older_claims(self):
         recent = thesis_linkage(
             [ThemeClaimEvent(theme_strength_value=Decimal("0.6"), document_authority=Decimal("1.0"), age_days=0)]

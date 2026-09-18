@@ -25,6 +25,7 @@ from auspex.pipeline.feature_builder import (
     build_insider_events,
     build_thesis_linkage_events,
     build_valuation_metrics,
+    reviewed_thesis_documents,
 )
 
 AS_OF = date(2026, 8, 10)
@@ -90,6 +91,27 @@ def _extraction(document: Document) -> ChannelAExtraction:
         ],
         extraction_confidence=ExtractionConfidence.HIGH,
     )
+
+
+def test_reviewed_no_theme_match_is_distinct_from_no_reviewed_evidence():
+    document = _document("doc", AS_OF)
+    legacy = _extraction(document).model_copy(update={"theme_claims": []})
+    verified = legacy.model_copy(update={"input_fingerprint": "processed-input"})
+    invalid = verified.model_copy(update={"discarded_claim_count": 1})
+    assert reviewed_thesis_documents([legacy], {document.id: document}, AS_OF) == 0
+    assert reviewed_thesis_documents([verified], {document.id: document}, AS_OF) == 1
+    assert reviewed_thesis_documents([invalid], {document.id: document}, AS_OF) == 0
+
+
+def test_insider_events_exclude_transactions_not_yet_filed():
+    document = _document("future", AS_OF + timedelta(days=1)).model_copy(update={
+        "document_type": DocumentType.FORM_4,
+        "insider_transactions": [InsiderTransaction(
+            owner_name="An officer", is_officer=True, transaction_code=Form4TransactionCode.S,
+            transaction_date=AS_OF - timedelta(days=2), shares="1000", price_per_share="10",
+        )],
+    })
+    assert build_insider_events([document], AS_OF) == []
 
 
 def test_attention_emits_one_event_per_source_document() -> None:

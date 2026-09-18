@@ -31,6 +31,7 @@ from auspex.models.enums import (
     RiskSeverity,
 )
 from auspex.models.portfolio import PositionProjectionRow
+from auspex.models.scoring import LegExplanation
 
 BriefingRunStatus = Literal["SUCCESS", "DEGRADED", "FAILED", "RUNNING"]
 
@@ -115,6 +116,7 @@ class LegDetail(AuspexModel):
     score: int | None = None
     neutral: bool = False
     status_explanation: str | None = None
+    explanation: LegExplanation | None = None
 
 
 class SecurityHistoryPoint(AuspexModel):

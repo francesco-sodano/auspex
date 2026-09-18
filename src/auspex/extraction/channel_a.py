@@ -8,9 +8,11 @@ mapping applies (``config/label_mappings.yaml``, ``config/weights.yaml``).
 from __future__ import annotations
 
 import json
+import logging
 from typing import Protocol
 
-from auspex.extraction.cache import channel_a_cache_key
+from auspex.extraction.cache import channel_a_cache_key, extraction_input_fingerprint
+from auspex.extraction.grounding import verified_excerpt
 from auspex.extraction.json_response import load_model_json
 from auspex.extraction.sections import Section, bound_sections
 from auspex.models.common import new_id
@@ -38,6 +40,7 @@ _DOMAIN_FIELDS = (
     "narrative_claims",
     "extraction_confidence",
 )
+logger = logging.getLogger(__name__)
 
 
 class ChannelAExtractionSink(Protocol):
@@ -65,6 +68,7 @@ class ChannelAExtractor:
         self._model_version = model_version
         self._taxonomy_version = taxonomy_version
         self._sink = sink
+        self.cache_hits = 0
 
     def build_user_content(
         self,
@@ -135,6 +139,12 @@ class ChannelAExtractor:
             {"claim_type": NarrativeClaimType, "strength": ThemeStrength},
             {"claim_type", "strength", "evidence_excerpt"},
         )
+        discarded = sum(
+            len(data.get(field, [])) - len(domain_data[field])
+            for field in ("theme_claims", "risk_claims", "narrative_claims")
+        )
+        if discarded:
+            logger.warning("Discarded %d malformed Channel A claims for document %s", discarded, document_id)
         return ChannelAExtraction(
             id=new_id(),
             security_id=security_id,
@@ -144,8 +154,40 @@ class ChannelAExtractor:
             prompt_version=self.prompt_version,
             schema_version=self.schema_version,
             taxonomy_version=self._taxonomy_version,
+            discarded_claim_count=discarded,
             **domain_data,
         )
+
+    def input_fingerprint(self, user_content: str) -> str:
+        return extraction_input_fingerprint(self._system_prompt, user_content)
+
+    @staticmethod
+    def _verify_claims(
+        extraction: ChannelAExtraction,
+        sections: list[Section],
+        taxonomy_theme_ids: list[str],
+    ) -> ChannelAExtraction:
+        source = "\n".join(section.text for section in sections)
+        retained: dict[str, list] = {}
+        discarded = extraction.discarded_claim_count
+        for field in ("theme_claims", "risk_claims", "narrative_claims"):
+            retained[field] = []
+            for claim in getattr(extraction, field):
+                if field == "theme_claims" and claim.theme_id not in taxonomy_theme_ids:
+                    discarded += 1
+                    continue
+                excerpt = verified_excerpt(source, claim.evidence_excerpt)
+                if excerpt is None:
+                    discarded += 1
+                    continue
+                retained[field].append(claim.model_copy(update={"evidence_excerpt": excerpt}))
+        if discarded > extraction.discarded_claim_count:
+            logger.warning(
+                "Discarded %d unsupported or ungrounded Channel A claims for document %s",
+                discarded - extraction.discarded_claim_count,
+                extraction.document_id,
+            )
+        return extraction.model_copy(update={**retained, "discarded_claim_count": discarded})
 
     async def extract(
         self,
@@ -166,18 +208,29 @@ class ChannelAExtractor:
             schema_version=self.schema_version,
             taxonomy_version=self._taxonomy_version,
         )
-        cached = await self._sink.find_by_cache_key(cache_key)
-        if cached is not None:
-            return cached
-
+        sections = bound_sections(sections)
         user_content = self.build_user_content(
             ticker=ticker, form_type=form_type, sections=sections, taxonomy_theme_ids=taxonomy_theme_ids
         )
+        fingerprint = self.input_fingerprint(user_content)
+        cached = await self._sink.find_by_cache_key(cache_key)
+        if cached is not None and cached.input_fingerprint == fingerprint:
+            self.cache_hits += 1
+            return cached
+
         raw_json = await self._openai.complete_json(
-            deployment=self._deployment, system_prompt=self._system_prompt, user_content=user_content
+            deployment=self._deployment,
+            system_prompt=self._system_prompt,
+            user_content=user_content,
+            max_tokens=1500 if form_type.upper() == "NEWS" else 5000,
         )
         extraction = self.parse_response(
             raw_json, security_id=security_id, document_id=document_id, content_hash=content_hash
         )
+        extraction = self._verify_claims(extraction, sections, taxonomy_theme_ids)
+        extraction = extraction.model_copy(update={
+            "id": cached.id if cached is not None else extraction.id,
+            "input_fingerprint": fingerprint,
+        })
         await self._sink.upsert(extraction)
         return extraction

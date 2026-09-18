@@ -12,8 +12,8 @@ a 2023 8-K is pure waste).
  4. Backfill 36 months of daily prices, corporate actions, USD/CHF
  5. Download filing documents for the 18-month extraction window
  6. Download and parse ALL Form 4 XML across 36 months — deterministic, no LLM
- 7. Run Channel A + B extraction over the 18-month document set
- 8. Backfill news for whatever window the provider licence permits (typically <=12 months)
+ 7. Backfill news for whatever window the provider licence permits (typically <=12 months)
+ 8. Run Channel A + B extraction over the 18-month filing and relevant-news document set
  9. Replay scoring day by day across 18 months, chronologically, filtering every
     source on knowledge_date <= as_of_date. Write scores with is_backfilled=true
 10. Compute performance metrics over the replayed history
@@ -556,14 +556,16 @@ class BootstrapRunner:
 
         floor = extraction_backfill_start(ctx.as_of_date)
         documents = await fetch_all(ctx.repos.document_sink)
-        eligible_forms = {"10-K", "10-Q", "8-K", "20-F", "6-K", "S-1"}
+        from auspex.extraction.sections import is_extraction_document
+
         fundamental_forms = {"10-K", "10-Q", "20-F"}
         ctx.new_document_ids_by_security = {}
         ctx.new_accessions_by_security = {}
         for document in documents:
             if (
                 document.knowledge_date < floor
-                or document.form_type not in eligible_forms
+                or document.knowledge_date > ctx.as_of_date
+                or not is_extraction_document(document)
             ):
                 continue
             ctx.new_document_ids_by_security.setdefault(document.security_id, []).append(
@@ -1206,8 +1208,8 @@ class BootstrapRunner:
         await self.backfill_prices_fx(seed_ctx)
         await self.backfill_filings(seed_ctx, bulk_result.edgar_source)
         await self.backfill_form4(seed_ctx, bulk_result.edgar_source)
-        await self.extract_and_collect_fundamentals(seed_ctx)
         await self.backfill_news(seed_ctx)
+        await self.extract_and_collect_fundamentals(seed_ctx)
 
         start_date = extraction_backfill_start(as_of_date)
         (

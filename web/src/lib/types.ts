@@ -107,6 +107,17 @@ export type SecurityPackage = {
     score: number | null
     neutral: boolean
     status_explanation: string | null
+    explanation: {
+      summary: string
+      effect: 'supports' | 'weighs' | 'neutral' | 'unavailable' | 'not_applicable'
+      evidence: Array<{
+        evidence_id: string
+        label: string
+        knowledge_date: string
+        source_url: string | null
+        excerpt: string | null
+      }>
+    } | null
   }>
   recommendation: Recommendation | null
   market: string

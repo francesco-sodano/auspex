@@ -152,13 +152,24 @@ class TestCompleteJson:
         assert client._client.chat.completions.create.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_none_content_defaults_to_empty_json_object(self):
+    async def test_none_content_is_not_a_successful_extraction(self):
         client = make_client()
         client._client.chat.completions.create = AsyncMock(return_value=FakeResponse(None))
 
-        result = await client.complete_json(deployment="gpt-4.1-mini", system_prompt="s", user_content="u")
+        with pytest.raises(ValueError, match="complete structured response"):
+            await client.complete_json(deployment="gpt-4.1-mini", system_prompt="s", user_content="u")
 
-        assert result == "{}"
+    async def test_small_news_output_budget_is_applied_to_request_and_limiter(self):
+        client = make_client()
+        client._client.chat.completions.create = AsyncMock(return_value=FakeResponse("{}"))
+        client._bucket.acquire = AsyncMock()
+        await client.complete_json(
+            deployment="gpt-4.1-mini", system_prompt="source", user_content="news", max_tokens=1500
+        )
+        assert client._client.chat.completions.create.call_args.kwargs["max_tokens"] == 1500
+        client._bucket.acquire.assert_awaited_once_with(
+            estimate_tokens("source", "news", output_reserve=1500)
+        )
 
     @pytest.mark.asyncio
     async def test_acquires_tokens_from_budget_before_calling(self):

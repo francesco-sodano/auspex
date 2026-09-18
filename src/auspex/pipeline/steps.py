@@ -21,17 +21,18 @@ from auspex.collectors.fx_collector import FxCollector
 from auspex.collectors.insider_collector import InsiderCollector
 from auspex.collectors.news_collector import NewsCollector
 from auspex.collectors.price_collector import PriceCollector
-from auspex.extraction.cache import channel_a_cache_key, channel_b_cache_key
 from auspex.extraction.channel_a import ChannelAExtractor
 from auspex.extraction.channel_b import ChannelBExtractor
-from auspex.extraction.sections import WHOLE_DOCUMENT_FORMS, target_sections
+from auspex.extraction.relevance import news_is_relevant
+from auspex.extraction.sections import document_sections, is_extraction_document
 from auspex.marketdata.quarantine import exclude_quarantined
 from auspex.models.common import utc_now
 from auspex.models.document import Document
-from auspex.models.enums import Action, CohortConfidence, Direction, FilerProfile, LegName
+from auspex.models.enums import Action, CohortConfidence, Direction, DocumentType, FilerProfile, LegName
 from auspex.models.policy import RecommendationDisposition
 from auspex.models.run import RunManifest
 from auspex.models.scoring import LegChange, LegResult, ScoreSnapshot
+from auspex.models.security import Security
 from auspex.narrative.generator import NarrativeGenerator
 from auspex.pipeline.context import PipelineContext
 from auspex.pipeline.feature_builder import (
@@ -42,10 +43,12 @@ from auspex.pipeline.feature_builder import (
     build_narrative_events,
     build_thesis_linkage_events,
     build_valuation_metrics,
+    reviewed_thesis_documents,
 )
 from auspex.pipeline.manifest import complete_step, skip_step, start_step
 from auspex.pipeline.prompts import load_prompt
 from auspex.pipeline.repo_access import fetch_all, read_blob_text
+from auspex.pipeline.score_explanations import LegEvidenceContext, build_leg_explanations
 from auspex.policy.assertions import run_post_run_assertions
 from auspex.policy.engine import load_policy_thresholds
 from auspex.scoring.composite import decompose_leg_delta
@@ -60,6 +63,7 @@ from auspex.scoring.legs import (
     smart_money,
     thesis_linkage,
     valuation_brake,
+    valuation_metric_signals,
 )
 from auspex.scoring.normalize import percentile_rank
 from auspex.scoring.sessions import (
@@ -224,43 +228,32 @@ async def step_extract_channel_a(ctx: PipelineContext, manifest: RunManifest) ->
     taxonomy_ids = [t["id"] for t in ctx.config["taxonomy"]["themes"]]
     documents_by_id = {d.id: d for d in await fetch_all(ctx.repos.document_sink)}
 
-    count = 0
-    failures = 0
-    for sec in ctx.universe.securities:
-        for doc_id in ctx.new_document_ids_by_security.get(sec.id, []):
-            doc = documents_by_id.get(doc_id)
-            if doc is None or doc.form_type is None:
-                continue
-            cache_key = channel_a_cache_key(
-                security_id=sec.id,
-                content_hash=doc.content_hash,
-                model_version=settings.aoai_deployment_extraction,
-                prompt_version=extractor.prompt_version,
-                schema_version=extractor.schema_version,
-                taxonomy_version=ctx.config["taxonomy"]["taxonomy_version"],
-            )
-            if await ctx.repos.channel_a_sink.find_by_cache_key(cache_key):
-                continue
-            raw_text = await read_blob_text(ctx.repos.blob_sink, doc.blob_path)
-            if doc.form_type in WHOLE_DOCUMENT_FORMS:
-                sections = [_whole_document_section(raw_text)]
-            else:
-                sections = target_sections(doc.form_type, raw_text)
-            if not sections:
-                continue
+    semaphore = asyncio.Semaphore(max(settings.extraction_concurrency, 1))
+
+    async def extract_one(sec: Security, doc: Document) -> tuple[bool, bool]:
+        async with semaphore:
             try:
+                if doc.security_id != sec.id:
+                    raise ValueError("extraction document belongs to a different security")
+                raw_text = (
+                    await read_blob_text(ctx.repos.blob_sink, doc.blob_path)
+                    if doc.document_type is not DocumentType.NEWS
+                    else ""
+                )
+                sections = document_sections(doc, raw_text)
+                if not sections:
+                    raise ValueError("No readable source sections were found; the document was not extracted.")
                 await extractor.extract(
                     security_id=sec.id,
                     document_id=doc.id,
                     content_hash=doc.content_hash,
                     ticker=sec.ticker,
-                    form_type=doc.form_type,
+                    form_type=doc.form_type or doc.document_type.value,
                     sections=sections,
                     taxonomy_theme_ids=taxonomy_ids,
                 )
-                count += 1
+                return True, False
             except Exception as exc:  # noqa: BLE001 - one malformed model response must not abort the universe
-                failures += 1
                 ctx.degraded_securities.add(sec.id)
                 logger.error(
                     "Channel A extraction failed for %s document %s: %s",
@@ -268,18 +261,27 @@ async def step_extract_channel_a(ctx: PipelineContext, manifest: RunManifest) ->
                     doc.id,
                     exc,
                 )
+                return False, True
+
+    results = await asyncio.gather(*(
+        extract_one(sec, documents_by_id[doc_id])
+        for sec in ctx.universe.securities
+        for doc_id in dict.fromkeys(ctx.new_document_ids_by_security.get(sec.id, []))
+        if doc_id in documents_by_id
+        and is_extraction_document(documents_by_id[doc_id])
+        and (
+            documents_by_id[doc_id].document_type is not DocumentType.NEWS
+            or news_is_relevant(documents_by_id[doc_id], sec)
+        )
+    ))
+    count = sum(processed for processed, _failed in results) - extractor.cache_hits
+    failures = sum(failed for _processed, failed in results)
     complete_step(
         manifest,
         "EXTRACT_CHANNEL_A",
         detail=f"extracted={count}" + (f"; failures={failures}" if failures else ""),
         degraded=failures > 0,
     )
-
-
-def _whole_document_section(text: str):
-    from auspex.extraction.sections import Section
-
-    return Section(item="full_document", text=text)
 
 
 def _find_prior_comparable_document(
@@ -320,42 +322,37 @@ async def step_extract_channel_b(ctx: PipelineContext, manifest: RunManifest) ->
     documents_by_id = {d.id: d for d in all_docs}
     semaphore = asyncio.Semaphore(max(settings.extraction_concurrency, 1))
 
-    async def extract_one(sec, doc):
+    async def extract_one(sec: Security, doc: Document):
         async with semaphore:
-            cache_key = channel_b_cache_key(
-                security_id=sec.id,
-                content_hash=doc.content_hash,
-                model_version=settings.aoai_deployment_extraction,
-                prompt_version=extractor.prompt_version,
-            )
-            if await ctx.repos.channel_b_sink.find_by_cache_key(cache_key):
-                return False, None
-            raw_text = await read_blob_text(ctx.repos.blob_sink, doc.blob_path)
-            if doc.form_type in WHOLE_DOCUMENT_FORMS:
-                sections = [_whole_document_section(raw_text)]
-            else:
-                sections = target_sections(doc.form_type, raw_text)
-            if not sections:
-                return False, None
-
-            prior_sections = None
-            prior_doc = _find_prior_comparable_document(
-                all_docs, security_id=sec.id, form_type=doc.form_type, before=doc.filed_date
-            )
-            if prior_doc is not None:
-                prior_text = await read_blob_text(ctx.repos.blob_sink, prior_doc.blob_path)
-                if doc.form_type in WHOLE_DOCUMENT_FORMS:
-                    prior_sections = [_whole_document_section(prior_text)]
-                else:
-                    prior_sections = target_sections(doc.form_type, prior_text) or None
-
             try:
+                if doc.security_id != sec.id:
+                    raise ValueError("extraction document belongs to a different security")
+                raw_text = (
+                    await read_blob_text(ctx.repos.blob_sink, doc.blob_path)
+                    if doc.document_type is not DocumentType.NEWS
+                    else ""
+                )
+                sections = document_sections(doc, raw_text)
+                if not sections:
+                    raise ValueError("No readable source sections were found; the document was not extracted.")
+
+                prior_sections = None
+                prior_doc = (
+                    _find_prior_comparable_document(
+                        all_docs, security_id=sec.id, form_type=doc.form_type, before=doc.filed_date
+                    )
+                    if doc.document_type is not DocumentType.NEWS
+                    else None
+                )
+                if prior_doc is not None:
+                    prior_text = await read_blob_text(ctx.repos.blob_sink, prior_doc.blob_path)
+                    prior_sections = document_sections(prior_doc, prior_text) or None
                 await extractor.extract(
                     security_id=sec.id,
                     document_id=doc.id,
                     content_hash=doc.content_hash,
                     ticker=sec.ticker,
-                    form_type=doc.form_type,
+                    form_type=doc.form_type or doc.document_type.value,
                     sections=sections,
                     prior_sections=prior_sections,
                 )
@@ -377,14 +374,15 @@ async def step_extract_channel_b(ctx: PipelineContext, manifest: RunManifest) ->
     work = [
         (sec, doc)
         for sec in ctx.universe.securities
-        for doc_id in ctx.new_document_ids_by_security.get(sec.id, [])
+        for doc_id in dict.fromkeys(ctx.new_document_ids_by_security.get(sec.id, []))
         if (doc := documents_by_id.get(doc_id)) is not None
-        and doc.form_type is not None
+        and is_extraction_document(doc)
+        and (doc.document_type is not DocumentType.NEWS or news_is_relevant(doc, sec))
     ]
     results = await asyncio.gather(
         *(extract_one(sec, doc) for sec, doc in work)
     )
-    count = sum(1 for extracted, _failed in results if extracted)
+    count = sum(1 for extracted, _failed in results if extracted) - extractor.cache_hits
     failed_security_ids = {
         failed for _extracted, failed in results if failed is not None
     }
@@ -498,7 +496,11 @@ async def step_compute_raw_legs(ctx: PipelineContext, manifest: RunManifest) -> 
             fx_unavailable_ids.add(sec.id)
 
         leg_raw: dict[LegName, Decimal | None] = {
-            LegName.THESIS_LINKAGE: thesis_linkage(thesis_events, weights_cfg.recency_half_life_days),
+            LegName.THESIS_LINKAGE: thesis_linkage(
+                thesis_events,
+                weights_cfg.recency_half_life_days,
+                reviewed_documents=reviewed_thesis_documents(extractions, documents_by_id, ctx.as_of_date),
+            ),
             LegName.ATTENTION_ACCELERATION: attention_acceleration(attention_events),
         }
         if sec.filer_profile == FilerProfile.DOMESTIC:
@@ -512,6 +514,10 @@ async def step_compute_raw_legs(ctx: PipelineContext, manifest: RunManifest) -> 
             "narrative_events": narrative_events,
             "revenue_growth_yoy": fundamental_inputs.revenue_growth_yoy,
             "cohort": sec.cohort,
+            "documents": docs,
+            "extractions": extractions,
+            "fundamentals": fundamentals,
+            "valuation": valuation,
         }
 
     active_ids = {
@@ -526,6 +532,11 @@ async def step_compute_raw_legs(ctx: PipelineContext, manifest: RunManifest) -> 
     def _tier_subset(source: dict[str, object], ids: tuple[str, ...]) -> dict:
         return {i: source[i] for i in ids if i in source and i in active_ids}
 
+    evidence_contexts: dict[str, LegEvidenceContext] = {}
+    taxonomy_labels = {
+        theme["id"]: theme["label"]
+        for theme in ctx.config.get("taxonomy", {}).get("themes", [])
+    }
     for sec in ctx.universe.securities:
         state = per_security_state[sec.id]
         scope = cohort_scopes[sec.cohort]
@@ -573,6 +584,27 @@ async def step_compute_raw_legs(ctx: PipelineContext, manifest: RunManifest) -> 
             lambda_cohort=scope.lambda_cohort,
             lambda_parent=scope.lambda_parent,
         )
+        evidence_contexts[sec.id] = LegEvidenceContext(
+            security=sec,
+            as_of_date=ctx.as_of_date,
+            documents=state["documents"],
+            extractions=state["extractions"],
+            fundamentals=state["fundamentals"],
+            weights=weights_cfg,
+            taxonomy_labels=taxonomy_labels,
+            fundamental_inputs=fundamental_inputs_by_security[sec.id],
+            fundamental_health=health,
+            valuation=state["valuation"],
+            valuation_signals=valuation_metric_signals(
+                valuation_metrics_by_security[sec.id],
+                _tier_subset(valuation_metrics_by_security, scope.cohort_member_ids),
+                parent_metrics=_tier_subset(valuation_metrics_by_security, scope.parent_member_ids),
+                universe_metrics=_tier_subset(valuation_metrics_by_security, scope.universe_member_ids),
+                lambda_cohort=scope.lambda_cohort,
+                lambda_parent=scope.lambda_parent,
+            ),
+            growth_percentile=growth_percentile,
+        )
 
     scoring_inputs: list[SecurityScoringInput] = [
         SecurityScoringInput(
@@ -588,6 +620,7 @@ async def step_compute_raw_legs(ctx: PipelineContext, manifest: RunManifest) -> 
     ]
 
     ctx.__dict__["_scoring_inputs"] = scoring_inputs
+    ctx.__dict__["_score_evidence"] = evidence_contexts
     ctx.__dict__["_fx_unavailable_securities"] = fx_unavailable_ids
     complete_step(manifest, "COMPUTE_RAW_LEGS", detail=f"securities={len(scoring_inputs)}")
 
@@ -715,6 +748,7 @@ async def step_write_snapshot(ctx: PipelineContext, manifest: RunManifest) -> No
     from auspex.scoring.composite import classify_direction
 
     results = ctx.__dict__.get("_score_results", {})
+    evidence_contexts: dict[str, LegEvidenceContext] = ctx.__dict__.get("_score_evidence", {})
     config_version_id = ctx.__dict__.get("_config_version_id", "unversioned")
 
     prior_composites_7d: dict[str, Decimal] = {}
@@ -736,6 +770,8 @@ async def step_write_snapshot(ctx: PipelineContext, manifest: RunManifest) -> No
         if res is None:
             continue
         cohort_scope = res.cohort_scope
+        evidence_context = evidence_contexts.get(sec.id)
+        explanations = build_leg_explanations(evidence_context, res) if evidence_context is not None else {}
         legs: dict[LegName, LegResult] = {}
         if res.composite_result is not None:
             for leg, leg_res in res.composite_result.legs.items():
@@ -745,8 +781,10 @@ async def step_write_snapshot(ctx: PipelineContext, manifest: RunManifest) -> No
                     weight=str(leg_res.weight),
                     contribution=str(leg_res.contribution) if leg_res.contribution is not None else None,
                     computable=leg_res.computable,
-                    evidence_ids=[],
+                    evidence_ids=[source.evidence_id for source in explanations[leg].evidence]
+                    if leg in explanations else [],
                     reason_not_computable=leg_res.reason_not_computable,
+                    explanation=explanations.get(leg),
                 )
 
         composite_dec = res.composite_result.composite if res.composite_result else None
@@ -761,6 +799,14 @@ async def step_write_snapshot(ctx: PipelineContext, manifest: RunManifest) -> No
             "as_of_date": ctx.as_of_date.isoformat(),
             "composite": composite_str,
             "percentile": res.percentile,
+            "company_name": sec.name,
+            "ticker": sec.ticker,
+            "excluded_stale": res.excluded_stale,
+            "coverage": str(res.coverage),
+            "leg_explanations": {
+                name.value: detail.model_dump(mode="json")
+                for name, detail in explanations.items()
+            },
         }
         snapshot = ScoreSnapshot(
             id=f"{sec.id}:{ctx.as_of_date.isoformat()}",
@@ -1720,7 +1766,30 @@ async def step_narrate(ctx: PipelineContext, manifest: RunManifest) -> None:
             continue  # nothing scored for this security this run — nothing to narrate
 
         new_doc_ids = set(ctx.new_document_ids_by_security.get(sec.id, []))
-        todays_digests = [d for d in digests_by_security.get(sec.id, []) if d.document_id in new_doc_ids]
+        evidence_ids = {
+            source["evidence_id"]
+            for detail in package.get("leg_explanations", {}).values()
+            for source in detail["evidence"]
+        }
+        evidence_context = ctx.__dict__.get("_score_evidence", {}).get(sec.id)
+        document_dates = {
+            document.id: document.knowledge_date
+            for document in evidence_context.documents
+            if document.knowledge_date <= ctx.as_of_date
+        } if evidence_context is not None else {}
+        todays_digests = sorted(
+            (
+                digest for digest in digests_by_security.get(sec.id, [])
+                if digest.document_id in (new_doc_ids | evidence_ids)
+                and (evidence_context is None or digest.document_id in document_dates)
+            ),
+            key=lambda digest: (
+                digest.document_id in evidence_ids,
+                document_dates.get(digest.document_id, date.min),
+                digest.document_id,
+            ),
+            reverse=True,
+        )[:8]
         comparative = next((d.comparative for d in todays_digests if d.comparative is not None), None)
 
         narrative_text = await generator.generate(

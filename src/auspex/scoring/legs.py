@@ -26,23 +26,32 @@ class ThemeClaimEvent:
     age_days: int
 
 
-def thesis_linkage(events: list[ThemeClaimEvent], half_life_days: Decimal = Decimal(90)) -> Decimal | None:
+def thesis_linkage(
+    events: list[ThemeClaimEvent],
+    half_life_days: Decimal = Decimal(90),
+    *,
+    reviewed_documents: int = 0,
+) -> Decimal | None:
     """Sum of theme_strength * document_authority * decay(age), clipped [0, 1].
 
     Events must already be pre-filtered to trailing 180 days and to approved
     theme claims by the caller (arc42 §5.5 leg 1).
 
-    Returns ``None`` — not ``0`` — when there is no evidence at all. An empty
+    Returns ``None`` — not ``0`` — when there is no reviewed evidence. An empty
     sum is not a measurement: "this issuer published nothing we could link to a
     theme" and "this issuer published material that links to no theme" would
     otherwise be the same number, and the composite would treat an unevidenced
     security as if it had been evidenced at the bottom of its cohort. ``None``
     routes the leg down the ``raw_value_missing`` path, where it contributes a
     neutral z and is correctly excluded from coverage.
+
+    ``reviewed_documents`` distinguishes verified, sufficiently confident
+    reviews with no matching theme from documents that were never read or
+    could not be verified. The former is observed zero support, not missing.
     """
 
     if not events:
-        return None
+        return Decimal(0) if reviewed_documents > 0 else None
 
     total = sum(
         (e.theme_strength_value * e.document_authority * exponential_decay(e.age_days, half_life_days) for e in events),
@@ -411,8 +420,33 @@ def valuation_brake(
     """
 
     del security_id  # cross-sections are supplied pre-scoped by the caller
+    signals = valuation_metric_signals(
+        security_metrics,
+        cohort_metrics,
+        parent_metrics=parent_metrics,
+        universe_metrics=universe_metrics,
+        lambda_cohort=lambda_cohort,
+        lambda_parent=lambda_parent,
+    )
+    oriented_zs = [value for value in signals.values() if value is not None]
+    if not oriented_zs:
+        return None
+    return sum(oriented_zs, Decimal(0)) / Decimal(len(oriented_zs))
+
+
+def valuation_metric_signals(
+    security_metrics: ValuationMetrics,
+    cohort_metrics: dict[str, ValuationMetrics],
+    *,
+    parent_metrics: dict[str, ValuationMetrics] | None = None,
+    universe_metrics: dict[str, ValuationMetrics] | None = None,
+    lambda_cohort: Decimal = Decimal(1),
+    lambda_parent: Decimal = Decimal(1),
+) -> dict[str, Decimal | None]:
+    """The same cheap-high metric contributions used by the valuation leg."""
+
     metric_names = ("ev_sales", "ev_ebitda", "fcf_yield")
-    oriented_zs: list[Decimal] = []
+    signals: dict[str, Decimal | None] = dict.fromkeys(metric_names)
     for name in metric_names:
         own_value = getattr(security_metrics, name)
         if own_value is None or own_value <= 0:
@@ -427,10 +461,8 @@ def valuation_brake(
         )
         if z is None:
             continue
-        oriented_zs.append(z if name == "fcf_yield" else -z)
-    if not oriented_zs:
-        return None
-    return sum(oriented_zs, Decimal(0)) / Decimal(len(oriented_zs))
+        signals[name] = z if name == "fcf_yield" else -z
+    return signals
 
 
 def _positive_metric_values(metrics: dict[str, ValuationMetrics] | None, name: str) -> list[Decimal]:

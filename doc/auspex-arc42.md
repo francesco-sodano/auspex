@@ -42,7 +42,8 @@ The primary quality goals are:
 - Azure OpenAI for extraction and grounded language generation.
 - SEC EDGAR rate limits and identification requirements.
 - A configured, bounded security universe.
-- A single authenticated portfolio owner in the MVP.
+- Approved users with individually isolated portfolios; the original owner's
+  external source ledger is preserved.
 - No broker integration or trade execution.
 
 ## 3. Context and scope
@@ -216,7 +217,12 @@ filing.
 Cache keys include the security id, content hash, model, prompt, schema and
 taxonomy versions. Including the security id makes the lookup a single-partition
 read of that security's own extractions rather than a cross-partition scan.
-Replaying unchanged evidence does not invoke the model again.
+Cache reuse additionally requires an `input_fingerprint` matching the actual
+bounded source payload and prompt. Corrected sections and instructions refresh
+the existing extraction id rather than retaining an obsolete interpretation.
+Replaying unchanged evidence does not invoke the model again. Both channels
+accept relevant NEWS headlines/summaries without a filing form or Blob path;
+ambiguous ordinary-word tickers alone are not sufficient news relevance.
 
 Malformed output degrades the affected document/security; it does not silently
 become numeric input. A Channel A failure degrades that security's score
@@ -1188,9 +1194,16 @@ sum(theme_strength * document_authority * exp(-age_days / 90)) clipped to [0, 1]
 Events are approved Channel A `theme_claims` from documents whose
 `knowledge_date` is within a trailing 180 days
 (`build_thesis_linkage_events`). `theme_strength` and `document_authority` come
-from `config/weights.yaml`. An empty event list returns `None`, not `0`: an
-empty sum is not a measurement, and "published nothing linkable to a theme"
-must not read as "linked at the very bottom of the cohort".
+from `config/weights.yaml`. An empty event list returns `None` unless at least
+one document in the window was confidently reviewed using the current processed
+input and without discarded claims. That verified no-match case is an observed
+`0`; an unread, failed or unreliable extraction is not.
+
+This measures linkage strength, not the sentiment of the linked development.
+For example, an export-control risk can establish exposure without being good
+news. The exponential shown above is the implemented formula: despite the
+configuration name `recency_half_life_days`, it is an e-folding decay constant,
+not a mathematical half-life.
 
 **2. Attention acceleration** — `attention_acceleration(events)`
 
@@ -1723,11 +1736,14 @@ Channel B, narrative and answer prompts have been removed, so a
 unreferenced prompt can drift.
 
 **Section targeting** (`src/auspex/extraction/sections.py`) strips filing HTML
-with a `HTMLParser` subclass that drops `script`/`style` and inserts newlines at
-block tags, locates standard `Item` headings per form type by regex, terminates
-each section at the next heading of any kind, and — because inline tables of
-contents repeat every heading — keeps the **longest** bounded occurrence of each
-item. 8-K and 6-K bypass targeting entirely (`WHOLE_DOCUMENT_FORMS`). Payloads
+with a `HTMLParser` subclass that drops `script`/`style`, `head` and `ix:header`,
+and inserts newlines at block tags. Heading patterns are line-anchored to avoid
+matching prose. Numbered sections end at the next numbered Item, not at their
+own subtitle or nested results-of-operations heading. Because inline tables of
+contents repeat every heading, the selector keeps the **longest** bounded occurrence of each
+item. An overlapping results section already inside MD&A is not duplicated.
+8-K and 6-K use cleaned whole-document text; NEWS uses its title and provider
+summary. No full news article is implied. Payloads
 are truncated to `MAX_EXTRACTION_CHARS = 300_000` for Channel A and 150 000 for
 Channel B by `bound_sections`.
 
@@ -1737,7 +1753,10 @@ enumerated labels and short verbatim excerpts. `parse_response` keeps only the
 eight known domain fields, replaces any out-of-enum scalar with a safe default
 (`Materiality.NONE`, `Sentiment.NEUTRAL`, `GuidanceDirection.NONE`,
 `Novelty.ROUTINE`, `ExtractionConfidence.LOW`), and drops any claim whose enum
-fields are invalid or whose keys are unknown. Numeric meaning is assigned later
+fields are invalid or whose keys are unknown. Unknown taxonomy ids and excerpts
+absent from the exact bounded source are rejected; `discarded_claim_count`
+records these losses. Only a verified prefix of a mechanically clipped excerpt
+may be retained, not model-invented ellipses. Numeric meaning is assigned later
 from `config/label_mappings.yaml` and `config/weights.yaml`.
 
 **Channel B** (`src/auspex/extraction/channel_b.py`) emits a headline, a plain
@@ -1746,15 +1765,18 @@ prose digest, key quotes and a comparative diff against the prior comparable
 filing; every list element missing a required key is dropped and every
 out-of-enum shift is coerced to `UNCHANGED`.
 
-`step_extract_channel_b` runs up to
+Both extraction steps run up to
 `AUSPEX_EXTRACTION_CONCURRENCY` documents concurrently (16 in the deployed
 Container Apps environment). All calls share the same token-based
 `AzureOpenAIClient` bucket, so concurrency fills but cannot exceed the
-configured TPM budget. Cache probes remain partition-local before source blobs
-are read, and an interrupted refresh resumes from the completed v2 digests.
+configured TPM budget. The source must be read and bounded before cache reuse
+can verify its actual input fingerprint; cache lookups remain partition-local.
+News has smaller output reserves (Channel A: 1,500 tokens; Channel B: 2,000);
+filings reserve 5,000. Empty or truncated JSON responses fail explicitly.
+An interrupted refresh resumes from completed, fingerprint-matching records.
 
 `_verify_source_grounding` then checks every quotation against the exact section
-text the model was given. `_source_contains` collapses runs of whitespace on
+text the model was given. `grounding.source_contains` collapses runs of whitespace on
 both sides and requires the excerpt to be a substring of the source; anything
 that is not is removed:
 
@@ -1778,7 +1800,7 @@ filing (§11).
 ```
 channel A: security_id | content_hash | model | prompt | schema | taxonomy
 channel B: security_id | content_hash | model | prompt
-narrative: package_fingerprint | model | prompt
+narrative: hash(package + actual source input + system prompt) | model | prompt
 ```
 
 `ChannelAExtraction.cache_key` / `ChannelBDigest.cache_key` derive the same
@@ -1788,12 +1810,26 @@ Channel B counterpart split the key back into component filters and pass
 `partition_key=security_id`, so the extraction cache probe is a single-partition
 query on that security's own rows instead of a cross-partition scan. The
 pipeline probes the sink per document rather than pre-loading every extraction
-in the container.
+in the container. A matching logical cache key is insufficient when the stored
+input fingerprint is absent or differs.
 
 `compute_package_fingerprint` in `src/auspex/narrative/fingerprint.py` hashes
 the canonical
 JSON of the deterministic package and deliberately excludes the previous
-narrative, so replaying a past date reproduces the same text.
+narrative. `pipeline/score_explanations.py` builds issuer-specific reasons from
+the actual scoring inputs, using contribution direction rather than assuming
+that negative raw insider flow necessarily lowers a relative score. Each
+`LegResult` stores `explanation` and actual `evidence_ids`; each explanation has
+`summary`, `effect` and at most three dated source references.
+
+The narrative package now contains those reasons, source references, ticker,
+company name, coverage and staleness. At most eight related digests known by
+the scoring date are supplied. The shared narrative cannot infer a user's
+portfolio action. The narrative cache also hashes the complete evidence input
+and prompt, so changed evidence invalidates prose even if the numeric score
+did not move. Home and Analysis use the persisted reasons, expose readable
+missing-data states, and keep arithmetic details separate from the primary
+explanation.
 `src/auspex/extraction/json_response.py::load_model_json` repairs invalid `\u`
 escapes
 rather than discarding a whole response.

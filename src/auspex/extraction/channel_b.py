@@ -10,7 +10,8 @@ from __future__ import annotations
 import json
 from typing import Protocol
 
-from auspex.extraction.cache import channel_b_cache_key
+from auspex.extraction.cache import channel_b_cache_key, extraction_input_fingerprint
+from auspex.extraction.grounding import normalise_source_text, source_contains
 from auspex.extraction.json_response import load_model_json
 from auspex.extraction.sections import Section, bound_sections
 from auspex.models.common import new_id
@@ -58,6 +59,7 @@ class ChannelBExtractor:
         self._system_prompt = system_prompt
         self._model_version = model_version
         self._sink = sink
+        self.cache_hits = 0
 
     def build_user_content(
         self,
@@ -185,15 +187,11 @@ class ChannelBExtractor:
 
     @staticmethod
     def _normalise_source_text(value: str) -> str:
-        return " ".join(value.split())
+        return normalise_source_text(value)
 
     @classmethod
     def _source_contains(cls, source: str, excerpt: str) -> bool:
-        normalised_excerpt = cls._normalise_source_text(excerpt)
-        return bool(
-            normalised_excerpt
-            and normalised_excerpt in cls._normalise_source_text(source)
-        )
+        return source_contains(source, excerpt)
 
     @staticmethod
     def _verify_source_grounding(
@@ -276,15 +274,21 @@ class ChannelBExtractor:
             model_version=self._model_version,
             prompt_version=self.prompt_version,
         )
-        cached = await self._sink.find_by_cache_key(cache_key)
-        if cached is not None:
-            return cached
-
+        sections = bound_sections(sections, max_chars=150_000)
+        prior_sections = bound_sections(prior_sections, max_chars=150_000) if prior_sections is not None else None
         user_content = self.build_user_content(
             ticker=ticker, form_type=form_type, sections=sections, prior_sections=prior_sections
         )
+        fingerprint = extraction_input_fingerprint(self._system_prompt, user_content)
+        cached = await self._sink.find_by_cache_key(cache_key)
+        if cached is not None and cached.input_fingerprint == fingerprint:
+            self.cache_hits += 1
+            return cached
         raw_json = await self._openai.complete_json(
-            deployment=self._deployment, system_prompt=self._system_prompt, user_content=user_content
+            deployment=self._deployment,
+            system_prompt=self._system_prompt,
+            user_content=user_content,
+            max_tokens=2000 if form_type.upper() == "NEWS" else 5000,
         )
         digest = self.parse_response(
             raw_json, security_id=security_id, document_id=document_id, content_hash=content_hash
@@ -294,5 +298,9 @@ class ChannelBExtractor:
             sections=sections,
             prior_sections=prior_sections,
         )
+        digest = digest.model_copy(update={
+            "id": cached.id if cached is not None else digest.id,
+            "input_fingerprint": fingerprint,
+        })
         await self._sink.upsert(digest)
         return digest

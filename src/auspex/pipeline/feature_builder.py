@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Protocol
 
 from auspex.models.document import Document
-from auspex.models.enums import DocumentType
+from auspex.models.enums import DocumentType, ExtractionConfidence
 from auspex.models.extraction import ChannelAExtraction
 from auspex.models.fundamentals import FundamentalSnapshot
 from auspex.scoring.legs import (
@@ -93,6 +93,24 @@ def build_thesis_linkage_events(
                 ThemeClaimEvent(theme_strength_value=strength_value, document_authority=authority, age_days=age)
             )
     return events
+
+
+def reviewed_thesis_documents(
+    extractions: list[ChannelAExtraction],
+    documents_by_id: dict[str, Document],
+    as_of_date: date,
+    trailing_days: int = 180,
+) -> int:
+    return len({
+        ext.document_id
+        for ext in extractions
+        if ext.input_fingerprint
+        and ext.discarded_claim_count == 0
+        and ext.extraction_confidence in {ExtractionConfidence.HIGH, ExtractionConfidence.MEDIUM}
+        and (doc := documents_by_id.get(ext.document_id)) is not None
+        and doc.security_id == ext.security_id
+        and 0 <= _age_days(doc.knowledge_date, as_of_date) <= trailing_days
+    })
 
 
 def build_attention_events(
@@ -176,7 +194,7 @@ def build_narrative_events(
 def build_insider_events(documents: list[Document], as_of_date: date, trailing_days: int = 90) -> list[InsiderTxnEvent]:
     events: list[InsiderTxnEvent] = []
     for doc in documents:
-        if doc.document_type != DocumentType.FORM_4:
+        if doc.document_type != DocumentType.FORM_4 or doc.knowledge_date > as_of_date:
             continue
         for txn in doc.insider_transactions:
             age = _age_days(txn.transaction_date, as_of_date)
