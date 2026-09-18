@@ -1,6 +1,7 @@
 .git
 .github
 .azure
+.local
 .claude
 .venv
 .venv_review
