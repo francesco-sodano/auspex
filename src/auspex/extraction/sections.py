@@ -18,28 +18,31 @@ from auspex.models.enums import DocumentType
 
 # Each entry: item label -> list of regex patterns that may introduce that
 # section's heading in the filing text (case-insensitive, matched at line start).
+_ITEM_SEPARATOR = r"[\s.:\-\u2010-\u2015]*"
 SECTION_PATTERNS: dict[str, dict[str, list[str]]] = {
     "10-K": {
-        "item_1_business": [r"^[ \t]*item\s*1\.?\s*business[ \t]*$"],
-        "item_1a_risk_factors": [r"^[ \t]*item\s*1a\.?\s*risk\s*factors[ \t]*$"],
-        "item_7_mda": [r"^[ \t]*item\s*7\.?\s*management.?s\s*discussion"],
-        "item_7a_market_risk": [r"^[ \t]*item\s*7a\.?\s*quantitative\s*and\s*qualitative"],
+        "item_1_business": [rf"^[ \t]*item\s*1{_ITEM_SEPARATOR}business[ \t]*$"],
+        "item_1a_risk_factors": [rf"^[ \t]*item\s*1a{_ITEM_SEPARATOR}risk\s*factors[ \t]*$"],
+        "item_7_mda": [rf"^[ \t]*item\s*7{_ITEM_SEPARATOR}management.?s\s*discussion"],
+        "item_7a_market_risk": [rf"^[ \t]*item\s*7a{_ITEM_SEPARATOR}quantitative\s*and\s*qualitative"],
     },
     "10-Q": {
         "mda": [
-            r"^[ \t]*item\s*2\.?\s*management.?s\s*discussion",
+            rf"^[ \t]*item\s*2{_ITEM_SEPARATOR}management.?s\s*discussion",
             r"^[ \t]*management.?s\s*discussion\s*and\s*analysis",
         ],
         "results_of_operations": [r"^[ \t]*results[ \t]+of[ \t]+operations[ \t]*$"],
-        "item_1a_updates": [r"^[ \t]*item\s*1a\.?\s*risk\s*factors[ \t]*$"],
+        "item_1a_updates": [rf"^[ \t]*item\s*1a{_ITEM_SEPARATOR}risk\s*factors[ \t]*$"],
     },
     "20-F": {
         "item_3d_risk_factors": [
-            r"^[ \t]*item\s*3\s*\.?\s*d\.?\s*risk\s*factors[ \t]*$",
-            r"^[ \t]*d\.\s*risk\s*factors[ \t]*$",
+            rf"^[ \t]*item\s*3{_ITEM_SEPARATOR}d{_ITEM_SEPARATOR}risk\s*factors[ \t]*$",
+            r"^[ \t]*d[.:\-\u2010-\u2015]\s*risk\s*factors[ \t]*$",
         ],
-        "item_4_business": [r"^[ \t]*item\s*4\.?\s*information\s*on\s*the\s*company"],
-        "item_5_operating_financial_review": [r"^[ \t]*item\s*5\.?\s*operating\s*and\s*financial\s*review"],
+        "item_4_business": [rf"^[ \t]*item\s*4{_ITEM_SEPARATOR}information\s*on\s*the\s*company"],
+        "item_5_operating_financial_review": [
+            rf"^[ \t]*item\s*5{_ITEM_SEPARATOR}operating\s*and\s*financial\s*review"
+        ],
     },
     "S-1": {
         "business": [r"^\s*business\s*$"],

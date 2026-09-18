@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from auspex.extraction.sections import WHOLE_DOCUMENT_FORMS, target_sections
 
 SAMPLE_10K = """
@@ -36,6 +38,16 @@ No material changes from the prior annual report except as noted below.
 
 
 class TestTenKSectionTargeting:
+    @pytest.mark.parametrize("separator", ["-", ":", "\u2013", "\u2014"])
+    def test_numbered_headings_accept_filing_separator_variants_without_rewriting_source(self, separator):
+        text = SAMPLE_10K.replace(". ", separator)
+        sections = target_sections("10-K", text)
+        assert {section.item for section in sections} == {
+            "item_1_business", "item_1a_risk_factors", "item_7_mda", "item_7a_market_risk",
+        }
+        assert all(separator in section.text.splitlines()[0] for section in sections)
+        assert "We design and manufacture" in sections[0].text
+
     def test_extracts_all_four_sections(self):
         sections = target_sections("10-K", SAMPLE_10K)
         items = {s.item for s in sections}

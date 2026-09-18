@@ -609,8 +609,9 @@ already recomputed.
 
 [sections.py](../src/auspex/extraction/sections.py) converts filing HTML to text,
 dropping `script`, `style`, `head`, and `ix:header` content. Block boundaries
-become line boundaries. Target headings are anchored to lines; numbered
-sections terminate at numbered Item boundaries rather than at their own
+become line boundaries. Target headings are anchored to lines and accept
+periods, colons, ASCII hyphens and typographic dashes without rewriting the
+source text. Numbered sections terminate at numbered Item boundaries rather than at their own
 subtitles. The longest bounded occurrence wins over repeated table-of-contents
 headings. An overlapping results section inside MD&A is not duplicated.
 

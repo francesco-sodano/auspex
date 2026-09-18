@@ -1749,7 +1749,8 @@ unreferenced prompt can drift.
 **Section targeting** (`src/auspex/extraction/sections.py`) strips filing HTML
 with a `HTMLParser` subclass that drops `script`/`style`, `head` and `ix:header`,
 and inserts newlines at block tags. Heading patterns are line-anchored to avoid
-matching prose. Numbered sections end at the next numbered Item, not at their
+matching prose, and accept common period/colon/dash separators without changing
+the source text. Numbered sections end at the next numbered Item, not at their
 own subtitle or nested results-of-operations heading. Because inline tables of
 contents repeat every heading, the selector keeps the **longest** bounded occurrence of each
 item. An overlapping results section already inside MD&A is not duplicated.
