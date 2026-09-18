@@ -75,6 +75,7 @@ from auspex.scoring.sessions import (
     sessions_between,
 )
 from auspex.settings import get_settings
+from auspex.source_links import document_source_url
 
 logger = logging.getLogger("auspex.pipeline")
 
@@ -777,6 +778,20 @@ async def step_write_snapshot(ctx: PipelineContext, manifest: RunManifest) -> No
         cohort_scope = res.cohort_scope
         evidence_context = evidence_contexts.get(sec.id)
         explanations = build_leg_explanations(evidence_context, res) if evidence_context is not None else {}
+        source_documents = {
+            document.id: document for document in evidence_context.documents
+        } if evidence_context is not None else {}
+        explanations = {
+            name: explanation.model_copy(update={
+                "evidence": [
+                    source.model_copy(update={
+                        "source_url": document_source_url(source_documents[source.evidence_id], sec)
+                    }) if source.evidence_id in source_documents else source
+                    for source in explanation.evidence
+                ]
+            })
+            for name, explanation in explanations.items()
+        }
         legs: dict[LegName, LegResult] = {}
         if res.composite_result is not None:
             for leg, leg_res in res.composite_result.legs.items():

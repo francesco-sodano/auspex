@@ -24,6 +24,7 @@ from auspex.models.common import AuspexModel, utc_now
 from auspex.models.conversation import RetrievalPlan
 from auspex.persistence.blob_client import get_blob_context
 from auspex.persistence.repositories import CosmosRepository
+from auspex.source_links import document_source_url
 
 
 def _latest_date_rows(rows: list[AuspexModel], field: str) -> list[AuspexModel]:
@@ -399,6 +400,7 @@ class ChatGrounding:
         items: list[RetrievedItem] = []
         for rank, document in enumerate(documents[:30]):
             digest = digest_by_document_id.get(document.id)
+            source_url = document_source_url(document, self._security_by_id[document.security_id])
             content = {
                 "security_id": document.security_id,
                 "ticker": self._security_by_id[document.security_id].ticker,
@@ -418,7 +420,7 @@ class ChatGrounding:
                     if digest is not None and digest.comparative is not None
                     else None
                 ),
-                "source_url": document.url,
+                "source_url": source_url,
             }
             items.append(
                 self._item(
@@ -430,7 +432,7 @@ class ChatGrounding:
                         f"document:{self._security_by_id[document.security_id].ticker}:"
                         f"{document.id}"
                     ),
-                    source_url=document.url,
+                    source_url=source_url,
                 )
             )
         return items
@@ -498,7 +500,7 @@ class ChatGrounding:
                             },
                             security_id=security_id,
                             document_id=f"document:{ticker}:{document.id}",
-                            source_url=document.url,
+                            source_url=document_source_url(document, self._security_by_id[security_id]),
                             retrieved_at=utc_now(),
                             relevance_rank=len(items),
                         )

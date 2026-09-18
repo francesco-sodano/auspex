@@ -14,6 +14,7 @@ from auspex.models.common import content_hash, new_id, utc_now
 from auspex.models.document import Document
 from auspex.models.enums import DocumentType
 from auspex.providers.edgar import EdgarClient
+from auspex.source_links import sec_filing_url
 
 COLLECTOR_NAME = "filing"
 
@@ -95,6 +96,7 @@ class FilingCollector:
                     form_type=form,
                     accession_number=accession,
                     filed_date=filed_date,
+                    url=sec_filing_url(cik, accession),
                     blob_path=blob_path,
                     content_hash=hash_value,
                     retrieved_at=utc_now(),

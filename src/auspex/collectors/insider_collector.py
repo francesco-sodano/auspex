@@ -16,6 +16,7 @@ from auspex.models.common import content_hash, new_id, utc_now
 from auspex.models.document import Document, InsiderTransaction
 from auspex.models.enums import DocumentType, Form4TransactionCode
 from auspex.providers.edgar import EdgarClient
+from auspex.source_links import sec_filing_url
 
 COLLECTOR_NAME = "insider"
 
@@ -134,6 +135,7 @@ class InsiderCollector:
                     form_type="4",
                     accession_number=accession,
                     filed_date=filed_date,
+                    url=sec_filing_url(cik, accession),
                     content_hash=hash_value,
                     insider_transactions=insider_txns,
                     retrieved_at=utc_now(),

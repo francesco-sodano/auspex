@@ -55,6 +55,7 @@ from auspex.pipeline.feature_builder import (
     build_valuation_metrics,
 )
 from auspex.scoring.normalize import percentile_rank
+from auspex.source_links import document_source_url
 
 router = APIRouter(prefix="/securities", tags=["securities"])
 
@@ -383,15 +384,7 @@ def _form4_text(document: Document) -> tuple[str, str]:
 
 
 def _source_url(document: Document, security: Security) -> str:
-    if document.url:
-        return document.url
-    if document.form_type == "4" and document.accession_number and security.cik:
-        accession = document.accession_number
-        return (
-            "https://www.sec.gov/Archives/edgar/data/"
-            f"{int(security.cik)}/{accession.replace('-', '')}/{accession}-index.html"
-        )
-    return ""
+    return document_source_url(document, security) or ""
 
 
 def _map_document(
