@@ -1327,6 +1327,11 @@ disclosure, and calculations separately. A missing assessment is not relabeled
 structurally “not used”; FPI insider reporting is a real structural exception.
 Source text is readable without line clamping in the new leg evidence cards.
 
+Home's top-scored cards share content-sized grid rows on desktop and tablet,
+aligning their explanation disclosures and bottom actions even when summaries
+or readiness messages have different lengths. Single-column mobile cards retain
+natural heights. The layout does not truncate text or use fixed card heights.
+
 [api/static.py](../src/auspex/api/static.py) mounts the compiled assets last,
 reserves API/auth/health prefixes from SPA fallback, and only serves resolved
 files inside the build directory. Without a built bundle it leaves API-only
