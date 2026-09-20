@@ -279,7 +279,7 @@ export function Analysis() {
 
               <Section
                 title="Main fundamentals"
-                description={`${security.fundamentals_context.source} · ${security.fundamentals_context.retrieved_at ? `Retrieved ${new Date(security.fundamentals_context.retrieved_at).toLocaleDateString()}` : 'Provider snapshot unavailable'}${security.fundamentals_context.latest_quarter ? ` · Latest reported quarter ${security.fundamentals_context.latest_quarter}` : ''}`}
+                description={`${security.fundamentals_context.source} · ${security.fundamentals_context.retrieved_at ? `Retrieved ${new Date(security.fundamentals_context.retrieved_at).toLocaleDateString()}` : 'Provider snapshot unavailable'}${security.fundamentals_context.latest_quarter ? ` · Latest reported period ${security.fundamentals_context.latest_quarter}` : ''}`}
               >
                 <p className={security.fundamentals_context.status === 'available' ? 'fundamentals-note' : 'notice warning'}>
                   {security.fundamentals_context.note}

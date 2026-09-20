@@ -48,7 +48,8 @@ def test_asml_overview_uses_supplied_ratios_and_verified_reporting_currency():
     by_label = {metric.label: metric for metric in metrics}
     assert by_label["Revenue (TTM)"].value == "EUR 35.33B"
     assert by_label["Gross profit (TTM)"].value == "EUR 18.63B"
-    assert by_label["Revenue growth (quarter YoY)"].value == "21.3%"
+    assert by_label["Revenue growth (YoY)"].value == "21.3%"
+    assert by_label["Revenue growth (YoY)"].detail == "Provider's latest reporting period versus a year earlier"
     assert by_label["Operating margin (TTM)"].value == "37.1%"
     assert by_label["Profit margin (TTM)"].value == "30.1%"
     assert by_label["Return on equity (TTM)"].value == "53.9%"

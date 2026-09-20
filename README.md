@@ -55,10 +55,11 @@ the decision authority.
 ### Company overview versus scoring inputs
 
 The **Main fundamentals** panel uses the existing provider's Company Overview:
-revenue and gross profit (TTM), quarterly revenue growth versus the prior year,
+revenue and gross profit (TTM), latest-period revenue growth versus the prior year,
 profit/operating margins, return on equity, trailing P/E, EV/revenue and
 EV/EBITDA. TTM means trailing twelve months. Return on equity is not relabelled
 as Auspex's custom ROIC, and a reported gross profit is not a margin trend.
+Reporting periods are usually quarters, but can be semiannual for some issuers.
 
 Quote currency is not assumed to be financial-statement currency. For example,
 ASML's quote is in USD while its revenue/gross-profit figures are in EUR.

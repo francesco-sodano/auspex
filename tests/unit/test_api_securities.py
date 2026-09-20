@@ -767,7 +767,7 @@ def test_analysis_uses_current_provider_snapshot_not_incomplete_sec_ratios() -> 
     body = response.json()
     metrics = {metric["label"]: metric for metric in body["fundamentals"]}
     assert metrics["Revenue (TTM)"]["value"] == "EUR 35.33B"
-    assert metrics["Revenue growth (quarter YoY)"]["value"] == "21.3%"
+    assert metrics["Revenue growth (YoY)"]["value"] == "21.3%"
     assert metrics["P / E (TTM)"]["value"] == "57.81x"
     assert metrics["EV / Revenue"]["value"] == "15.26x"
     assert body["fundamentals_context"]["latest_quarter"] == "2026-06-30"

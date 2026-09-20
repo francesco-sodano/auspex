@@ -10,7 +10,12 @@ from auspex.models.company_overview import CompanyOverviewSnapshot
 
 _METRICS = (
     ("RevenueTTM", "Revenue (TTM)", "money", "Trailing twelve months"),
-    ("QuarterlyRevenueGrowthYOY", "Revenue growth (quarter YoY)", "percent", "Latest quarter versus a year earlier"),
+    (
+        "QuarterlyRevenueGrowthYOY",
+        "Revenue growth (YoY)",
+        "percent",
+        "Provider's latest reporting period versus a year earlier",
+    ),
     ("GrossProfitTTM", "Gross profit (TTM)", "money", "Trailing twelve months"),
     ("OperatingMarginTTM", "Operating margin (TTM)", "percent", "Trailing twelve months"),
     ("ProfitMargin", "Profit margin (TTM)", "percent", "Trailing twelve months"),

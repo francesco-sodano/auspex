@@ -1736,7 +1736,7 @@ verified financial currency, latest-quarter metadata and retrieval time in the
 `company_overviews` container (`/security_id`, one current row per issuer).
 The API/Discussion share `api/fundamentals.py`; unavailable values have explicit
 reasons and snapshots older than 48 hours are labelled stale. Standard ROE,
-TTM ratios and quarterly YoY growth are not renamed as custom engine metrics.
+TTM ratios and reported-period YoY growth are not renamed as custom engine metrics.
 
 `AlphaVantageProvider.get_company_overview` fetches OVERVIEW and, only when
 necessary for currency validation, INCOME_STATEMENT. The reporting currency is

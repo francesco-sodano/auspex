@@ -1236,7 +1236,7 @@ Company Overview fields, with truthful labels:
 | Provider field | Display |
 | --- | --- |
 | `RevenueTTM`, `GrossProfitTTM` | Revenue and gross profit over trailing twelve months |
-| `QuarterlyRevenueGrowthYOY` | Latest-quarter revenue growth versus that quarter a year earlier |
+| `QuarterlyRevenueGrowthYOY` | Provider-reported latest-period revenue growth versus a year earlier; usually quarterly, sometimes semiannual |
 | `OperatingMarginTTM`, `ProfitMargin` | Provider operating and net-profit margins |
 | `ReturnOnEquityTTM` | Return on equity, not the custom ROIC estimate |
 | `PERatio`, `EVToRevenue`, `EVToEBITDA` | Provider trailing P/E and enterprise-value multiples |
@@ -1247,6 +1247,10 @@ retrieved a current snapshot, not when the market first knew every field. The
 snapshot includes quote currency, separately verified financial currency,
 latest-quarter metadata, finite decimal-string metrics and per-field
 unavailability reasons.
+
+The API retains the provider's `latest_quarter` metadata name, while the UI calls
+it the latest reported period: some issuers report semiannually. The growth
+caption is likewise period-neutral; no quarterly/annual conversion is invented.
 
 [providers/company_overview.py](../src/auspex/providers/company_overview.py)
 validates issuer identity and numerical fields. It never assumes the quote
