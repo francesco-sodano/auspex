@@ -62,8 +62,10 @@ as Auspex's custom ROIC, and a reported gross profit is not a margin trend.
 
 Quote currency is not assumed to be financial-statement currency. For example,
 ASML's quote is in USD while its revenue/gross-profit figures are in EUR.
-Currency is confirmed against the provider's matching statements; unverified
-amounts remain unavailable with a reason. Source ratios are not recalculated.
+Currency requires supporting statement metadata: agreement between quote and
+recent reported currencies, or matching-period amount reconciliation when
+those currencies differ. Quote currency alone is never proof. Unverified
+amounts remain unavailable with a reason; source figures are not recalculated.
 
 Current snapshots refresh during the normal nightly collection, using the
 existing rate-limited provider and Key Vault credential. For an initial fill or

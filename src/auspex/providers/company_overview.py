@@ -1,13 +1,18 @@
 """Parse a fixed set of current Alpha Vantage OVERVIEW metrics without HTTP.
 
-Currency reconciliation compares, but never replaces or certifies, provider
-TTM values. RevenueTTM is the primary anchor; GrossProfitTTM is used only when
-overview revenue is missing or invalid. The selected anchor must match within
-0.01% of its overview value; zero requires an exact zero. A valid revenue
-mismatch never falls back to gross profit. Quarterly evidence needs four
-distinct periods ending at LatestQuarter, with 80--100-day intervals to allow
-calendar and 52/53-week fiscal quarters. Alternatively a full annual report
-must end exactly at LatestQuarter and match the same anchor.
+Currency confirmation never replaces or certifies provider accounting totals.
+First, same-issuer statement currency labels from the 366 days ending at
+LatestQuarter may confirm a valid quote currency. At least one explicit recent
+label is required, and all nonmissing recent quarterly/annual labels must agree.
+Malformed recent labels or invalid/future period dates cannot authorize consensus.
+
+Otherwise, strict numerical reconciliation uses RevenueTTM as its primary anchor;
+GrossProfitTTM is used only when overview revenue is missing or invalid. The
+selected anchor must match within 0.01% of its overview value; zero requires an
+exact zero. A valid revenue mismatch never falls back to gross profit. Quarterly
+evidence needs four distinct periods ending at LatestQuarter, with 80--100-day
+intervals to allow calendar and 52/53-week fiscal quarters. Alternatively a full
+annual report must end exactly at LatestQuarter and match the same anchor.
 
 LatestQuarter describes a reporting period, not when a value became known.
 These snapshots must not be used to reconstruct historical fundamentals.
@@ -51,6 +56,7 @@ _SENTINELS = frozenset(("", "none", "null", "n/a", "na", "#n/a", "-", "--", "not
 _DECIMAL_PATTERN = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 _RELATIVE_TOLERANCE = Decimal("0.0001")
 _MAX_COMPARISON_PRECISION = 4096
+_CURRENCY_CONSENSUS_DAYS = 366
 
 
 @dataclass(frozen=True)
@@ -196,6 +202,44 @@ def _report_dates(raw: object, kind: str, retrieved_on: date) -> tuple[list[_Dat
     return sorted(reports, key=lambda report: report.end, reverse=True), None
 
 
+def _currency_consensus(
+    statement: dict,
+    *,
+    quote_currency: str | None,
+    latest_quarter: date,
+    retrieved_on: date,
+) -> _CurrencyProof:
+    if quote_currency is None:
+        return _CurrencyProof(None, "currency consensus requires a valid quote currency")
+
+    explicit_evidence = False
+    for field, kind in (("quarterlyReports", "quarterly"), ("annualReports", "annual")):
+        raw = statement.get(field)
+        if raw is None or isinstance(raw, list) and not raw:
+            continue
+        reports, error = _report_dates(raw, kind, retrieved_on)
+        if error is not None:
+            return _CurrencyProof(None, f"currency consensus rejected: {error}")
+        for report in reports:
+            if report.end > latest_quarter:
+                return _CurrencyProof(None, "currency consensus has a future period after LatestQuarter")
+            if (latest_quarter - report.end).days > _CURRENCY_CONSENSUS_DAYS:
+                continue
+            label = report.payload.get("reportedCurrency")
+            if _missing(label):
+                continue
+            currency = _currency(label)
+            if currency is None:
+                return _CurrencyProof(None, "currency consensus has a malformed recent reportedCurrency")
+            if currency != quote_currency:
+                return _CurrencyProof(None, "recent reportedCurrency does not agree with quote currency")
+            explicit_evidence = True
+
+    if not explicit_evidence:
+        return _CurrencyProof(None, "no explicit reporting currency within 366 days ending at LatestQuarter")
+    return _CurrencyProof(quote_currency)
+
+
 def _prove_totals(reports: list[_DatedReport], amounts: dict[str, _ParsedNumber]) -> _CurrencyProof:
     currencies = {_currency(report.payload.get("reportedCurrency")) for report in reports}
     if None in currencies or len(currencies) != 1:
@@ -237,6 +281,7 @@ def _verify_currency(
     *,
     symbol: str,
     latest_quarter: date | None,
+    quote_currency: str | None,
     amounts: dict[str, _ParsedNumber],
     retrieved_on: date,
 ) -> _CurrencyProof:
@@ -250,8 +295,20 @@ def _verify_currency(
         return _CurrencyProof(None, "income statement symbol does not match the overview")
     if latest_quarter is None:
         return _CurrencyProof(None, "LatestQuarter is unavailable")
+
+    consensus = _currency_consensus(
+        statement,
+        quote_currency=quote_currency,
+        latest_quarter=latest_quarter,
+        retrieved_on=retrieved_on,
+    )
+    if consensus.currency is not None:
+        return consensus
     if all(amounts[field].value is None for field in _MONEY_FIELDS):
-        return _CurrencyProof(None, "RevenueTTM or GrossProfitTTM is required for currency reconciliation")
+        return _CurrencyProof(
+            None,
+            f"{consensus.reason}; RevenueTTM or GrossProfitTTM is required for currency reconciliation",
+        )
 
     quarterly, quarter_error = _report_dates(statement.get("quarterlyReports"), "quarterly", retrieved_on)
     selected = [report for report in quarterly if report.end <= latest_quarter][:4]
@@ -282,7 +339,7 @@ def _verify_currency(
         return quarterly_proof
     if annual_proof.currency is not None:
         return annual_proof
-    return _CurrencyProof(None, f"{quarterly_proof.reason}; {annual_proof.reason}")
+    return _CurrencyProof(None, f"{consensus.reason}; {quarterly_proof.reason}; {annual_proof.reason}")
 
 
 def build_company_overview(
@@ -330,6 +387,7 @@ def build_company_overview(
             income_statement,
             symbol=symbol,
             latest_quarter=latest_quarter,
+            quote_currency=quote_currency,
             amounts=parsed,
             retrieved_on=retrieved_at.date(),
         )

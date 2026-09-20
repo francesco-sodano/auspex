@@ -1251,14 +1251,23 @@ unavailability reasons.
 [providers/company_overview.py](../src/auspex/providers/company_overview.py)
 validates issuer identity and numerical fields. It never assumes the quote
 currency applies to revenue: ASML's OVERVIEW says `Currency=USD`, but its
-TTM revenue/gross-profit amounts reconcile to EUR income statements. Revenue
-is the primary currency anchor, with a 0.01% reconciliation tolerance against
-matching-period statements in one currency. Gross profit is a fallback only
-when revenue is absent or unusable; a valid but mismatched revenue amount
-cannot be overridden by a matching gross-profit amount. This avoids discarding
+TTM revenue/gross-profit amounts reconcile to EUR income statements. If quote
+currency and explicit recent statement currencies agree, that independent
+agreement establishes the units without recalculating TTM figures. There must
+be an explicit reporting-currency label within the twelve-month window ending
+at `LatestQuarter` (at most 366 days). Missing labels can be supplemented by
+other recent quarterly or annual statements; contradictory or malformed labels
+and invalid/future periods do not establish agreement. This also accommodates
+semiannual issuers rather than requiring them to invent quarterly reports.
+
+When quote and reporting currencies differ, revenue is the primary currency
+anchor, with a 0.01% reconciliation tolerance against matching-period statements
+in one currency. Gross profit is a fallback only when revenue is absent or
+unusable; a valid but mismatched revenue amount cannot be overridden by a
+matching gross-profit amount in this reconciliation path. This avoids discarding
 SAP's verified EUR revenue merely because the provider's overview gross-profit
-total differs from its statement classification. The comparison verifies units,
-not the accuracy of every provider accounting total, and never replaces the
+total differs from its statement classification. These checks establish units,
+not the accuracy of every provider accounting total, and never replace the
 provider's figures or ratio calculations. When financial period and monetary values are unchanged,
 previously verified currency can be reused without another statement request.
 

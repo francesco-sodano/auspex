@@ -15,11 +15,12 @@ from auspex.models.common import AuspexModel
 class CompanyOverviewSnapshot(AuspexModel):
     """One current row in ``company_overviews``, partitioned by ``/security_id``.
 
-    Monetary metrics retain the provider's numbers. ``financial_currency`` is
-    reconciled using RevenueTTM, or GrossProfitTTM when overview revenue is
-    unavailable, never inferred from the quote currency. This verifies the
-    unit, not the provider's accounting totals. A numeric metric can have an
-    unavailable-field reason when its unit, rather than its value, is unverified.
+    Monetary metrics retain the provider's numbers. ``financial_currency`` needs
+    explicit recent statement-currency agreement with the quote currency, or
+    strict monetary reconciliation when those currencies differ. Quote currency
+    alone is never proof. This verifies the unit, not the provider's accounting
+    totals. A numeric metric can have an unavailable-field reason when its unit,
+    rather than its value, is unverified.
     """
 
     id: str = Field(description="security_id; a refresh replaces the current snapshot")

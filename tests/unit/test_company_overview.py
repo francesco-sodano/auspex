@@ -76,6 +76,15 @@ def statement() -> dict:
     return deepcopy(ASML_INCOME_STATEMENT)
 
 
+@pytest.fixture
+def consensus_data(overview, statement) -> tuple[dict, dict]:
+    overview.update(Symbol="USCO", Currency="USD", RevenueTTM="1000", GrossProfitTTM="600")
+    statement["symbol"] = "USCO"
+    for row in statement["quarterlyReports"] + statement["annualReports"]:
+        row.update(reportedCurrency="USD", totalRevenue="1", grossProfit="1")
+    return overview, statement
+
+
 def build(payload: dict, **kwargs) -> CompanyOverviewSnapshot:
     options = {"security_id": "sec-asml", "ticker": "ASML", "retrieved_at": RETRIEVED_AT}
     options.update(kwargs)
@@ -108,6 +117,280 @@ def test_asml_uses_statement_eur_not_overview_usd(overview, statement):
     assert snapshot.metrics["EVToRevenue"] == "15.26"
     assert snapshot.metrics["QuarterlyRevenueGrowthYOY"] == "0.213"
     assert snapshot.unavailable_fields == {}
+
+
+def test_currency_consensus_allows_different_totals_without_replacing_provider_values(consensus_data):
+    payload, statement = consensus_data
+
+    snapshot = build(payload, ticker="USCO", income_statement=statement)
+
+    assert snapshot.quote_currency == snapshot.financial_currency == "USD"
+    assert snapshot.metrics == {field: payload[field] for field in OVERVIEW_METRIC_FIELDS}
+    assert snapshot.unavailable_fields == {}
+    assert needs_income_statement(payload, snapshot) is False
+    refreshed = build(payload, ticker="USCO", previous=snapshot)
+    assert refreshed.financial_currency == "USD"
+    assert refreshed.metrics == snapshot.metrics
+    for field, value in (("RevenueTTM", "1001"), ("GrossProfitTTM", "601"), ("LatestQuarter", "2026-09-30")):
+        assert needs_income_statement({**payload, field: value}, snapshot) is True
+
+
+@pytest.mark.parametrize(
+    ("symbol", "latest", "revenue", "quarterly", "annual"),
+    [
+        (
+            "AMZN",
+            "2026-06-30",
+            "775680033000",
+            [
+                ("2026-06-30", "200606000000", "None"),
+                ("2026-03-31", "181519000000", "USD"),
+                ("2025-12-31", "213386000000", "USD"),
+                ("2025-09-30", "180169000000", "USD"),
+            ],
+            [("2025-12-31", None, "USD")],
+        ),
+        (
+            "ARQQ",
+            "2026-03-31",
+            "1086000",
+            [
+                ("2026-03-31", "623000", "None"),
+                ("2025-09-30", "463000", "None"),
+                ("2025-03-31", "67000", "USD"),
+            ],
+            [("2025-09-30", "530000", "USD")],
+        ),
+        (
+            "LAES",
+            "2026-06-30",
+            None,
+            [
+                ("2026-06-30", None, "None"),
+                ("2025-12-31", None, "None"),
+                ("2025-06-30", None, "None"),
+            ],
+            [("2025-12-31", None, "USD")],
+        ),
+    ],
+    ids=["AMZN", "ARQQ", "LAES"],
+)
+def test_live_currency_consensus_handles_missing_labels_and_semiannual_periods(
+    symbol,
+    latest,
+    revenue,
+    quarterly,
+    annual,
+):
+    payload = {"Symbol": symbol, "Currency": "USD", "LatestQuarter": latest}
+    if revenue is not None:
+        payload["RevenueTTM"] = revenue
+    statement = {
+        "symbol": symbol,
+        "quarterlyReports": [
+            {"fiscalDateEnding": end, "totalRevenue": amount, "reportedCurrency": currency}
+            for end, amount, currency in quarterly
+        ],
+        "annualReports": [
+            {"fiscalDateEnding": end, "totalRevenue": amount, "reportedCurrency": currency}
+            for end, amount, currency in annual
+        ],
+    }
+
+    snapshot = build(payload, security_id=f"sec-{symbol}", ticker=symbol, income_statement=statement)
+
+    assert snapshot.quote_currency == snapshot.financial_currency == "USD"
+    assert snapshot.latest_quarter == date.fromisoformat(latest)
+    assert snapshot.metrics["RevenueTTM"] == revenue
+    assert snapshot.metrics["GrossProfitTTM"] is None
+    assert "financial_currency" not in snapshot.unavailable_fields
+    if revenue is not None:
+        assert "RevenueTTM" not in snapshot.unavailable_fields
+
+
+@pytest.mark.parametrize("evidence", ["quarterlyReports", "annualReports"])
+@pytest.mark.parametrize("missing", [None, "None", "N/A", "null", "", "-", "--", "not available"])
+def test_currency_consensus_ignores_missing_labels_with_explicit_recent_backup(consensus_data, evidence, missing):
+    payload, statement = consensus_data
+    for row in statement["quarterlyReports"] + statement["annualReports"]:
+        row["reportedCurrency"] = missing
+    statement[evidence][1 if evidence == "quarterlyReports" else 0]["reportedCurrency"] = "USD"
+
+    assert build(payload, ticker="USCO", income_statement=statement).financial_currency == "USD"
+
+
+def test_currency_consensus_ignores_absent_currency_key_with_recent_backup(consensus_data):
+    payload, statement = consensus_data
+    del statement["quarterlyReports"][0]["reportedCurrency"]
+
+    assert build(payload, ticker="USCO", income_statement=statement).financial_currency == "USD"
+
+
+@pytest.mark.parametrize("quarterly", [None, [], "absent"])
+def test_currency_consensus_accepts_recent_annual_evidence_without_quarterly_reports(consensus_data, quarterly):
+    payload, statement = consensus_data
+    if quarterly == "absent":
+        del statement["quarterlyReports"]
+    else:
+        statement["quarterlyReports"] = quarterly
+
+    assert build(payload, ticker="USCO", income_statement=statement).financial_currency == "USD"
+
+
+@pytest.mark.parametrize("missing", [None, "None", "N/A", "", "null", "-", "--"])
+def test_currency_consensus_never_uses_quote_or_root_currency_without_report_evidence(consensus_data, missing):
+    payload, statement = consensus_data
+    for row in statement["quarterlyReports"] + statement["annualReports"]:
+        row["reportedCurrency"] = missing
+    statement["Currency"] = statement["reportedCurrency"] = "USD"
+
+    snapshot = build(payload, ticker="USCO", income_statement=statement)
+
+    assert_unverified(snapshot, "no explicit reporting currency within 366 days")
+    assert snapshot.metrics["RevenueTTM"] == "1000"
+    assert snapshot.metrics["GrossProfitTTM"] == "600"
+    assert needs_income_statement(payload, snapshot) is True
+
+
+def test_currency_consensus_needs_report_evidence_even_when_collections_are_empty(consensus_data):
+    payload, statement = consensus_data
+    statement.update(quarterlyReports=[], annualReports=[])
+
+    assert_unverified(
+        build(payload, ticker="USCO", income_statement=statement),
+        "no explicit reporting currency within 366 days",
+    )
+
+
+@pytest.mark.parametrize("evidence", ["quarterlyReports", "annualReports"])
+@pytest.mark.parametrize(("age", "verified"), [(365, True), (366, True), (367, False), (730, False)])
+def test_currency_consensus_has_an_inclusive_366_day_evidence_window(consensus_data, evidence, age, verified):
+    payload, statement = consensus_data
+    latest = date.fromisoformat(payload["LatestQuarter"])
+    statement["quarterlyReports"] = [{"fiscalDateEnding": latest.isoformat(), "reportedCurrency": "None"}]
+    statement["annualReports"] = []
+    statement[evidence].append(
+        {
+            "fiscalDateEnding": (latest - timedelta(days=age)).isoformat(),
+            "reportedCurrency": "USD",
+        }
+    )
+
+    snapshot = build(payload, ticker="USCO", income_statement=statement)
+
+    assert (snapshot.financial_currency == "USD") is verified
+    if not verified:
+        assert_unverified(snapshot, "no explicit reporting currency within 366 days")
+
+
+@pytest.mark.parametrize("collection", ["quarterlyReports", "annualReports"])
+def test_currency_consensus_rejects_recent_contradictory_reporting_currencies(consensus_data, collection):
+    payload, statement = consensus_data
+    statement[collection][0]["reportedCurrency"] = "EUR"
+
+    assert_unverified(
+        build(payload, ticker="USCO", income_statement=statement),
+        "does not agree with quote currency",
+    )
+
+
+@pytest.mark.parametrize("collection", ["quarterlyReports", "annualReports"])
+@pytest.mark.parametrize("label", ["US dollars", "usd", "US", "XXX", "XTS", "NaN", 1, True, [], {}, "secret-token"])
+def test_currency_consensus_rejects_malformed_recent_labels(consensus_data, collection, label, caplog):
+    payload, statement = consensus_data
+    statement[collection][0]["reportedCurrency"] = label
+
+    snapshot = build(payload, ticker="USCO", income_statement=statement)
+
+    assert_unverified(snapshot, "malformed recent reportedCurrency")
+    assert "secret-token" not in snapshot.model_dump_json()
+    assert "secret-token" not in caplog.text
+
+
+@pytest.mark.parametrize("collection", ["quarterlyReports", "annualReports"])
+@pytest.mark.parametrize(
+    ("end", "reason"),
+    [
+        ("2026-07-01", "future period after LatestQuarter"),
+        ("2026-12-31", "future"),
+        ("2026-02-30", "invalid fiscalDateEnding"),
+        ("20260630", "invalid fiscalDateEnding"),
+        ("secret-token", "invalid fiscalDateEnding"),
+        (None, "missing"),
+        ("None", "missing"),
+        ({}, "invalid fiscalDateEnding"),
+    ],
+)
+def test_currency_consensus_rejects_future_missing_or_invalid_statement_dates(
+    consensus_data,
+    collection,
+    end,
+    reason,
+    caplog,
+):
+    payload, statement = consensus_data
+    statement[collection][0]["fiscalDateEnding"] = end
+
+    snapshot = build(payload, ticker="USCO", income_statement=statement)
+
+    assert_unverified(snapshot, reason)
+    assert "secret-token" not in snapshot.model_dump_json()
+    assert "secret-token" not in caplog.text
+
+
+@pytest.mark.parametrize("collection", ["quarterlyReports", "annualReports"])
+@pytest.mark.parametrize("reports", [{}, "None", [None], [123], [True], ["bad-row"]])
+def test_currency_consensus_rejects_malformed_statement_collections(consensus_data, collection, reports):
+    payload, statement = consensus_data
+    statement[collection] = reports
+
+    assert_unverified(build(payload, ticker="USCO", income_statement=statement), "currency consensus rejected")
+
+
+def test_currency_consensus_rejects_duplicate_periods_within_a_statement_collection(consensus_data):
+    payload, statement = consensus_data
+    statement["quarterlyReports"].append(deepcopy(statement["quarterlyReports"][0]))
+
+    assert_unverified(build(payload, ticker="USCO", income_statement=statement), "duplicate")
+
+
+@pytest.mark.parametrize("label", ["EUR", "malformed", None, {}])
+def test_currency_consensus_ignores_labels_outside_the_evidence_window(consensus_data, label):
+    payload, statement = consensus_data
+    statement["annualReports"].append({"fiscalDateEnding": "2024-12-31", "reportedCurrency": label})
+
+    assert build(payload, ticker="USCO", income_statement=statement).financial_currency == "USD"
+
+
+@pytest.mark.parametrize("quote", [None, "", "None", "usd", "US dollars", "XXX", "XTS", True, {}])
+def test_currency_consensus_requires_a_valid_quote_currency(consensus_data, quote):
+    payload, statement = consensus_data
+    payload["Currency"] = quote
+
+    assert_unverified(
+        build(payload, ticker="USCO", income_statement=statement),
+        "consensus requires a valid quote currency",
+    )
+
+
+def test_currency_consensus_requires_same_issuer(consensus_data):
+    payload, statement = consensus_data
+    statement["symbol"] = "ANOTHER"
+
+    assert_unverified(
+        build(payload, ticker="USCO", income_statement=statement),
+        "income statement symbol does not match",
+    )
+
+
+@pytest.mark.parametrize("currency", ["EUR", "CHF"])
+def test_currency_consensus_also_requires_evidence_for_non_usd_quotes(consensus_data, currency):
+    payload, statement = consensus_data
+    payload["Currency"] = currency
+    for row in statement["quarterlyReports"] + statement["annualReports"]:
+        row["reportedCurrency"] = currency
+
+    assert build(payload, ticker="USCO", income_statement=statement).financial_currency == currency
 
 
 def test_live_sap_revenue_anchor_verifies_eur_without_certifying_gross_total():
