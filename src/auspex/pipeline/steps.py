@@ -15,6 +15,7 @@ import logging
 from datetime import date, datetime, timedelta
 from decimal import ROUND_FLOOR, Decimal
 
+from auspex.collectors.company_overview_collector import refresh_company_overviews
 from auspex.collectors.filing_collector import FilingCollector
 from auspex.collectors.fundamental_collector import FundamentalCollector
 from auspex.collectors.fx_collector import FxCollector
@@ -191,26 +192,45 @@ async def step_collect_news(ctx: PipelineContext, manifest: RunManifest) -> None
 
 async def step_collect_fundamentals(ctx: PipelineContext, manifest: RunManifest) -> None:
     start_step(manifest, "COLLECT_FUNDAMENTALS")
-    if ctx.providers.edgar_client is None:
-        skip_step(manifest, "COLLECT_FUNDAMENTALS", detail="no EDGAR client configured")
+    collect_overviews = (
+        ctx.providers.company_overview_provider is not None
+        and ctx.repos.company_overview_repo is not None
+        and ctx.as_of_date == utc_now().date()
+    )
+    if ctx.providers.edgar_client is None and not collect_overviews:
+        skip_step(manifest, "COLLECT_FUNDAMENTALS", detail="no current fundamentals providers configured")
         return
-    collector = FundamentalCollector(ctx.providers.edgar_client, ctx.repos.fundamental_sink, ctx.repos.watermarks)
-    all_docs = await fetch_all(ctx.repos.document_sink)
     degraded = 0
-    for sec in ctx.universe.securities:
-        new_ids = ctx.new_document_ids_by_security.get(sec.id, [])
-        new_docs = [d for d in all_docs if d.id in new_ids]
-        accessions = {
-            d.accession_number
-            for d in new_docs
-            if d.accession_number and d.document_type.value in ("10-K", "10-Q", "20-F")
-        }
-        if not accessions:
-            continue
-        result = await collector.collect(sec.id, sec.cik, accessions)
-        if result.degraded:
-            degraded += 1
-    complete_step(manifest, "COLLECT_FUNDAMENTALS", detail=f"degraded={degraded}", degraded=degraded > 0)
+    if ctx.providers.edgar_client is not None:
+        collector = FundamentalCollector(ctx.providers.edgar_client, ctx.repos.fundamental_sink, ctx.repos.watermarks)
+        all_docs = await fetch_all(ctx.repos.document_sink)
+        for sec in ctx.universe.securities:
+            new_ids = set(ctx.new_document_ids_by_security.get(sec.id, []))
+            accessions = {
+                document.accession_number for document in all_docs
+                if document.id in new_ids and document.security_id == sec.id
+                and document.accession_number and document.document_type.value in ("10-K", "10-Q", "20-F")
+            }
+            if not accessions:
+                continue
+            result = await collector.collect(sec.id, sec.cik, accessions)
+            if result.degraded:
+                degraded += 1
+    if collect_overviews:
+        overview = await refresh_company_overviews(
+            ctx.universe.securities, ctx.providers.company_overview_provider, ctx.repos.company_overview_repo
+        )
+        complete_step(
+            manifest,
+            "COLLECT_FUNDAMENTALS",
+            detail=(
+                f"SEC degraded={degraded}; provider overviews refreshed={overview.refreshed} "
+                f"cached={overview.cached} failed={len(overview.failed_tickers)}"
+            ),
+            degraded=degraded > 0 or bool(overview.failed_tickers),
+        )
+    else:
+        complete_step(manifest, "COLLECT_FUNDAMENTALS", detail=f"degraded={degraded}", degraded=degraded > 0)
 
 
 async def step_extract_channel_a(ctx: PipelineContext, manifest: RunManifest) -> None:

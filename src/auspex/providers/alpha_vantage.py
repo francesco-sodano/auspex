@@ -18,7 +18,10 @@ from datetime import date, datetime
 import httpx
 
 from auspex.currency.money import to_decimal
+from auspex.models.common import utc_now
+from auspex.models.company_overview import CompanyOverviewSnapshot
 from auspex.providers.base import FxRateDTO, PriceBarDTO
+from auspex.providers.company_overview import build_company_overview, needs_income_statement
 from auspex.providers.rate_limit import TokenBucket
 
 # Alpha Vantage's free tier is 5 requests/minute; the standard tier is higher.
@@ -83,6 +86,25 @@ class AlphaVantageProvider:
                 continue
             bars.append(self._to_price_dto(ticker, session_date, row))
         return sorted(bars, key=lambda b: b.session_date)
+
+    async def get_company_overview(
+        self,
+        security_id: str,
+        ticker: str,
+        previous: CompanyOverviewSnapshot | None = None,
+    ) -> CompanyOverviewSnapshot:
+        payload = await self._get({"function": "OVERVIEW", "symbol": ticker})
+        income_statement = None
+        if payload.get("Symbol") == ticker and needs_income_statement(payload, previous):
+            income_statement = await self._get({"function": "INCOME_STATEMENT", "symbol": ticker})
+        return build_company_overview(
+            payload,
+            security_id=security_id,
+            ticker=ticker,
+            retrieved_at=utc_now(),
+            income_statement=income_statement,
+            previous=previous,
+        )
 
     @staticmethod
     def _to_price_dto(ticker: str, session_date: date, row: dict) -> PriceBarDTO:

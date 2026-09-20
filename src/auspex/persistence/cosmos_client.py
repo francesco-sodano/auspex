@@ -17,6 +17,7 @@ CONTAINER_PARTITION_KEYS: dict[str, str] = {
     "narratives": "/cache_key",
     "market_daily": "/security_id",
     "fundamentals": "/security_id",
+    "company_overviews": "/security_id",
     "scores": "/security_id",
     "leg_changes": "/security_id",
     "recommendations": "/user_id",

@@ -1,4 +1,4 @@
-"""Unit tests for the Alpha Vantage price/FX provider."""
+"""Unit tests for the Alpha Vantage price, FX and company overview provider."""
 
 from __future__ import annotations
 
@@ -162,3 +162,87 @@ class TestErrorHandling:
         provider = make_provider({"Information": "This endpoint requires a premium plan"})
         with pytest.raises(ValueError, match="Alpha Vantage:"):
             await provider.get_daily_prices("NVDA", since=date(2026, 1, 1))
+
+
+class TestGetCompanyOverview:
+    @pytest.mark.asyncio
+    async def test_fetches_statements_only_when_currency_needs_verifying(self) -> None:
+        overview = {
+            "Symbol": "ASML",
+            "Currency": "USD",
+            "LatestQuarter": "2026-06-30",
+            "RevenueTTM": "400",
+            "GrossProfitTTM": "200",
+            "PERatio": "57.81",
+        }
+        reports = [
+            {
+                "fiscalDateEnding": period,
+                "reportedCurrency": "EUR",
+                "totalRevenue": "100",
+                "grossProfit": "50",
+            }
+            for period in ("2026-06-30", "2026-03-31", "2025-12-31", "2025-09-30")
+        ]
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            function = request.url.params["function"]
+            calls.append(function)
+            assert request.url.params["symbol"] == "ASML"
+            assert request.url.params["apikey"] == "test-key"
+            if function == "OVERVIEW":
+                return httpx.Response(200, json=overview)
+            assert function == "INCOME_STATEMENT"
+            return httpx.Response(200, json={"symbol": "ASML", "quarterlyReports": reports, "annualReports": []})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = AlphaVantageProvider(
+                base_url="https://www.alphavantage.co",
+                api_key="test-key",
+                client=client,
+                rate_limit_per_second=1000,
+            )
+            first = await provider.get_company_overview("asml", "ASML")
+            assert first.quote_currency == "USD"
+            assert first.financial_currency == "EUR"
+            assert calls == ["OVERVIEW", "INCOME_STATEMENT"]
+
+            overview["PERatio"] = "58.2"
+            second = await provider.get_company_overview("asml", "ASML", previous=first)
+            assert second.metrics["PERatio"] == "58.2"
+            assert second.financial_currency == "EUR"
+            assert second.retrieved_at >= first.retrieved_at
+            assert calls == ["OVERVIEW", "INCOME_STATEMENT", "OVERVIEW"]
+
+            overview["RevenueTTM"] = "404"
+            reports[0]["totalRevenue"] = "104"
+            third = await provider.get_company_overview("asml", "ASML", previous=second)
+            assert third.metrics["RevenueTTM"] == "404"
+            assert third.financial_currency == "EUR"
+            assert calls == ["OVERVIEW", "INCOME_STATEMENT", "OVERVIEW", "OVERVIEW", "INCOME_STATEMENT"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {},
+            {"Symbol": "SAP"},
+            {"Information": "This endpoint requires a premium plan"},
+            {"Note": "Request limit exceeded"},
+        ],
+    )
+    async def test_rejects_invalid_overview_without_fetching_statements(self, payload: dict) -> None:
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.url.params["function"])
+            return httpx.Response(200, json=payload)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = AlphaVantageProvider(
+                base_url="https://www.alphavantage.co", api_key="test-key", client=client
+            )
+            with pytest.raises(ValueError):
+                await provider.get_company_overview("asml", "ASML")
+        assert calls == ["OVERVIEW"]

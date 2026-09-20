@@ -58,6 +58,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     nightly_parser.add_argument("--date", type=str, default=None, help="YYYY-MM-DD, defaults to today (UTC)")
 
+    overview_parser = subparsers.add_parser(
+        "refresh-company-overviews", help="refresh current provider fundamentals without replaying scores"
+    )
+    overview_parser.add_argument("--ticker", action="append", default=[], help="limit refresh to a configured ticker")
+    overview_parser.add_argument(
+        "--force", action="store_true", help="refresh even when the snapshot is less than 24h old"
+    )
+
     perf_parser = subparsers.add_parser(
         "performance", help="run the weekly self-measurement job (arc42 §5.8, job-auspex-performance)"
     )
@@ -224,6 +232,7 @@ async def _run_pipeline_command(as_of_date: date) -> int:
         load_xbrl_concepts,
     )
     from auspex.models.common import utc_now
+    from auspex.models.company_overview import CompanyOverviewSnapshot
     from auspex.models.config_version import ConfigVersion
     from auspex.models.policy import Recommendation, RecommendationDisposition
     from auspex.models.portfolio import PortfolioProjection
@@ -385,6 +394,7 @@ async def _run_pipeline_command(as_of_date: date) -> int:
     providers = PipelineProviders(
         price_provider=default_providers.price_and_fx,
         fx_provider=default_providers.price_and_fx,
+        company_overview_provider=default_providers.price_and_fx,
         news_provider=default_providers.news,
         edgar_client=default_providers.edgar,
         openai_client=openai_client,
@@ -402,6 +412,7 @@ async def _run_pipeline_command(as_of_date: date) -> int:
         price_sink=CosmosPriceSink(cosmos),
         fx_sink=CosmosFxSink(cosmos),
         fundamental_sink=CosmosFundamentalSink(cosmos),
+        company_overview_repo=CosmosRepository(cosmos, "company_overviews", CompanyOverviewSnapshot),
         blob_sink=blob,
         watermarks=CosmosWatermarkStore(cosmos),
         channel_a_sink=CosmosChannelAExtractionSink(cosmos),
@@ -1411,6 +1422,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "nightly":
         return asyncio.run(_run_pipeline_command(_parse_date(args.date)))
+    if args.command == "refresh-company-overviews":
+        from auspex.cli.company_overviews import refresh_company_overviews_command
+
+        return asyncio.run(refresh_company_overviews_command(args.ticker, force=args.force))
     if args.command == "bootstrap":
         return asyncio.run(_bootstrap_command())
     if args.command == "bootstrap-recover":

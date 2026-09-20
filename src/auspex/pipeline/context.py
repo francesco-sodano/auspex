@@ -14,6 +14,7 @@ from decimal import Decimal
 from typing import ClassVar
 
 from auspex.collectors.base import BlobSink, DocumentSink, FundamentalSink, FxSink, PriceSink, WatermarkStore
+from auspex.collectors.company_overview_collector import CompanyOverviewProvider, CompanyOverviewRepository
 from auspex.config.loader import Universe
 from auspex.extraction.channel_a import ChannelAExtractionSink
 from auspex.extraction.channel_b import ChannelBDigestSink
@@ -27,7 +28,7 @@ from auspex.settings import Settings, get_settings
 #: Only used by hand-built contexts; production resolves the real budgets from
 #: configuration. Kept in step with ``Settings.pipeline_hard_timeout_minutes``
 #: and ``config/policy.yaml``'s ``pipeline.hard_timeout_minutes``.
-DEFAULT_HARD_TIMEOUT_MINUTES = 45
+DEFAULT_HARD_TIMEOUT_MINUTES = 90
 
 
 def _resolve_pipeline_minutes(
@@ -115,6 +116,7 @@ class PipelineRepos:
     config_version_repo: object | None = None
     portfolio_projection_repo: object | None = None
     user_settings_repo: object | None = None
+    company_overview_repo: CompanyOverviewRepository | None = None
 
 
 @dataclass
@@ -124,6 +126,7 @@ class PipelineProviders:
     news_provider: NewsProvider | None = None
     edgar_client: EdgarClient | None = None
     openai_client: AzureOpenAIClient | None = None
+    company_overview_provider: CompanyOverviewProvider | None = None
     portfolio_reader: PortfolioPort | None = None
     """Read-only binding to the portfolio ledger (arc42 §5.7).
     Auspex only ever calls `read_snapshot` through this — never a write."""

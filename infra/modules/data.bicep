@@ -33,6 +33,10 @@ var containers = [
     partitionKey: '/security_id'
   }
   {
+    name: 'company_overviews'
+    partitionKey: '/security_id'
+  }
+  {
     name: 'scores'
     partitionKey: '/security_id'
   }

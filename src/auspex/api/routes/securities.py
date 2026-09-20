@@ -21,16 +21,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from auspex.api.auth import AuthenticatedUser, get_current_user
 from auspex.api.deps import (
-    get_fundamental_repo,
+    get_company_overview_repo,
     get_price_sink,
     get_recommendation_repo,
     get_score_repo,
     get_universe,
 )
 from auspex.api.explanations import leg_availability_explanation, score_reasoning
+from auspex.api.fundamentals import provider_fundamentals
 from auspex.api.repos import get_digest_repo, get_document_repo
 from auspex.api.schemas import (
-    FundamentalMetricOut,
     LegDetail,
     SecurityDocumentOut,
     SecurityHistoryPoint,
@@ -40,39 +40,20 @@ from auspex.api.schemas import (
     SecuritySummaryWithProfile,
 )
 from auspex.api.viewmodels import build_recommendation_out
-from auspex.config.loader import Universe, load_xbrl_concepts
+from auspex.config.loader import Universe
 from auspex.extraction.relevance import news_is_relevant as _news_is_relevant
+from auspex.models.common import utc_now
 from auspex.models.document import Document
 from auspex.models.enums import DocumentType, LegName
 from auspex.models.extraction import ChannelBDigest
-from auspex.models.fundamentals import FundamentalSnapshot
 from auspex.models.policy import Recommendation
 from auspex.models.scoring import ScoreSnapshot
 from auspex.models.security import Security
 from auspex.persistence.repositories import CosmosPriceSink, CosmosRepository
-from auspex.pipeline.feature_builder import (
-    build_fundamental_health_inputs,
-    build_valuation_metrics,
-)
 from auspex.scoring.normalize import percentile_rank
 from auspex.source_links import document_source_url
 
 router = APIRouter(prefix="/securities", tags=["securities"])
-
-
-def _format_pct(value: Decimal | None) -> str | None:
-    return f"{(value * Decimal(100)):.1f}%" if value is not None else None
-
-
-def _format_money(value: str | None, currency: str) -> str | None:
-    if value is None:
-        return None
-    amount = Decimal(value)
-    if abs(amount) >= Decimal("1000000000"):
-        return f"{currency} {amount / Decimal('1000000000'):.2f}B"
-    if abs(amount) >= Decimal("1000000"):
-        return f"{currency} {amount / Decimal('1000000'):.1f}M"
-    return f"{currency} {amount:,.0f}"
 
 
 def _compact_recap(value: str, max_chars: int = 480) -> str:
@@ -189,105 +170,6 @@ def _business_recap(
         f"{coverage_pct:.0f}% of the applicable research areas. {package_text}"
     )
     return recap
-
-
-def _fundamentals(
-    rows: list[FundamentalSnapshot],
-    as_of: date,
-    current_price: Decimal | None,
-) -> list[FundamentalMetricOut]:
-    config = load_xbrl_concepts()
-    inputs = build_fundamental_health_inputs(rows, config, Decimal("0.21"), as_of)
-    facts = [fact for row in rows for fact in row.facts if fact.filed <= as_of]
-    latest_end = max((fact.end for fact in facts), default=None)
-    revenue_aliases = set(config["concepts"]["revenues"])
-    revenue_facts = sorted(
-        (fact for fact in facts if fact.concept in revenue_aliases),
-        key=lambda fact: (fact.end, fact.filed),
-    )
-    latest_revenue_fact = revenue_facts[-1] if revenue_facts else None
-    latest_revenue = latest_revenue_fact.value if latest_revenue_fact else None
-    revenue_currency = (
-        latest_revenue_fact.unit
-        if latest_revenue_fact is not None
-        and len(latest_revenue_fact.unit) == 3
-        and latest_revenue_fact.unit.isalpha()
-        else "USD"
-    )
-    shares_aliases = set(config["concepts"]["shares_outstanding"])
-    share_facts = sorted(
-        (
-            fact
-            for fact in facts
-            if fact.concept in shares_aliases and fact.unit == "shares"
-        ),
-        key=lambda fact: (fact.end, fact.filed),
-    )
-    shares = Decimal(share_facts[-1].value) if share_facts else None
-    market_cap = (
-        current_price * shares
-        if current_price is not None and shares is not None
-        else None
-    )
-    valuation = build_valuation_metrics(market_cap, rows, config, as_of).metrics
-    eps_aliases = set(config["concepts"]["diluted_eps"])
-    annual_eps = sorted(
-        (
-            fact
-            for fact in facts
-            if (
-                fact.concept in eps_aliases
-                and fact.fp == "FY"
-                and fact.unit == "USD/shares"
-            )
-        ),
-        key=lambda fact: (fact.end, fact.filed),
-    )
-    latest_eps = Decimal(annual_eps[-1].value) if annual_eps else None
-    pe_ratio = (
-        current_price / latest_eps
-        if current_price is not None and latest_eps is not None and latest_eps > 0
-        else None
-    )
-    return [
-        FundamentalMetricOut(
-            label="Latest revenue",
-            value=_format_money(latest_revenue, revenue_currency),
-            period_end=latest_revenue_fact.end if latest_revenue_fact else latest_end,
-        ),
-        FundamentalMetricOut(
-            label="Revenue growth YoY",
-            value=_format_pct(inputs.revenue_growth_yoy),
-            period_end=latest_end,
-        ),
-        FundamentalMetricOut(
-            label="Gross-margin trend",
-            value=_format_pct(inputs.gross_margin_trend_slope),
-            period_end=latest_end,
-        ),
-        FundamentalMetricOut(label="FCF margin", value=_format_pct(inputs.fcf_margin), period_end=latest_end),
-        FundamentalMetricOut(
-            label="Net cash / assets",
-            value=_format_pct(inputs.net_cash_ratio),
-            period_end=latest_end,
-        ),
-        FundamentalMetricOut(label="ROIC", value=_format_pct(inputs.roic), period_end=latest_end),
-        FundamentalMetricOut(
-            label="P / E (latest FY)",
-            value=f"{pe_ratio:.1f}x" if pe_ratio is not None else None,
-            period_end=annual_eps[-1].end if annual_eps else latest_end,
-        ),
-        FundamentalMetricOut(
-            label="EV / Sales",
-            value=f"{valuation.ev_sales:.1f}x" if valuation.ev_sales is not None else None,
-            period_end=latest_end,
-        ),
-        FundamentalMetricOut(
-            label="FCF yield",
-            value=_format_pct(valuation.fcf_yield),
-            period_end=latest_end,
-        ),
-    ]
 
 
 def _leg_scores(
@@ -489,7 +371,7 @@ async def get_security(
     recommendation_repo: CosmosRepository = Depends(get_recommendation_repo),
     document_repo: CosmosRepository = Depends(get_document_repo),
     digest_repo: CosmosRepository = Depends(get_digest_repo),
-    fundamental_repo: CosmosRepository = Depends(get_fundamental_repo),
+    overview_repo: CosmosRepository = Depends(get_company_overview_repo),
     price_sink: CosmosPriceSink = Depends(get_price_sink),
 ) -> SecurityPackage:
     security = universe.by_id().get(security_id)
@@ -628,10 +510,8 @@ async def get_security(
         if current_price is not None and prior_price not in (None, Decimal(0))
         else None
     )
-    fundamental_rows = await fundamental_repo.query(
-        query="SELECT * FROM c WHERE c.security_id=@security_id",
-        parameters=[{"name": "@security_id", "value": security_id}],
-        partition_key=security_id,
+    fundamentals, fundamentals_context = provider_fundamentals(
+        await overview_repo.get(security_id, partition_key=security_id), now=utc_now()
     )
     prior_score = next(
         (row for row in reversed(history_rows) if row.as_of_date < score.as_of_date),
@@ -652,11 +532,8 @@ async def get_security(
             SecurityPricePoint(date=row.session_date, close=row.close_adjusted)
             for row in price_rows
         ],
-        fundamentals=_fundamentals(
-            fundamental_rows,
-            score.as_of_date,
-            current_price,
-        ),
+        fundamentals=fundamentals,
+        fundamentals_context=fundamentals_context,
         score_change=(
             score.percentile - prior_score.percentile
             if score.percentile is not None

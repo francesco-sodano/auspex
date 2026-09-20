@@ -43,11 +43,40 @@ the decision authority.
 - Provides grounded company analysis, evidence, filings, news and conversation.
   Quotations shown to a user are verified verbatim against the stored source
   section before they are served.
+- Displays Alpha Vantage's ready-calculated current fundamentals with financial
+  period, retrieval time and availability labels. These snapshots are separate
+  from the point-in-time SEC inputs used by the six-leg engine.
 - Measures score and recommendation performance over time.
 - Reports confidence intervals, effective sample size, robust/cost-adjusted
   spreads, turnover, drawdown, and benchmark comparisons.
 
 ## Research logic
+
+### Company overview versus scoring inputs
+
+The **Main fundamentals** panel uses the existing provider's Company Overview:
+revenue and gross profit (TTM), quarterly revenue growth versus the prior year,
+profit/operating margins, return on equity, trailing P/E, EV/revenue and
+EV/EBITDA. TTM means trailing twelve months. Return on equity is not relabelled
+as Auspex's custom ROIC, and a reported gross profit is not a margin trend.
+
+Quote currency is not assumed to be financial-statement currency. For example,
+ASML's quote is in USD while its revenue/gross-profit figures are in EUR.
+Currency is confirmed against the provider's matching statements; unverified
+amounts remain unavailable with a reason. Source ratios are not recalculated.
+
+Current snapshots refresh during the normal nightly collection, using the
+existing rate-limited provider and Key Vault credential. For an initial fill or
+targeted repair, run `auspex refresh-company-overviews` (optional repeatable
+`--ticker` and `--force`). Completed snapshots younger than 24 hours are reused.
+An unsuccessful refresh retains the last successful snapshot; the API explicitly
+flags snapshots older than 48 hours. The nightly budget is 90 minutes overall
+and 45 minutes per step to accommodate the provider's conservative rate limit.
+
+These are current provider snapshots, not historical observations. They are
+stored in `company_overviews`, never injected into past scores, and omitted
+from historical Discussion queries when they were retrieved after the requested
+date. The custom six-leg inputs/formulas remain in the scoring layer.
 
 ### Six scoring legs
 

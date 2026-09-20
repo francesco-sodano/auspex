@@ -302,6 +302,7 @@ The authoritative container/partition declarations are in
 | Container group | Partition key | Typical access |
 | --- | --- | --- |
 | `securities`, `documents`, `extractions`, `digests`, `market_daily`, `fundamentals`, `scores`, `leg_changes` | `/security_id` | Issuer-local evidence/history; bounded cross-issuer research where required |
+| `company_overviews` | `/security_id` | One current provider-calculated overview per issuer; point reads, separate from scored history |
 | `narratives` | `/cache_key` | Cached prose for an exact input identity |
 | `recommendations`, `recommendation_dispositions`, `portfolio_projection`, `conversations`, `user_settings`, `user_performance` | `/user_id` | Authenticated private-user reads/writes |
 | `app_users`, `onboarding`, `deletion_jobs`, `audit_events` | `/user_id` | Lifecycle and user-specific operational state |
@@ -373,7 +374,7 @@ The authoritative step list is
 | `COLLECT_FILINGS` | EDGAR submissions and primary filing documents | Blob content, document metadata, new document ids |
 | `COLLECT_INSIDERS` | Domestic Form 4 filings | Parsed non-derivative insider transactions attached to documents |
 | `COLLECT_NEWS` | Company-news provider | Headline/summary records and publication watermarks |
-| `COLLECT_FUNDAMENTALS` | Companyfacts for relevant new accessions | Accession-grouped XBRL snapshots |
+| `COLLECT_FUNDAMENTALS` | Companyfacts for relevant new accessions plus due current provider overviews | Separate SEC snapshots and company_overviews; current overview never feeds raw legs |
 | `EXTRACT_CHANNEL_A` | Supported, relevant new documents | Grounded qualitative scoring interpretations |
 | `EXTRACT_CHANNEL_B` | Same source material and prior comparable filing | Explanation digests and comparative records |
 | `COMPUTE_RAW_LEGS` | Eligible interpretations, documents, facts, prices and FX | `SecurityScoringInput` and evidence contexts |
@@ -392,6 +393,11 @@ The three private steps are contiguous. Shared ingestion and inference are not
 repeated for every user. `derive_for_user` removes private scratch state while
 sharing the research result by reference. Per-user failures are reported
 without lending another user's portfolio or settings to the failed stage.
+
+The production whole-run/step budgets are 90/45 minutes. This includes daily
+overview calls under the existing conservative provider limit; the job's
+platform timeout remains a separate outer bound. Historical replay does not
+perform current-overview collection.
 
 ### Checkpoints, deadlines, and what resume does not mean
 
@@ -1220,6 +1226,66 @@ An unavailable URL remains a plain source label; it is not converted into
 to the accession's official document list, not directly to an invented quote
 anchor. Live publisher availability and bot/region restrictions are separate
 from the URL's structural correctness.
+
+### Current provider fundamentals
+
+The Main fundamentals panel no longer re-derives standard overview ratios from
+the engine's SEC fact selection. It displays the existing Alpha Vantage
+Company Overview fields, with truthful labels:
+
+| Provider field | Display |
+| --- | --- |
+| `RevenueTTM`, `GrossProfitTTM` | Revenue and gross profit over trailing twelve months |
+| `QuarterlyRevenueGrowthYOY` | Latest-quarter revenue growth versus that quarter a year earlier |
+| `OperatingMarginTTM`, `ProfitMargin` | Provider operating and net-profit margins |
+| `ReturnOnEquityTTM` | Return on equity, not the custom ROIC estimate |
+| `PERatio`, `EVToRevenue`, `EVToEBITDA` | Provider trailing P/E and enterprise-value multiples |
+
+[CompanyOverviewSnapshot](../src/auspex/models/company_overview.py) is stored
+under `id=security_id` in `company_overviews`. The timestamp means when Auspex
+retrieved a current snapshot, not when the market first knew every field. The
+snapshot includes quote currency, separately verified financial currency,
+latest-quarter metadata, finite decimal-string metrics and per-field
+unavailability reasons.
+
+[providers/company_overview.py](../src/auspex/providers/company_overview.py)
+validates issuer identity and numerical fields. It never assumes the quote
+currency applies to revenue: ASML's OVERVIEW says `Currency=USD`, but its
+TTM revenue/gross-profit amounts reconcile to EUR income statements. The
+statement comparison verifies units; it does not replace the provider's
+ratio calculations. When financial period and monetary values are unchanged,
+previously verified currency can be reused without another statement request.
+
+[AlphaVantageProvider](../src/auspex/providers/alpha_vantage.py) shares its
+existing credential and token bucket across price, FX and overview requests.
+[company_overview_collector.py](../src/auspex/collectors/company_overview_collector.py)
+skips successful snapshots younger than 24 hours, upserts current results,
+retains the previous result on failure and logs issuer/error type without
+leaking credential-bearing HTTP URLs. A current-date nightly includes the
+refresh in `COLLECT_FUNDAMENTALS`; historical replay does not call it.
+
+The standalone [refresh command](../src/auspex/cli/company_overviews.py),
+`auspex refresh-company-overviews [--ticker ASML] [--force]`, initializes or
+repairs the provider cache without scores, user portfolios or LLM work.
+
+[api/fundamentals.py](../src/auspex/api/fundamentals.py) formats this snapshot
+once for both Analysis and Discussion. `SecurityPackage.fundamentals_context`
+states source, retrieval time, latest financial quarter, availability and
+the distinction from scoring inputs. Each metric has its own definition or
+missing-data explanation. Results older than 48 hours are shown as stale rather
+than silently relabelled current. A current snapshot retrieved after a requested
+historical date is not included in that answer.
+
+Custom gross-margin trend, FCF margin, net cash and ROIC remain distinct
+deterministic scoring inputs; they are not silently replaced by vendor ROE or
+TTM ratios. The previously documented accounting-period limitations of the
+engine still apply there. This overview integration does not backfill or
+rewrite historical scores.
+
+Regression coverage:
+[provider parser](../tests/unit/test_company_overview.py),
+[collection/read-model integration](../tests/unit/test_provider_fundamentals_integration.py),
+and [Analysis contract](../tests/unit/test_api_securities.py).
 
 ### Shared AI narrative
 

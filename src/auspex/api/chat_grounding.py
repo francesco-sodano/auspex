@@ -4,20 +4,18 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from decimal import Decimal
 from functools import lru_cache
 
 from auspex.api.deps import (
-    get_fundamental_repo,
+    get_company_overview_repo,
     get_performance_repo,
     get_portfolio_projection_repo,
-    get_price_sink,
     get_recommendation_repo,
     get_score_repo,
     get_universe,
 )
+from auspex.api.fundamentals import provider_fundamentals
 from auspex.api.repos import get_digest_repo, get_document_repo, get_leg_change_repo
-from auspex.api.routes.securities import _fundamentals
 from auspex.assistant.retrieval import DataClassRepos, RetrievalFetcher, RetrievedItem
 from auspex.config.loader import Universe
 from auspex.models.common import AuspexModel, utc_now
@@ -301,43 +299,26 @@ class ChatGrounding:
         end = plan.date_range_end or date.today()
         items: list[RetrievedItem] = []
         for security_id in ids:
-            rows = await get_fundamental_repo().query(
-                query=(
-                    "SELECT TOP 12 * FROM c WHERE c.security_id=@security_id "
-                    "AND c.filed<=@end ORDER BY c.filed DESC"
-                ),
-                parameters=[
-                    {"name": "@security_id", "value": security_id},
-                    {"name": "@end", "value": end.isoformat()},
-                ],
-                partition_key=security_id,
-            )
-            if not rows:
-                continue
-            prices = await get_price_sink().history_as_of(security_id, end, 1)
-            current_price = (
-                Decimal(prices[-1].close_adjusted) if prices else None
-            )
+            snapshot = await get_company_overview_repo().get(security_id, partition_key=security_id)
+            metrics, context = provider_fundamentals(snapshot, now=utc_now(), requested_date=end)
             security = self._security_by_id[security_id]
             items.append(
-                self._item(
-                    "fundamentals",
-                    rows[0],
-                    {
+                RetrievedItem(
+                    data_class="fundamentals",
+                    security_id=security_id,
+                    document_id=f"fundamentals:{security.ticker}:{end.isoformat()}",
+                    retrieved_at=utc_now(),
+                    content={
                         "security_id": security_id,
                         "ticker": security.ticker,
                         "company_name": security.name,
-                        "as_of_date": end.isoformat(),
-                        "metrics": [
-                            metric.model_dump(mode="json")
-                            for metric in _fundamentals(
-                                rows,
-                                end,
-                                current_price,
-                            )
-                        ],
+                        "as_of_date": (
+                            context.retrieved_at.date().isoformat() if context.retrieved_at else end.isoformat()
+                        ),
+                        "provider_context": context.model_dump(mode="json"),
+                        "metrics": [metric.model_dump(mode="json") for metric in metrics],
                     },
-                    len(items),
+                    relevance_rank=len(items),
                 )
             )
         return items

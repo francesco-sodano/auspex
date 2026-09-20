@@ -28,6 +28,7 @@ from auspex.api.auth import AuthenticatedUser, get_current_user
 from auspex.config.loader import Universe, load_universe
 from auspex.models.app_user import AdminAuthorityBinding, AppUser, AppUserSummary
 from auspex.models.audit import UserAuditEvent
+from auspex.models.company_overview import CompanyOverviewSnapshot
 from auspex.models.deletion import DeletionJob
 from auspex.models.fundamentals import FundamentalSnapshot
 from auspex.models.onboarding import OnboardingState
@@ -61,6 +62,11 @@ def get_score_repo() -> CosmosRepository[ScoreSnapshot]:
 @lru_cache
 def get_fundamental_repo() -> CosmosRepository[FundamentalSnapshot]:
     return CosmosRepository(get_cosmos_context(), "fundamentals", FundamentalSnapshot)
+
+
+@lru_cache
+def get_company_overview_repo() -> CosmosRepository[CompanyOverviewSnapshot]:
+    return CosmosRepository(get_cosmos_context(), "company_overviews", CompanyOverviewSnapshot)
 
 
 @lru_cache

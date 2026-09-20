@@ -965,7 +965,7 @@ environment variable when an operator actually set it (read from
 `Settings.model_fields_set`, so setting it *to* the default still wins), then
 `config/policy.yaml`'s `pipeline.hard_timeout_minutes` /
 `pipeline.step_timeout_minutes` (versioned and fingerprinted with the rest of
-the bundle), then the `Settings` default — 60 and 30 minutes respectively.
+the bundle), then the `Settings` default — 90 and 45 minutes respectively.
 
 `PipelineContext.step_budget_seconds(elapsed)` returns
 `max(0, min(step_ceiling, run_remaining))`, and `run_step_bounded` wraps each
@@ -988,7 +988,7 @@ the seven scoring-bundle YAMLs plus `universe.yaml`; `load_universe` also reads
 | `config/universe.yaml` | 104 securities: `ticker`, `cik`, `name`, `cohort`, `filer_profile`, `investable` |
 | `config/cohorts.yaml` | 8 cohorts under 4 super-cohorts (`semiconductors`, `ai-infrastructure`, `ai-software-and-emerging`, `digital-platforms`) |
 | `config/weights.yaml` | domestic 0.20/0.15/0.10/0.20/0.20/0.15; FPI 0.25/0.1875/0.125/0.25/0.1875; `recency_half_life_days: 90`; `roic_tax_rate: 0.21`; `winsorize_sigma: 2.5`; document authority 10-K/20-F 1.0, 10-Q 0.9, S-1 0.8, 8-K/6-K 0.7, news 0.4; `valuation_fx_pairs: [USDCHF, EURUSD]` |
-| `config/policy.yaml` | gate thresholds, three risk profiles, allocation objective limits, horizon multipliers, assertions, pipeline timings (`hard_timeout_minutes: 60`, `step_timeout_minutes: 30`, `target_minutes: 25`, crons) |
+| `config/policy.yaml` | gate thresholds, three risk profiles, allocation objective limits, horizon multipliers, assertions, pipeline timings (`hard_timeout_minutes: 90`, `step_timeout_minutes: 45`, `target_minutes: 25`, crons) |
 | `config/label_mappings.yaml` | enum → numeric mappings the model never touches |
 | `config/taxonomy.yaml` | `taxonomy_version: themes-2026-08`, 15 themes, risk categories, narrative claim types |
 | `config/xbrl_concepts.yaml` | ranked alias lists per concept (first present wins) |
@@ -1728,6 +1728,25 @@ and no fold/purge/embargo structure is implemented. The separate risk-aware
 allocation shadow is not evaluated by this score-variant gate.
 
 ### A.17 The LLM boundary
+
+Current company-overview figures are a separate non-LLM read model.
+`models/company_overview.py`, `providers/company_overview.py` and
+`collectors/company_overview_collector.py` retain provider-calculated figures,
+verified financial currency, latest-quarter metadata and retrieval time in the
+`company_overviews` container (`/security_id`, one current row per issuer).
+The API/Discussion share `api/fundamentals.py`; unavailable values have explicit
+reasons and snapshots older than 48 hours are labelled stale. Standard ROE,
+TTM ratios and quarterly YoY growth are not renamed as custom engine metrics.
+
+`AlphaVantageProvider.get_company_overview` fetches OVERVIEW and, only when
+necessary for currency validation, INCOME_STATEMENT. The reporting currency is
+checked by reconciling matching statement totals, not inferred from the quote
+Currency. Ratio values remain those supplied by the provider.
+`refresh-company-overviews` can fill the cache independently; current-date
+nightly collection refreshes snapshots older than 24 hours. The source shares
+the existing provider rate limiter and secret; the API does not call the provider
+or read that secret. Historical scoring and SEC snapshots are unchanged, and
+historical chat never backdates a current overview.
 
 Prompts are configuration, loaded verbatim by
 `src/auspex/pipeline/prompts.py::load_prompt` from `AUSPEX_PROMPTS_DIR`

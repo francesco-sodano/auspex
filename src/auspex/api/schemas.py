@@ -151,6 +151,15 @@ class FundamentalMetricOut(AuspexModel):
     label: str
     value: str | None = None
     period_end: date | None = None
+    detail: str | None = None
+
+
+class FundamentalsContext(AuspexModel):
+    source: str = "Alpha Vantage"
+    retrieved_at: datetime | None = None
+    latest_quarter: date | None = None
+    status: Literal["available", "stale", "unavailable"] = "unavailable"
+    note: str
 
 
 class SecurityPricePoint(AuspexModel):
@@ -178,6 +187,7 @@ class SecurityPackage(AuspexModel):
     price_change_pct: str | None = None
     price_history: list[SecurityPricePoint] = Field(default_factory=list)
     fundamentals: list[FundamentalMetricOut] = Field(default_factory=list)
+    fundamentals_context: FundamentalsContext
     score_change: int | None = None
     score_reasoning: str
     news: list[SecurityDocumentOut] = Field(default_factory=list)

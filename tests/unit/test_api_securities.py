@@ -8,18 +8,19 @@ values the SPA actually reads (`Discussion.tsx`).
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from decimal import Decimal
 
 from auspex.api.auth import AuthenticatedUser, get_current_user
 from auspex.api.deps import (
-    get_fundamental_repo,
+    get_company_overview_repo,
     get_price_sink,
     get_recommendation_repo,
     get_score_repo,
     get_universe,
 )
+from auspex.api.fundamentals import provider_fundamentals
 from auspex.api.repos import get_digest_repo, get_document_repo
 from auspex.api.routes import securities
+from auspex.models.company_overview import CompanyOverviewSnapshot
 from auspex.models.document import Document, InsiderTransaction
 from auspex.models.enums import (
     CohortConfidence,
@@ -107,7 +108,7 @@ def _default_overrides(universe=None):
         get_recommendation_repo: lambda: FakeCosmosRepository(),
         get_document_repo: lambda: FakeCosmosRepository(),
         get_digest_repo: lambda: FakeCosmosRepository(),
-        get_fundamental_repo: lambda: FakeCosmosRepository(),
+        get_company_overview_repo: lambda: FakeCosmosRepository(),
         get_price_sink: lambda: FakePriceSink(),
     }
 
@@ -225,6 +226,7 @@ class TestGetSecurity:
             "price_change_pct",
             "price_history",
             "fundamentals",
+            "fundamentals_context",
             "score_change",
             "score_reasoning",
             "news",
@@ -736,11 +738,39 @@ def test_news_relevance_requires_ticker_or_company_name_in_title() -> None:
 
 
 def test_analysis_exposes_nine_fundamental_slots() -> None:
-    metrics = securities._fundamentals([], date(2026, 8, 8), Decimal("100"))
+    metrics, context = provider_fundamentals(None, now=datetime.now(UTC))
 
     assert len(metrics) == 9
     assert [metric.label for metric in metrics[-3:]] == [
-        "P / E (latest FY)",
-        "EV / Sales",
-        "FCF yield",
+        "P / E (TTM)",
+        "EV / Revenue",
+        "EV / EBITDA",
     ]
+    assert context.status == "unavailable"
+    assert all(metric.detail for metric in metrics)
+
+
+def test_analysis_uses_current_provider_snapshot_not_incomplete_sec_ratios() -> None:
+    retrieved = datetime.now(UTC)
+    snapshot = CompanyOverviewSnapshot(
+        id=SEC_A.id, security_id=SEC_A.id, ticker=SEC_A.ticker, retrieved_at=retrieved,
+        latest_quarter=date(2026, 6, 30), quote_currency="USD", financial_currency="EUR",
+        metrics={"RevenueTTM": "35327500000", "QuarterlyRevenueGrowthYOY": "0.213",
+                 "PERatio": "57.81", "EVToRevenue": "15.26"},
+    )
+    client = _make_client({
+        get_score_repo: lambda: FakeCosmosRepository([_score(SEC_A.id, date(2026, 9, 18))]),
+        get_company_overview_repo: lambda: FakeCosmosRepository([snapshot]),
+    })
+    response = client.get("/api/securities/sec-a")
+    assert response.status_code == 200
+    body = response.json()
+    metrics = {metric["label"]: metric for metric in body["fundamentals"]}
+    assert metrics["Revenue (TTM)"]["value"] == "EUR 35.33B"
+    assert metrics["Revenue growth (quarter YoY)"]["value"] == "21.3%"
+    assert metrics["P / E (TTM)"]["value"] == "57.81x"
+    assert metrics["EV / Revenue"]["value"] == "15.26x"
+    assert body["fundamentals_context"]["latest_quarter"] == "2026-06-30"
+    assert body["fundamentals_context"]["source"] == "Alpha Vantage"
+    assert body["as_of_date"] == "2026-09-18"
+    assert body["security"]["percentile"] == 80

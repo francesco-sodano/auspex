@@ -125,7 +125,14 @@ export type SecurityPackage = {
   current_price_usd: string | null
   price_change_pct: string | null
   price_history: Array<{ date: string; close: string }>
-  fundamentals: Array<{ label: string; value: string | null; period_end: string | null }>
+  fundamentals: Array<{ label: string; value: string | null; period_end: string | null; detail: string | null }>
+  fundamentals_context: {
+    source: string
+    retrieved_at: string | null
+    latest_quarter: string | null
+    status: 'available' | 'stale' | 'unavailable'
+    note: string
+  }
   score_change: number | null
   score_reasoning: string
   news: Array<{
