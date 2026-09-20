@@ -110,6 +110,144 @@ def test_asml_uses_statement_eur_not_overview_usd(overview, statement):
     assert snapshot.unavailable_fields == {}
 
 
+def test_live_sap_revenue_anchor_verifies_eur_without_certifying_gross_total():
+    payload = {
+        "Symbol": "SAP",
+        "Currency": "USD",
+        "LatestQuarter": "2026-06-30",
+        "RevenueTTM": "38192001000",
+        "GrossProfitTTM": "28132000000",
+    }
+    statement = {
+        "symbol": "SAP",
+        "quarterlyReports": [
+            {
+                "fiscalDateEnding": end,
+                "reportedCurrency": "EUR",
+                "totalRevenue": revenue,
+                "grossProfit": gross,
+            }
+            for end, revenue, gross in (
+                ("2026-06-30", "9878000000", "7228000000"),
+                ("2026-03-31", "9555000000", "6973000000"),
+                ("2025-12-31", "9684000000", "6916000000"),
+                ("2025-09-30", "9076000000", "6671000000"),
+            )
+        ],
+    }
+
+    snapshot = build(payload, security_id="sec-sap", ticker="SAP", income_statement=statement)
+
+    assert snapshot.quote_currency == "USD"
+    assert snapshot.financial_currency == "EUR"
+    assert snapshot.metrics["RevenueTTM"] == "38192001000"
+    assert snapshot.metrics["GrossProfitTTM"] == "28132000000"
+    assert "RevenueTTM" not in snapshot.unavailable_fields
+    assert "GrossProfitTTM" not in snapshot.unavailable_fields
+    assert needs_income_statement(payload, snapshot) is False
+    cached = build(payload, security_id="sec-sap", ticker="SAP", previous=snapshot)
+    assert cached.financial_currency == "EUR"
+    assert cached.metrics == snapshot.metrics
+
+
+@pytest.mark.parametrize("annual", [False, True])
+@pytest.mark.parametrize("revenue", ["40000000000", "0"])
+def test_valid_revenue_anchor_mismatch_cannot_fall_back_to_matching_gross(overview, statement, annual, revenue):
+    if annual:
+        overview.update(LatestQuarter="2025-12-31", GrossProfitTTM="17258000000")
+        statement["quarterlyReports"] = []
+    overview["RevenueTTM"] = revenue
+
+    assert_unverified(build(overview, income_statement=statement), "totals do not match")
+
+
+@pytest.mark.parametrize("annual", [False, True])
+@pytest.mark.parametrize("revenue", [None, "N/A", "NaN", "not-a-number", "missing"])
+def test_revenue_unavailable_falls_back_to_gross_without_changing_cache_rules(
+    overview,
+    statement,
+    annual,
+    revenue,
+):
+    if annual:
+        overview.update(LatestQuarter="2025-12-31", GrossProfitTTM="17258000000")
+        statement["quarterlyReports"] = []
+    if revenue == "missing":
+        del overview["RevenueTTM"]
+    else:
+        overview["RevenueTTM"] = revenue
+
+    snapshot = build(overview, income_statement=statement)
+
+    assert snapshot.quote_currency == "USD"
+    assert snapshot.financial_currency == "EUR"
+    assert snapshot.metrics["RevenueTTM"] is None
+    assert snapshot.metrics["GrossProfitTTM"] == overview["GrossProfitTTM"]
+    assert "RevenueTTM" in snapshot.unavailable_fields
+    assert "GrossProfitTTM" not in snapshot.unavailable_fields
+    assert "financial_currency" not in snapshot.unavailable_fields
+    assert needs_income_statement(overview, snapshot) is True
+
+
+@pytest.mark.parametrize("annual", [False, True])
+@pytest.mark.parametrize("gross", ["1", None, "N/A", "NaN"])
+def test_usable_revenue_anchor_does_not_require_statement_gross(overview, statement, annual, gross):
+    if annual:
+        overview.update(LatestQuarter="2025-12-31", RevenueTTM="32667300000", GrossProfitTTM="17258000000")
+        statement["quarterlyReports"] = []
+        statement["annualReports"][0]["grossProfit"] = gross
+    else:
+        statement["quarterlyReports"][0]["grossProfit"] = gross
+
+    snapshot = build(overview, income_statement=statement)
+
+    assert snapshot.financial_currency == "EUR"
+    assert snapshot.metrics["GrossProfitTTM"] == overview["GrossProfitTTM"]
+    assert "GrossProfitTTM" not in snapshot.unavailable_fields
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("reportedCurrency", "USD", "consistent reportedCurrency"),
+        ("reportedCurrency", None, "consistent reportedCurrency"),
+        ("fiscalDateEnding", "2026-06-29", "ending at LatestQuarter"),
+        ("fiscalDateEnding", "2025-12-31", "duplicate"),
+        ("grossProfit", "1", "totals do not match"),
+        ("grossProfit", None, "finite and available"),
+        ("grossProfit", "NaN", "finite and available"),
+    ],
+)
+def test_gross_fallback_requires_matching_totals_period_and_currency(overview, statement, field, value, reason):
+    overview["RevenueTTM"] = None
+    statement["quarterlyReports"][0][field] = value
+
+    assert_unverified(build(overview, income_statement=statement), reason)
+
+
+@pytest.mark.parametrize(("delta", "verified"), [("-0.1", True), ("0.1", True), ("0.1001", False)])
+def test_gross_fallback_keeps_the_same_rounding_tolerance(overview, statement, delta, verified):
+    overview.update(RevenueTTM=None, GrossProfitTTM="1000")
+    for row in statement["quarterlyReports"]:
+        row["grossProfit"] = "250"
+    statement["quarterlyReports"][0]["grossProfit"] = str(Decimal("250") + Decimal(delta))
+
+    snapshot = build(overview, income_statement=statement)
+
+    assert (snapshot.financial_currency == "EUR") is verified
+    assert snapshot.metrics["RevenueTTM"] is None
+    assert snapshot.metrics["GrossProfitTTM"] == "1000"
+
+
+def test_missing_both_monetary_anchors_cannot_infer_currency(overview, statement):
+    overview.update(RevenueTTM=None, GrossProfitTTM=None)
+
+    assert_unverified(
+        build(overview, income_statement=statement),
+        "RevenueTTM or GrossProfitTTM is required",
+    )
+
+
 def test_supported_metric_allowlist_preserves_provider_values(overview, statement):
     expected = (
         "RevenueTTM",
@@ -189,7 +327,6 @@ def test_previous_fiscal_year_is_not_evidence_for_current_ttm(overview, statemen
         ("reportedCurrency", "None", "consistent reportedCurrency"),
         ("reportedCurrency", "US dollars", "consistent reportedCurrency"),
         ("totalRevenue", "33667300000", "totals do not match"),
-        ("grossProfit", "17255000000", "totals do not match"),
         ("fiscalDateEnding", "2026-12-31", "future"),
     ],
 )
@@ -252,9 +389,7 @@ def test_52_53_week_quarters_are_successive(overview, statement):
         (0, "fiscalDateEnding", "not-a-date", "invalid fiscalDateEnding"),
         (0, "fiscalDateEnding", None, "missing"),
         (0, "totalRevenue", "932650000", "totals do not match"),
-        (0, "grossProfit", "503540000", "totals do not match"),
         (0, "totalRevenue", "NaN", "finite and available"),
-        (0, "grossProfit", "Infinity", "finite and available"),
         (0, "totalRevenue", None, "finite and available"),
     ],
 )
@@ -476,8 +611,9 @@ def test_missing_metrics_are_not_derived_from_available_metrics(overview, statem
     assert snapshot.metrics["PERatio"] is None
     assert snapshot.metrics["DilutedEPSTTM"] == "24.08"
     assert snapshot.metrics["TrailingPE"] == "57.81"
-    assert snapshot.financial_currency is None
-    assert "both RevenueTTM and GrossProfitTTM are required" in snapshot.unavailable_fields["financial_currency"]
+    assert snapshot.financial_currency == "EUR"
+    assert snapshot.unavailable_fields["GrossProfitTTM"] == "not supplied by Alpha Vantage"
+    assert "financial_currency" not in snapshot.unavailable_fields
 
 
 @pytest.mark.parametrize("value", ["NaN", "sNaN", "Infinity", "-Infinity", float("nan"), float("inf")])

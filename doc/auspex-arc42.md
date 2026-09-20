@@ -1740,8 +1740,11 @@ TTM ratios and quarterly YoY growth are not renamed as custom engine metrics.
 
 `AlphaVantageProvider.get_company_overview` fetches OVERVIEW and, only when
 necessary for currency validation, INCOME_STATEMENT. The reporting currency is
-checked by reconciling matching statement totals, not inferred from the quote
-Currency. Ratio values remain those supplied by the provider.
+checked against matching-period revenue totals (0.01% tolerance), not inferred
+from the quote Currency. Gross profit is used as a currency anchor only when
+revenue is absent or unusable. A differing gross-profit classification does not
+invalidate a successfully reconciled revenue currency. Figures and ratios remain
+those supplied by the provider; this check verifies units, not accounting totals.
 `refresh-company-overviews` can fill the cache independently; current-date
 nightly collection refreshes snapshots older than 24 hours. The source shares
 the existing provider rate limiter and secret; the API does not call the provider

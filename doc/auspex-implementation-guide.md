@@ -1251,9 +1251,15 @@ unavailability reasons.
 [providers/company_overview.py](../src/auspex/providers/company_overview.py)
 validates issuer identity and numerical fields. It never assumes the quote
 currency applies to revenue: ASML's OVERVIEW says `Currency=USD`, but its
-TTM revenue/gross-profit amounts reconcile to EUR income statements. The
-statement comparison verifies units; it does not replace the provider's
-ratio calculations. When financial period and monetary values are unchanged,
+TTM revenue/gross-profit amounts reconcile to EUR income statements. Revenue
+is the primary currency anchor, with a 0.01% reconciliation tolerance against
+matching-period statements in one currency. Gross profit is a fallback only
+when revenue is absent or unusable; a valid but mismatched revenue amount
+cannot be overridden by a matching gross-profit amount. This avoids discarding
+SAP's verified EUR revenue merely because the provider's overview gross-profit
+total differs from its statement classification. The comparison verifies units,
+not the accuracy of every provider accounting total, and never replaces the
+provider's figures or ratio calculations. When financial period and monetary values are unchanged,
 previously verified currency can be reused without another statement request.
 
 [AlphaVantageProvider](../src/auspex/providers/alpha_vantage.py) shares its

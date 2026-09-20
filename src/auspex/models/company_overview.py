@@ -16,9 +16,10 @@ class CompanyOverviewSnapshot(AuspexModel):
     """One current row in ``company_overviews``, partitioned by ``/security_id``.
 
     Monetary metrics retain the provider's numbers. ``financial_currency`` is
-    independently verified for RevenueTTM/GrossProfitTTM, never inferred from
-    the quote currency. A numeric metric can have an unavailable-field reason
-    when its unit, rather than its value, is unverified.
+    reconciled using RevenueTTM, or GrossProfitTTM when overview revenue is
+    unavailable, never inferred from the quote currency. This verifies the
+    unit, not the provider's accounting totals. A numeric metric can have an
+    unavailable-field reason when its unit, rather than its value, is unverified.
     """
 
     id: str = Field(description="security_id; a refresh replaces the current snapshot")
@@ -29,7 +30,7 @@ class CompanyOverviewSnapshot(AuspexModel):
     quote_currency: str | None = None
     financial_currency: str | None = Field(
         default=None,
-        description="Statement-verified currency of RevenueTTM and GrossProfitTTM only",
+        description="Statement-reconciled currency of RevenueTTM/GrossProfitTTM, not certification of their totals",
     )
     latest_quarter: date | None = Field(
         default=None,

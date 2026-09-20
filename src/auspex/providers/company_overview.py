@@ -1,11 +1,13 @@
 """Parse a fixed set of current Alpha Vantage OVERVIEW metrics without HTTP.
 
-Currency verification compares, but never replaces, provider TTM values.
-Both monetary totals must match within 0.01% of their overview values;
-an overview zero requires an exact zero. Quarterly evidence needs four
-distinct periods ending at LatestQuarter, with 80--100-day intervals to
-allow calendar and 52/53-week fiscal quarters. Alternatively a full annual
-report must end exactly at LatestQuarter and match both totals.
+Currency reconciliation compares, but never replaces or certifies, provider
+TTM values. RevenueTTM is the primary anchor; GrossProfitTTM is used only when
+overview revenue is missing or invalid. The selected anchor must match within
+0.01% of its overview value; zero requires an exact zero. A valid revenue
+mismatch never falls back to gross profit. Quarterly evidence needs four
+distinct periods ending at LatestQuarter, with 80--100-day intervals to allow
+calendar and 52/53-week fiscal quarters. Alternatively a full annual report
+must end exactly at LatestQuarter and match the same anchor.
 
 LatestQuarter describes a reporting period, not when a value became known.
 These snapshots must not be used to reconstruct historical fundamentals.
@@ -199,15 +201,17 @@ def _prove_totals(reports: list[_DatedReport], amounts: dict[str, _ParsedNumber]
     if None in currencies or len(currencies) != 1:
         return _CurrencyProof(None, "selected statements lack one consistent reportedCurrency")
 
-    revenues = [
-        _parse_number(report.payload.get("totalRevenue"), "INCOME_STATEMENT.totalRevenue") for report in reports
+    field, statement_field = (
+        ("RevenueTTM", "totalRevenue") if amounts["RevenueTTM"].value is not None else ("GrossProfitTTM", "grossProfit")
+    )
+    expected = amounts[field].value
+    reported = [
+        _parse_number(report.payload.get(statement_field), f"INCOME_STATEMENT.{statement_field}") for report in reports
     ]
-    profits = [_parse_number(report.payload.get("grossProfit"), "INCOME_STATEMENT.grossProfit") for report in reports]
-    numbers = [amounts[field].value for field in _MONEY_FIELDS] + [item.value for item in revenues + profits]
-    if any(number is None for number in numbers):
-        return _CurrencyProof(None, "both statement revenue and gross profit must be finite and available")
+    if expected is None or any(number.value is None for number in reported):
+        return _CurrencyProof(None, f"{field} and corresponding statement values must be finite and available")
 
-    finite = [number for number in numbers if number is not None]
+    finite = [expected, *(number.value for number in reported if number.value is not None)]
     # Exact addition/subtraction needs the complete exponent span, including
     # cancellation. Bound that work instead of rounding away a zero mismatch.
     precision = max(
@@ -220,12 +224,9 @@ def _prove_totals(reports: list[_DatedReport], amounts: dict[str, _ParsedNumber]
             context.prec = precision
             context.Emax = MAX_EMAX
             context.Emin = MIN_EMIN
-            expected_revenue, expected_profit, *statement_values = finite
-            actual_revenue = sum(statement_values[: len(reports)], Decimal(0))
-            actual_profit = sum(statement_values[len(reports) :], Decimal(0))
-            for actual, expected in ((actual_revenue, expected_revenue), (actual_profit, expected_profit)):
-                if abs(actual - expected) > abs(expected) * _RELATIVE_TOLERANCE:
-                    return _CurrencyProof(None, "statement totals do not match overview TTM values within 0.01%")
+            actual = sum(finite[1:], Decimal(0))
+            if abs(actual - expected) > abs(expected) * _RELATIVE_TOLERANCE:
+                return _CurrencyProof(None, f"statement {field} totals do not match overview within 0.01%")
     except DecimalException:
         return _CurrencyProof(None, "statement comparison exceeds supported decimal range")
     return _CurrencyProof(next(iter(currencies)))
@@ -249,8 +250,8 @@ def _verify_currency(
         return _CurrencyProof(None, "income statement symbol does not match the overview")
     if latest_quarter is None:
         return _CurrencyProof(None, "LatestQuarter is unavailable")
-    if any(amounts[field].value is None for field in _MONEY_FIELDS):
-        return _CurrencyProof(None, "both RevenueTTM and GrossProfitTTM are required for currency verification")
+    if all(amounts[field].value is None for field in _MONEY_FIELDS):
+        return _CurrencyProof(None, "RevenueTTM or GrossProfitTTM is required for currency reconciliation")
 
     quarterly, quarter_error = _report_dates(statement.get("quarterlyReports"), "quarterly", retrieved_on)
     selected = [report for report in quarterly if report.end <= latest_quarter][:4]

@@ -36,8 +36,8 @@ def snapshot():
         latest_quarter=date(2026, 6, 30), quote_currency="USD", financial_currency="EUR",
         metrics={
             "RevenueTTM": "35327500000", "GrossProfitTTM": "18629200000",
-            "QuarterlyRevenueGrowthYOY": "0.213", "OperatingMarginTTM": "0.35",
-            "ProfitMargin": "0.28", "ReturnOnEquityTTM": "0.539", "PERatio": "57.81",
+            "QuarterlyRevenueGrowthYOY": "0.213", "OperatingMarginTTM": "0.371",
+            "ProfitMargin": "0.301", "ReturnOnEquityTTM": "0.539", "PERatio": "57.81",
             "EVToRevenue": "15.26", "EVToEBITDA": "45.87",
         },
     )
@@ -49,6 +49,9 @@ def test_asml_overview_uses_supplied_ratios_and_verified_reporting_currency():
     assert by_label["Revenue (TTM)"].value == "EUR 35.33B"
     assert by_label["Gross profit (TTM)"].value == "EUR 18.63B"
     assert by_label["Revenue growth (quarter YoY)"].value == "21.3%"
+    assert by_label["Operating margin (TTM)"].value == "37.1%"
+    assert by_label["Profit margin (TTM)"].value == "30.1%"
+    assert by_label["Return on equity (TTM)"].value == "53.9%"
     assert by_label["P / E (TTM)"].value == "57.81x"
     assert by_label["EV / Revenue"].value == "15.26x"
     assert by_label["EV / EBITDA"].value == "45.87x"
@@ -103,6 +106,11 @@ async def test_refresh_is_resumable_and_keeps_existing_success_on_provider_failu
     result = await refresh_company_overviews([ASML], provider, repository, clock=lambda: NOW)
     assert result.cached == 1
     assert provider.get_company_overview.await_count == 2
+    assert len(repository.all()) == 1
+    result = await refresh_company_overviews([ASML], provider, repository, force=True, clock=lambda: NOW)
+    assert result.refreshed == 1
+    assert result.cached == 0
+    assert provider.get_company_overview.await_count == 3
     assert len(repository.all()) == 1
 
 
